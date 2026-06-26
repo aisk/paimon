@@ -1,0 +1,19 @@
+[project]
+name = "paimon"
+version = "0.1.0"
+description = "A minimal code agent built on litellm + textual"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.89.4",
+    "textual>=8.2.7",
+]
+
+[project.scripts]
+paimon = "paimon.app:main"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 120
