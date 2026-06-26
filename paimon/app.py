@@ -4,13 +4,14 @@ import asyncio
 import json
 from pathlib import Path
 
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Static, TextArea
 from textual.worker import Worker
 
 from .agent import (
@@ -21,6 +22,30 @@ from .agent import (
     ToolStart,
     TurnEnd,
 )
+
+
+class PromptInput(TextArea):
+    """Multi-line prompt editor. Enter submits; Shift+Enter / Ctrl+J insert a newline."""
+
+    class Submitted(Message):
+        def __init__(self, text: str) -> None:
+            self.text = text
+            super().__init__()
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            text = self.text.strip()
+            if text:
+                self.post_message(self.Submitted(text))
+            return
+        if event.key in ("ctrl+j", "shift+enter"):
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -59,6 +84,8 @@ class PaimonApp(App):
     CSS = """
     #log { height: 1fr; padding: 0 1; }
     #log > Static { margin-bottom: 1; }
+    #prompt { height: auto; max-height: 12; border: round $surface; padding: 0 1; }
+    #prompt:focus { border: round $accent; }
     .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
     .tool-result { color: $text-muted; }
     .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
@@ -81,10 +108,12 @@ class PaimonApp(App):
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
-        yield Input(placeholder="Ask Paimon to do something… (Ctrl+C to quit)")
+        prompt = PromptInput(id="prompt", soft_wrap=True)
+        prompt.border_subtitle = "Enter to send · Ctrl+J for newline · Ctrl+C to quit"
+        yield prompt
 
     def on_mount(self) -> None:
-        self.query_one(Input).focus()
+        self.query_one(PromptInput).focus()
 
     # ---- rendering helpers --------------------------------------------------
 
@@ -105,12 +134,10 @@ class PaimonApp(App):
 
     # ---- input → turn -------------------------------------------------------
 
-    @on(Input.Submitted)
-    def handle_submit(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
-        if not text:
-            return
-        event.input.value = ""
+    @on(PromptInput.Submitted)
+    def handle_submit(self, event: PromptInput.Submitted) -> None:
+        text = event.text
+        self.query_one(PromptInput).clear()
         self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=text))
         self._turn = self.run_turn(text)
 
@@ -120,9 +147,8 @@ class PaimonApp(App):
 
     @work(exclusive=True)
     async def run_turn(self, text: str) -> None:
-        inp = self.query_one(Input)
+        inp = self.query_one(PromptInput)
         inp.disabled = True
-        inp.placeholder = "Paimon is working…"
 
         assistant: Static | None = None
         buffer = ""
@@ -178,7 +204,6 @@ class PaimonApp(App):
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
             inp.disabled = False
-            inp.placeholder = "Ask Paimon to do something… (Ctrl+C to quit)"
             inp.focus()
 
 
