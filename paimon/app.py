@@ -3,10 +3,10 @@
 import json
 from pathlib import Path
 
-from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
@@ -32,10 +32,11 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         detail = self.args.get("command") or self.args.get("path") or ""
-        body = Text()
-        body.append("Allow this action?\n\n", style="bold")
-        body.append(f"{self.tool_name}", style="bold yellow")
-        body.append(f"  {detail}", style="dim")
+        body = Content.from_markup(
+            "[b]Allow this action?[/]\n\n[$text-warning b]$tool[/]  [$text-muted]$detail[/]",
+            tool=self.tool_name,
+            detail=detail,
+        )
         with Vertical(id="confirm-box"):
             yield Static(body)
             with Vertical(id="confirm-buttons"):
@@ -99,9 +100,7 @@ class PaimonApp(App):
         if not text:
             return
         event.input.value = ""
-        header = Text("You\n", style="bold cyan")
-        header.append(text)
-        self._add(header)
+        self._add(Content.from_markup("[$text-primary b]You[/]\n$body", body=text))
         self.run_turn(text)
 
     @work(exclusive=True)
@@ -119,7 +118,7 @@ class PaimonApp(App):
             async for ev in self.agent.run(text):
                 if isinstance(ev, ReasoningDelta):
                     reasoning_buf += ev.text
-                    body = Text(reasoning_buf, style="dim italic")
+                    body = Content.from_markup("[$text-muted i]$body[/]", body=reasoning_buf)
                     if reasoning is None:
                         reasoning = self._add(body)
                     else:
@@ -128,8 +127,7 @@ class PaimonApp(App):
 
                 elif isinstance(ev, TextDelta):
                     buffer += ev.text
-                    body = Text("Paimon\n", style="bold green")
-                    body.append(buffer)
+                    body = Content.from_markup("[$text-success b]Paimon[/]\n$body", body=buffer)
                     if assistant is None:
                         assistant = self._add(body)
                     else:
@@ -138,10 +136,13 @@ class PaimonApp(App):
 
                 elif isinstance(ev, ToolStart):
                     detail = ev.args.get("command") or ev.args.get("path") or json.dumps(ev.args)
-                    line = Text("⚙ ", style="yellow")
-                    line.append(ev.name, style="bold yellow")
-                    line.append(f"  {detail}", style="dim")
-                    self._add(line)
+                    self._add(
+                        Content.from_markup(
+                            "[$text-warning b]⚙ $name[/]  [$text-muted]$detail[/]",
+                            name=ev.name,
+                            detail=detail,
+                        )
+                    )
                     # start fresh assistant/reasoning blocks after a tool runs
                     assistant, buffer = None, ""
                     reasoning, reasoning_buf = None, ""
@@ -150,13 +151,13 @@ class PaimonApp(App):
                     preview = "\n".join(ev.result.splitlines()[:15])
                     if len(ev.result.splitlines()) > 15:
                         preview += "\n…"
-                    style = "red" if ev.denied else "dim"
-                    self._add(Text(preview or "(no output)", style=style))
+                    color = "$text-error" if ev.denied else "$text-muted"
+                    self._add(Content.from_markup(f"[{color}]$body[/]", body=preview or "(no output)"))
 
                 elif isinstance(ev, TurnEnd):
                     pass
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
-            self._add(Text(f"Error: {exc}", style="bold red"))
+            self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
             inp.disabled = False
             inp.placeholder = "Ask Paimon to do something… (Ctrl+C to quit)"
