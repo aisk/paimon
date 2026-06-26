@@ -56,20 +56,53 @@ class TurnEnd:
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
 
+CONTEXT_FILE = "AGENTS.md"
+
+
+def _load_context_files(cwd: Path) -> list[tuple[Path, str]]:
+    """Find AGENTS.md from cwd up to the filesystem root.
+
+    Returned root-first so the file closest to cwd comes last in the prompt
+    (later instructions take precedence), matching pi's behaviour.
+    """
+    found: list[tuple[Path, str]] = []
+    current = cwd.resolve()
+    while True:
+        candidate = current / CONTEXT_FILE
+        if candidate.is_file():
+            try:
+                found.append((candidate, candidate.read_text(errors="replace")))
+            except OSError:
+                pass
+        if current == current.parent:
+            break
+        current = current.parent
+    found.reverse()
+    return found
+
+
 def _system_prompt(cwd: Path) -> str:
-    return f"""You are Paimon, a concise coding assistant operating in a terminal.
+    prompt = """You are Paimon, a concise coding assistant operating in a terminal.
 
 You help with software engineering tasks by reading and editing files and running
 shell commands. You have these tools: read_file, write_file, edit_file, bash.
 
 Guidelines:
-- Working directory: {cwd}
-- Today's date: {date.today().isoformat()}
 - Prefer reading a file before editing it. For edits, use edit_file with a unique
   old_string; only use write_file for new files or full rewrites.
 - Use the bash tool for listing, searching (grep/find/ls), git, and running tests.
-- Be direct. When the task is done, briefly state what you did. Don't narrate every step.
-"""
+- Be direct. When the task is done, briefly state what you did. Don't narrate every step."""
+
+    context_files = _load_context_files(cwd)
+    if context_files:
+        prompt += "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n"
+        for path, content in context_files:
+            prompt += f'<project_instructions path="{path}">\n{content}\n</project_instructions>\n\n'
+        prompt += "</project_context>"
+
+    prompt += f"\n\nCurrent date: {date.today().isoformat()}"
+    prompt += f"\nCurrent working directory: {cwd}"
+    return prompt
 
 
 class Agent:
