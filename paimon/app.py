@@ -5,7 +5,7 @@ from pathlib import Path
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
@@ -39,7 +39,7 @@ class ConfirmScreen(ModalScreen[bool]):
         )
         with Vertical(id="confirm-box"):
             yield Static(body)
-            with Vertical(id="confirm-buttons"):
+            with Horizontal(id="confirm-buttons"):
                 yield Button("Allow (y)", variant="success", id="allow")
                 yield Button("Deny (n)", variant="error", id="deny")
 
@@ -56,10 +56,14 @@ class PaimonApp(App):
     CSS = """
     #log { height: 1fr; padding: 0 1; }
     #log > Static { margin-bottom: 1; }
+    .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
+    .tool-result { color: $text-muted; }
+    .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
     ConfirmScreen { align: center middle; }
     #confirm-box { width: 70%; height: auto; padding: 1 2; border: round $warning; background: $surface; }
     #confirm-buttons { height: auto; margin-top: 1; }
-    #confirm-buttons Button { margin-right: 2; width: auto; }
+    #confirm-buttons Button { width: 1fr; }
+    #confirm-buttons #allow { margin-right: 1; }
     """
 
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -77,9 +81,9 @@ class PaimonApp(App):
 
     # ---- rendering helpers --------------------------------------------------
 
-    def _add(self, renderable) -> Static:
+    def _add(self, renderable, classes: str = "") -> Static:
         log = self.query_one("#log", VerticalScroll)
-        widget = Static(renderable)
+        widget = Static(renderable, classes=classes)
         log.mount(widget)
         log.scroll_end(animate=False)
         return widget
@@ -100,7 +104,7 @@ class PaimonApp(App):
         if not text:
             return
         event.input.value = ""
-        self._add(Content.from_markup("[$text-primary b]You[/]\n$body", body=text))
+        self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=text))
         self.run_turn(text)
 
     @work(exclusive=True)
@@ -118,9 +122,9 @@ class PaimonApp(App):
             async for ev in self.agent.run(text):
                 if isinstance(ev, ReasoningDelta):
                     reasoning_buf += ev.text
-                    body = Content.from_markup("[$text-muted i]$body[/]", body=reasoning_buf)
+                    body = Content(reasoning_buf)
                     if reasoning is None:
-                        reasoning = self._add(body)
+                        reasoning = self._add(body, classes="reasoning")
                     else:
                         reasoning.update(body)
                     self._scroll()
@@ -138,7 +142,7 @@ class PaimonApp(App):
                     detail = ev.args.get("command") or ev.args.get("path") or json.dumps(ev.args)
                     self._add(
                         Content.from_markup(
-                            "[$text-warning b]⚙ $name[/]  [$text-muted]$detail[/]",
+                            "[$text-accent b]$name[/]  [$text-muted]$detail[/]",
                             name=ev.name,
                             detail=detail,
                         )
@@ -151,8 +155,8 @@ class PaimonApp(App):
                     preview = "\n".join(ev.result.splitlines()[:15])
                     if len(ev.result.splitlines()) > 15:
                         preview += "\n…"
-                    color = "$text-error" if ev.denied else "$text-muted"
-                    self._add(Content.from_markup(f"[{color}]$body[/]", body=preview or "(no output)"))
+                    classes = "tool-result denied" if ev.denied else "tool-result"
+                    self._add(Content(preview or "(no output)"), classes=classes)
 
                 elif isinstance(ev, TurnEnd):
                     pass
