@@ -1,14 +1,17 @@
 """Textual TUI for the Paimon agent."""
 
+import asyncio
 import json
 from pathlib import Path
 
 from textual import on, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
+from textual.worker import Worker
 
 from .agent import (
     Agent,
@@ -66,11 +69,15 @@ class PaimonApp(App):
     #confirm-buttons #allow { margin-right: 1; }
     """
 
-    BINDINGS = [("ctrl+c", "quit", "Quit")]
+    BINDINGS = [
+        ("ctrl+c", "quit", "Quit"),
+        Binding("escape", "interrupt", "Interrupt", priority=True),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
         self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm)
+        self._turn: Worker | None = None
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
@@ -105,7 +112,11 @@ class PaimonApp(App):
             return
         event.input.value = ""
         self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=text))
-        self.run_turn(text)
+        self._turn = self.run_turn(text)
+
+    def action_interrupt(self) -> None:
+        if self._turn is not None and self._turn.is_running:
+            self._turn.cancel()
 
     @work(exclusive=True)
     async def run_turn(self, text: str) -> None:
@@ -160,6 +171,9 @@ class PaimonApp(App):
 
                 elif isinstance(ev, TurnEnd):
                     pass
+        except asyncio.CancelledError:
+            self._add(Content.from_markup("[$text-warning]⏹ Interrupted[/]"))
+            raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:

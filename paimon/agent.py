@@ -4,6 +4,7 @@
 render however it likes.
 """
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import date
@@ -97,25 +98,31 @@ class Agent:
             # index -> {"id", "name", "args"} accumulated across stream deltas
             calls: dict[int, dict] = {}
 
-            async for chunk in response:
-                delta = chunk.choices[0].delta
+            try:
+                async for chunk in response:
+                    delta = chunk.choices[0].delta
 
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    yield ReasoningDelta(reasoning)
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        yield ReasoningDelta(reasoning)
 
-                if delta.content:
-                    content += delta.content
-                    yield TextDelta(delta.content)
+                    if delta.content:
+                        content += delta.content
+                        yield TextDelta(delta.content)
 
-                for tc in delta.tool_calls or []:
-                    slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                    if tc.id:
-                        slot["id"] = tc.id
-                    if tc.function and tc.function.name:
-                        slot["name"] = tc.function.name
-                    if tc.function and tc.function.arguments:
-                        slot["args"] += tc.function.arguments
+                    for tc in delta.tool_calls or []:
+                        slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                        if tc.id:
+                            slot["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            slot["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            slot["args"] += tc.function.arguments
+            except asyncio.CancelledError:
+                # Interrupted mid-stream: keep partial text (drop incomplete tool
+                # calls) so the message history stays valid for the next request.
+                self.messages.append({"role": "assistant", "content": content or "(interrupted)"})
+                raise
 
             ordered = [calls[i] for i in sorted(calls)]
 
@@ -135,7 +142,17 @@ class Agent:
                 yield TurnEnd()
                 return
 
-            for c in ordered:
+            # Pre-seed a tool result for every call up front, so even if we are
+            # interrupted mid-execution the history never has a dangling tool_call
+            # (the API requires each tool_call_id to be answered). Unfinished ones
+            # keep this placeholder.
+            tool_msgs = [
+                {"role": "tool", "tool_call_id": c["id"], "content": "Interrupted by user."}
+                for c in ordered
+            ]
+            self.messages.extend(tool_msgs)
+
+            for slot, c in zip(tool_msgs, ordered):
                 try:
                     args = json.loads(c["args"] or "{}")
                 except json.JSONDecodeError:
@@ -152,8 +169,6 @@ class Agent:
                 if not denied:
                     result = await tools.execute_tool(name, args, self.cwd)
 
+                slot["content"] = result
                 yield ToolEnd(c["id"], name, result, denied=denied)
-                self.messages.append(
-                    {"role": "tool", "tool_call_id": c["id"], "content": result}
-                )
             # loop again so the model can react to tool results

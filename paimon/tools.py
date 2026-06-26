@@ -5,6 +5,8 @@ implemented by a small Python function. ``execute_tool`` dispatches by name.
 """
 
 import asyncio
+import os
+import signal
 from pathlib import Path
 
 # Tools whose side effects warrant a user confirmation before running.
@@ -120,18 +122,52 @@ def _edit_file(args: dict, cwd: Path) -> str:
     return f"Edited {path}"
 
 
+_KILL_GRACE = 2.0  # seconds to wait after SIGTERM before forcing SIGKILL
+
+
+def _signal_group(pgid: int, sig: int, proc: asyncio.subprocess.Process) -> None:
+    """Send a signal to the whole process group, falling back to the child alone."""
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Terminate the command and any children (its process group), escalating
+    SIGTERM -> SIGKILL. The SIGKILL backstop is scheduled on the event loop so it
+    still fires even though the turn that called this is being cancelled."""
+    if proc.returncode is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    _signal_group(pgid, signal.SIGTERM, proc)
+    asyncio.get_running_loop().call_later(_KILL_GRACE, _signal_group, pgid, signal.SIGKILL, proc)
+
+
 async def _bash(args: dict, cwd: Path) -> str:
+    # start_new_session puts the child in its own process group so we can kill
+    # the whole tree (the shell plus anything it spawns) on timeout/interrupt.
     proc = await asyncio.create_subprocess_shell(
         args["command"],
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
     except asyncio.TimeoutError:
-        proc.kill()
+        _kill_tree(proc)
         return "Error: command timed out after 120s."
+    except asyncio.CancelledError:
+        _kill_tree(proc)
+        raise
     out = stdout.decode(errors="replace")
     status = f"(exit code {proc.returncode})"
     return f"{out}\n{status}" if out.strip() else status
