@@ -1,6 +1,6 @@
 [project]
 name = "paimon"
-version = "0.1.0"
+version = "0.1.1"
 description = "A minimal code agent built on litellm + textual"
 readme = "README.md"
 requires-python = ">=3.10"
