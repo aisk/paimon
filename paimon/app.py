@@ -18,10 +18,17 @@ from .agent import (
     Agent,
     ReasoningDelta,
     TextDelta,
+    TodosUpdate,
     ToolEnd,
     ToolStart,
     TurnEnd,
 )
+
+_TODO_STYLE = {
+    "completed": ("✔", "$text-success"),
+    "in_progress": ("▶", "$text-accent b"),
+    "pending": ("○", "$text-muted"),
+}
 
 
 class PromptInput(TextArea):
@@ -127,6 +134,16 @@ class PaimonApp(App):
     def _scroll(self) -> None:
         self.query_one("#log", VerticalScroll).scroll_end(animate=False)
 
+    def _render_todos(self, todos: list[dict]) -> Content:
+        if not todos:
+            return Content.from_markup("[$text-muted]Todos cleared[/]")
+        lines, kwargs = [], {}
+        for i, t in enumerate(todos):
+            marker, style = _TODO_STYLE.get(t.get("status"), _TODO_STYLE["pending"])
+            kwargs[f"c{i}"] = t.get("content", "")
+            lines.append(f"[{style}]{marker} ${f'c{i}'}[/]")
+        return Content.from_markup("\n".join(lines), **kwargs)
+
     # ---- confirmation hook (called from the agent loop) --------------------
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
@@ -176,6 +193,12 @@ class PaimonApp(App):
                     self._scroll()
 
                 elif isinstance(ev, ToolStart):
+                    # start fresh assistant/reasoning blocks after a tool runs
+                    assistant, buffer = None, ""
+                    reasoning, reasoning_buf = None, ""
+                    # write_todos renders its own panel via TodosUpdate
+                    if ev.name == "write_todos":
+                        continue
                     detail = ev.args.get("command") or ev.args.get("path") or json.dumps(ev.args)
                     self._add(
                         Content.from_markup(
@@ -184,11 +207,13 @@ class PaimonApp(App):
                             detail=detail,
                         )
                     )
-                    # start fresh assistant/reasoning blocks after a tool runs
-                    assistant, buffer = None, ""
-                    reasoning, reasoning_buf = None, ""
+
+                elif isinstance(ev, TodosUpdate):
+                    self._add(self._render_todos(ev.todos))
 
                 elif isinstance(ev, ToolEnd):
+                    if ev.name == "write_todos":
+                        continue
                     preview = "\n".join(ev.result.splitlines()[:15])
                     if len(ev.result.splitlines()) > 15:
                         preview += "\n…"

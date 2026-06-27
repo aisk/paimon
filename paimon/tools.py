@@ -92,7 +92,47 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_todos",
+            "description": (
+                "Create or update the task list for a multi-step task. Always pass the COMPLETE list; "
+                "it overwrites the previous one. Use it to plan work and show progress on tasks with 3+ "
+                "steps; skip it for trivial single-step requests. Keep exactly one task in_progress at a time, "
+                "and mark a task completed as soon as it is done."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The complete task list, in order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Short description of the task."},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                            },
+                            "required": ["content", "status"],
+                        },
+                    },
+                },
+                "required": ["todos"],
+            },
+        },
+    },
 ]
+
+
+_TODO_MARKERS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+
+
+def render_todos(todos: list[dict]) -> str:
+    """Plain-text rendering of the todo list, used as the tool result the model sees."""
+    if not todos:
+        return "(todo list cleared)"
+    return "\n".join(f"{_TODO_MARKERS.get(t.get('status'), '[ ]')} {t.get('content', '')}" for t in todos)
 
 
 def _resolve(path: str, cwd: Path) -> Path:

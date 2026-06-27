@@ -48,6 +48,11 @@ class ToolEnd:
 
 
 @dataclass
+class TodosUpdate:
+    todos: list[dict]
+
+
+@dataclass
 class TurnEnd:
     pass
 
@@ -85,13 +90,16 @@ def _system_prompt(cwd: Path) -> str:
     prompt = """You are Paimon, a concise coding assistant operating in a terminal.
 
 You help with software engineering tasks by reading and editing files and running
-shell commands. You have these tools: read_file, write_file, edit_file, glob, bash.
+shell commands. You have these tools: read_file, write_file, edit_file, glob, bash,
+write_todos.
 
 Guidelines:
 - Prefer reading a file before editing it. For edits, use edit_file with a unique
   old_string; only use write_file for new files or full rewrites.
 - Use glob to find files by name pattern; use the bash tool for content search
   (grep), git, and running tests.
+- For tasks with several steps, call write_todos first to lay out a plan, then keep
+  it updated as you go (one task in_progress at a time). Skip it for simple tasks.
 - Be direct. When the task is done, briefly state what you did. Don't narrate every step."""
 
     context_files = _load_context_files(cwd)
@@ -110,6 +118,7 @@ class Agent:
     def __init__(self, cwd: Optional[Path] = None, confirm: Optional[ConfirmFn] = None):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
+        self.todos: list[dict] = []
         self.messages: list[dict] = [
             {"role": "system", "content": _system_prompt(self.cwd)}
         ]
@@ -193,6 +202,16 @@ class Agent:
                     args = {}
                 name = c["name"]
                 yield ToolStart(c["id"], name, args)
+
+                # write_todos mutates agent-held state rather than the filesystem,
+                # so it is handled here instead of in the stateless execute_tool.
+                if name == "write_todos":
+                    self.todos = args.get("todos") or []
+                    result = tools.render_todos(self.todos)
+                    slot["content"] = result
+                    yield TodosUpdate(list(self.todos))
+                    yield ToolEnd(c["id"], name, result)
+                    continue
 
                 denied = False
                 if self.confirm and name in tools.DANGEROUS:
