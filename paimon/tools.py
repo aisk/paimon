@@ -65,6 +65,22 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "glob",
+            "description": "Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern. Use '**' to match any number of directories."},
+                    "path": {"type": "string", "description": "Base directory to search in (optional, defaults to the working directory)."},
+                    "include_ignored": {"type": "boolean", "description": "Search inside noise dirs like node_modules/.venv/.git too (optional, default false)."},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "bash",
             "description": "Run a shell command in the working directory and return its combined stdout/stderr. Use this for listing, searching (grep/find/ls), git, running tests, etc.",
             "parameters": {
@@ -120,6 +136,33 @@ def _edit_file(args: dict, cwd: Path) -> str:
         return f"Error: old_string is not unique (found {count} times). Add more context to make it unique."
     path.write_text(text.replace(old, args["new_string"], 1))
     return f"Edited {path}"
+
+
+# Directories never worth walking into for a code-search glob; they bury real
+# results under dependency/VCS/build noise. Pass include_ignored=true to search them anyway.
+_GLOB_IGNORE = {
+    ".git", ".hg", ".svn",  # VCS
+    ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",  # Python
+    "node_modules", ".next", ".nuxt",  # JS/TS
+    "target", "dist", "build", "out",  # build output (Rust/Java/JS/...)
+    ".cache", ".gradle", ".idea",  # caches & IDE
+}
+
+
+def _glob(args: dict, cwd: Path) -> str:
+    base = _resolve(args["path"], cwd) if args.get("path") else cwd
+    if not base.is_dir():
+        return f"Error: not a directory: {base}"
+    skip = set() if args.get("include_ignored") else _GLOB_IGNORE
+    matches = [
+        p
+        for p in base.glob(args["pattern"])
+        if p.is_file() and not skip.intersection(p.relative_to(base).parts)
+    ]
+    if not matches:
+        return "(no files matched)"
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return "\n".join(str(p) for p in matches)
 
 
 _KILL_GRACE = 2.0  # seconds to wait after SIGTERM before forcing SIGKILL
@@ -182,6 +225,8 @@ async def execute_tool(name: str, args: dict, cwd: Path) -> str:
             return _write_file(args, cwd)
         if name == "edit_file":
             return _edit_file(args, cwd)
+        if name == "glob":
+            return _glob(args, cwd)
         if name == "bash":
             result = await _bash(args, cwd)
         else:
