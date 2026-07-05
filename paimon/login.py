@@ -11,6 +11,7 @@ from typing import Optional
 import litellm
 from textual import events, on, work
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
@@ -28,7 +29,7 @@ def _models(provider: str) -> list[str]:
 class PickerScreen(ModalScreen[Optional[str]]):
     """Filterable list picker. Type to filter, Up/Down to move, Enter to select."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
     def __init__(self, title: str, options: list[str]) -> None:
         super().__init__()
@@ -76,6 +77,11 @@ class PickerScreen(ModalScreen[Optional[str]]):
         self.query_one("#picker-filter", Input).focus()
 
     async def _on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+            event.prevent_default()
+            event.stop()
+            return
         if event.key == "down":
             self.query_one("#picker-list", OptionList).action_cursor_down()
             event.prevent_default()
@@ -100,7 +106,7 @@ class PickerScreen(ModalScreen[Optional[str]]):
 class PromptScreen(ModalScreen[Optional[str]]):
     """Single-line text input. Enter returns the value, Escape cancels."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
     def __init__(self, title: str, *, password: bool = False, placeholder: str = "") -> None:
         super().__init__()
@@ -126,6 +132,12 @@ class PromptScreen(ModalScreen[Optional[str]]):
         event.stop()
         self.dismiss(event.value)
 
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
+            event.prevent_default()
+            event.stop()
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
@@ -133,7 +145,7 @@ class PromptScreen(ModalScreen[Optional[str]]):
 class LoginScreen(ModalScreen[bool]):
     """Multi-step login. Returns True on completion, False if cancelled anywhere."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
     def compose(self) -> ComposeResult:
         # The login flow is driven by sub-screens; this surface is just a backdrop.

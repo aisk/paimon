@@ -5,8 +5,7 @@ import json
 from pathlib import Path
 
 from textual import events, on, work
-from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
@@ -116,8 +115,18 @@ class PaimonApp(App):
 
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
-        Binding("escape", "interrupt", "Interrupt", priority=True),
+        ("escape", "interrupt", "Interrupt"),
     ]
+
+    def get_system_commands(self, screen) -> list[SystemCommand]:
+        return [
+            *super().get_system_commands(screen),
+            SystemCommand(
+                "Login / switch provider",
+                "Reconfigure model, API base and API key",
+                self.action_login,
+            ),
+        ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -186,27 +195,8 @@ class PaimonApp(App):
     def handle_submit(self, event: PromptInput.Submitted) -> None:
         text = event.text
         self.query_one(PromptInput).clear()
-        if text.startswith("/"):
-            self._handle_command(text)
-            return
         self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=text))
         self._turn = self.run_turn(text)
-
-    def _handle_command(self, raw: str) -> None:
-        cmd, _, rest = raw[1:].partition(" ")
-        if cmd in ("login",):
-            self.action_login()
-        elif cmd in ("quit", "exit"):
-            self.exit()
-        elif cmd in ("help", "?"):
-            self._add(
-                Content.from_markup(
-                    "[$text-accent b]/login[/]  log in / switch provider\n"
-                    "[$text-accent b]/quit[/]   exit paimon\n"
-                )
-            )
-        else:
-            self._add(Content.from_markup("[$text-warning]Unknown command:[/] $cmd", cmd=raw))
 
     def action_interrupt(self) -> None:
         if self._turn is not None and self._turn.is_running:
