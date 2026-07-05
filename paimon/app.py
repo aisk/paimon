@@ -129,9 +129,18 @@ class PaimonApp(App):
         ]
 
     def __init__(self) -> None:
+        self._persist_theme_changes = False
         super().__init__()
         self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm)
         self._turn: Worker | None = None
+        if config.THEME in self.available_themes:
+            self.theme = config.THEME
+        self._persist_theme_changes = True
+
+    def _watch_theme(self, theme_name: str) -> None:
+        super()._watch_theme(theme_name)
+        if self._persist_theme_changes:
+            config.save(theme=theme_name)
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")

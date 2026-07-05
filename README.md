@@ -12,7 +12,7 @@ A minimal terminal code agent built on **litellm** (LLM access) and **textual** 
 
 ## Setup
 
-On first launch (no config yet) Paimon walks you through provider → model → API base → API key. The choices are stored in `~/.config/paimon/config.json` (override the directory with `PAIMON_CONFIG_HOME`). Re-run the flow anytime via the command palette (`Ctrl+P` → "Login / switch provider").
+On first launch (no config yet) Paimon walks you through provider → model → API base → API key. The choices and selected theme are stored in `~/.config/paimon/config.json` (override the directory with `PAIMON_CONFIG_HOME`). Re-run the flow anytime via the command palette (`Ctrl+P` → "Login / switch provider").
 
 ## Run
 
