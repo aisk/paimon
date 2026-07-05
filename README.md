@@ -2,23 +2,17 @@
 
 A minimal terminal code agent built on **litellm** (LLM access) and **textual** (TUI).
 
-## Features (MVP)
+## Features
 
 - Streaming agent loop: LLM + tool calls until the task is done
-- Four tools: `read_file`, `write_file`, `edit_file`, `bash`
+- Six tools: `read_file`, `write_file`, `edit_file`, `glob`, `bash`, `write_todos`
 - Live streaming output + reasoning display in a Textual UI
 - Confirmation prompt before dangerous actions (`bash`, `write_file`, `edit_file`)
+- Guided login (provider/model picker sourced from litellm's catalog), reachable from the command palette (`Ctrl+P`)
 
 ## Setup
 
-Set these environment variables (uses an OpenAI-compatible endpoint via the
-litellm `openai/` prefix):
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `PAIMON_API_KEY`  | API key for the endpoint | `tp-...` |
-| `PAIMON_MODEL`    | litellm model id | `openai/mimo-v2.5-pro` |
-| `PAIMON_API_BASE` | base URL of the endpoint | `https://token-plan-cn.xiaomimimo.com/v1` |
+On first launch (no config yet) Paimon walks you through provider → model → API base → API key. The choices are stored in `~/.config/paimon/config.json` (override the directory with `PAIMON_CONFIG_HOME`). Re-run the flow anytime via the command palette (`Ctrl+P` → "Login / switch provider").
 
 ## Run
 
@@ -30,7 +24,8 @@ uv run paimon        # or: uv run main.py
 
 | File | Role |
 |------|------|
-| `paimon/config.py` | model config |
+| `paimon/config.py` | load/save `config.json` |
+| `paimon/login.py`  | login flow screens |
 | `paimon/tools.py`  | tool schemas + execution |
 | `paimon/agent.py`  | UI-agnostic agent loop (yields typed events) |
 | `paimon/app.py`    | Textual TUI |
