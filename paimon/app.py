@@ -23,6 +23,8 @@ from .agent import (
     ToolStart,
     TurnEnd,
 )
+from . import config
+from .login import LoginScreen
 
 _TODO_STYLE = {
     "completed": ("✔", "$text-success"),
@@ -101,6 +103,15 @@ class PaimonApp(App):
     #confirm-buttons { height: auto; margin-top: 1; }
     #confirm-buttons Button { width: 1fr; }
     #confirm-buttons #allow { margin-right: 1; }
+
+    LoginScreen, PickerScreen, PromptScreen { align: center middle; }
+    #picker-box, #prompt-screen-box, #login-status {
+        width: 70%; height: auto; max-height: 70%;
+        padding: 1 2; border: round $accent; background: $surface;
+    }
+    #picker-title, #prompt-screen-title { margin-bottom: 1; }
+    #picker-filter { margin-bottom: 1; }
+    #picker-list { height: auto; max-height: 20; }
     """
 
     BINDINGS = [
@@ -121,6 +132,26 @@ class PaimonApp(App):
 
     def on_mount(self) -> None:
         self.query_one(PromptInput).focus()
+        if not config.MODEL:
+            self.action_login()
+
+    # ---- login --------------------------------------------------------------
+
+    def action_login(self) -> None:
+        def _done(completed: bool | None) -> None:
+            if completed:
+                self._add(
+                    Content.from_markup(
+                        "[$text-success b]Logged in.[/]  [$text-muted]$model[/]",
+                        model=config.MODEL or "",
+                    )
+                )
+            elif not config.MODEL:
+                self._add(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
+                self.exit()
+            self.query_one(PromptInput).focus()
+
+        self.push_screen(LoginScreen(), _done)
 
     # ---- rendering helpers --------------------------------------------------
 
@@ -155,8 +186,27 @@ class PaimonApp(App):
     def handle_submit(self, event: PromptInput.Submitted) -> None:
         text = event.text
         self.query_one(PromptInput).clear()
+        if text.startswith("/"):
+            self._handle_command(text)
+            return
         self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=text))
         self._turn = self.run_turn(text)
+
+    def _handle_command(self, raw: str) -> None:
+        cmd, _, rest = raw[1:].partition(" ")
+        if cmd in ("login",):
+            self.action_login()
+        elif cmd in ("quit", "exit"):
+            self.exit()
+        elif cmd in ("help", "?"):
+            self._add(
+                Content.from_markup(
+                    "[$text-accent b]/login[/]  log in / switch provider\n"
+                    "[$text-accent b]/quit[/]   exit paimon\n"
+                )
+            )
+        else:
+            self._add(Content.from_markup("[$text-warning]Unknown command:[/] $cmd", cmd=raw))
 
     def action_interrupt(self) -> None:
         if self._turn is not None and self._turn.is_running:

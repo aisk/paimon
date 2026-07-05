@@ -35,3 +35,30 @@ _cfg = _load_file_config()
 MODEL: Optional[str] = _cfg.get("model")
 API_BASE: Optional[str] = _cfg.get("api_base")
 API_KEY: Optional[str] = _cfg.get("api_key")
+
+
+def save(
+    model: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> None:
+    """Persist fields to config.json and refresh module-level constants.
+
+    Only the fields passed (and not None) are written; others are preserved.
+    """
+    cfg = _load_file_config()
+    if model is not None:
+        cfg["model"] = model
+    if api_base is not None:
+        cfg["api_base"] = api_base
+    if api_key is not None:
+        cfg["api_key"] = api_key
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    global MODEL, API_BASE, API_KEY
+    MODEL = cfg.get("model")
+    API_BASE = cfg.get("api_base")
+    API_KEY = cfg.get("api_key")
