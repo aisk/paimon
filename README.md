@@ -34,4 +34,5 @@ palette to leave the current history and start fresh.
 | `paimon/login.py`  | login flow screens |
 | `paimon/tools.py`  | tool schemas + execution |
 | `paimon/agent.py`  | UI-agnostic agent loop (yields typed events) |
+| `paimon/ui.py`     | reusable UI components |
 | `paimon/app.py`    | Textual TUI |

@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Markdown, Static, TextArea
+from textual.widgets import Button, Static, TextArea
 from textual.worker import Worker
 
 from .agent import (
@@ -26,6 +26,7 @@ from .agent import (
 from . import config
 from .login import LoginScreen
 from .session import Session
+from .ui import AssistantMessage, UserMessage
 
 _TODO_STYLE = {
     "completed": ("✔", "$text-success"),
@@ -92,10 +93,39 @@ class ConfirmScreen(ModalScreen[bool]):
 
 class PaimonApp(App):
     CSS = """
-    #log { height: 1fr; padding: 0 1; }
-    #log > Static { margin-bottom: 1; }
-    #prompt { height: auto; max-height: 12; border: round $surface; padding: 0 1; }
-    #prompt:focus { border: round $accent; }
+    Screen { background: $background; }
+    #workspace { height: 1fr; margin: 1 2; }
+    #log {
+        height: 1fr;
+        padding: 0 1 1 1;
+        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-color: $primary 55%;
+        scrollbar-color-hover: $primary;
+        scrollbar-color-active: $primary;
+    }
+    #log > * { margin-bottom: 1; }
+    .assistant { padding: 0 1; }
+    .user-message {
+        width: 100%;
+        height: auto;
+        padding: 1 2;
+        background: $primary 12%;
+        border-left: solid $primary;
+    }
+    #prompt {
+        height: auto;
+        min-height: 4;
+        max-height: 12;
+        margin-top: 1;
+        padding: 0 1;
+        border: round $surface-lighten-2;
+        background: transparent;
+    }
+    #prompt:focus { border: round $primary; background: transparent; }
+    #prompt:disabled { border: round $surface-lighten-1; opacity: 60%; }
     .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
     .tool-result { color: $text-muted; }
     .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
@@ -149,10 +179,11 @@ class PaimonApp(App):
             config.save(theme=theme_name)
 
     def compose(self) -> ComposeResult:
-        yield VerticalScroll(id="log")
-        prompt = PromptInput(id="prompt", soft_wrap=True)
-        prompt.border_subtitle = "Enter to send · Ctrl+J for newline · Ctrl+C to quit"
-        yield prompt
+        with Vertical(id="workspace"):
+            yield VerticalScroll(id="log")
+            prompt = PromptInput(id="prompt", soft_wrap=True)
+            prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt"
+            yield prompt
 
     def on_mount(self) -> None:
         self.query_one(PromptInput).focus()
@@ -166,7 +197,7 @@ class PaimonApp(App):
         for message in self.agent.messages[1:]:
             role, body = message.get("role"), message.get("content")
             if role == "user" and body:
-                self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=body))
+                self._add_user(body)
             elif role == "assistant" and body:
                 self._add_markdown(body)
 
@@ -201,18 +232,34 @@ class PaimonApp(App):
         log = self.query_one("#log", VerticalScroll)
         widget = Static(renderable, classes=classes)
         log.mount(widget)
-        log.scroll_end(animate=False)
+        self._scroll()
         return widget
 
-    def _add_markdown(self, body: str) -> Markdown:
+    def _add_markdown(self, body: str) -> AssistantMessage:
         log = self.query_one("#log", VerticalScroll)
-        widget = Markdown(f"**Paimon**\n\n{body}", classes="assistant")
+        widget = AssistantMessage(body)
         log.mount(widget)
-        log.scroll_end(animate=False)
+        self._scroll()
+        return widget
+
+    def _add_user(self, body: str) -> UserMessage:
+        log = self.query_one("#log", VerticalScroll)
+        widget = UserMessage(body)
+        log.mount(widget)
+        self._scroll()
         return widget
 
     def _scroll(self) -> None:
-        self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+        log = self.query_one("#log", VerticalScroll)
+        # Markdown is laid out asynchronously after a streaming update. Scrolling
+        # immediately uses its previous height and can leave the newest lines
+        # below the viewport, which looks like a truncated response.
+        def scroll_after_layout() -> None:
+            log.scroll_end(animate=False)
+            # Markdown may request one more layout pass after rendering its blocks.
+            self.call_after_refresh(log.scroll_end, animate=False)
+
+        self.call_after_refresh(scroll_after_layout)
 
     def _render_todos(self, todos: list[dict]) -> Content:
         if not todos:
@@ -235,7 +282,7 @@ class PaimonApp(App):
     def handle_submit(self, event: PromptInput.Submitted) -> None:
         text = event.text
         self.query_one(PromptInput).clear()
-        self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=text))
+        self._add_user(text)
         self._turn = self.run_turn(text)
 
     def action_interrupt(self) -> None:
@@ -247,7 +294,7 @@ class PaimonApp(App):
         inp = self.query_one(PromptInput)
         inp.disabled = True
 
-        assistant: Markdown | None = None
+        assistant: AssistantMessage | None = None
         buffer = ""
         reasoning: Static | None = None
         reasoning_buf = ""
@@ -268,7 +315,7 @@ class PaimonApp(App):
                     if assistant is None:
                         assistant = self._add_markdown(buffer)
                     else:
-                        assistant.update(f"**Paimon**\n\n{buffer}")
+                        assistant.update_body(buffer)
                     self._scroll()
 
                 elif isinstance(ev, ToolStart):
@@ -300,7 +347,7 @@ class PaimonApp(App):
                     self._add(Content(preview or "(no output)"), classes=classes)
 
                 elif isinstance(ev, TurnEnd):
-                    pass
+                    self._scroll()
         except asyncio.CancelledError:
             self._add(Content.from_markup("[$text-warning]⏹ Interrupted[/]"))
             raise
