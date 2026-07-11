@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static, TextArea
+from textual.widgets import Button, Markdown, Static, TextArea
 from textual.worker import Worker
 
 from .agent import (
@@ -168,7 +168,7 @@ class PaimonApp(App):
             if role == "user" and body:
                 self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=body))
             elif role == "assistant" and body:
-                self._add(Content.from_markup("[$text-success b]Paimon[/]\n$body", body=body))
+                self._add_markdown(body)
 
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
@@ -200,6 +200,13 @@ class PaimonApp(App):
     def _add(self, renderable, classes: str = "") -> Static:
         log = self.query_one("#log", VerticalScroll)
         widget = Static(renderable, classes=classes)
+        log.mount(widget)
+        log.scroll_end(animate=False)
+        return widget
+
+    def _add_markdown(self, body: str) -> Markdown:
+        log = self.query_one("#log", VerticalScroll)
+        widget = Markdown(f"**Paimon**\n\n{body}", classes="assistant")
         log.mount(widget)
         log.scroll_end(animate=False)
         return widget
@@ -240,7 +247,7 @@ class PaimonApp(App):
         inp = self.query_one(PromptInput)
         inp.disabled = True
 
-        assistant: Static | None = None
+        assistant: Markdown | None = None
         buffer = ""
         reasoning: Static | None = None
         reasoning_buf = ""
@@ -258,11 +265,10 @@ class PaimonApp(App):
 
                 elif isinstance(ev, TextDelta):
                     buffer += ev.text
-                    body = Content.from_markup("[$text-success b]Paimon[/]\n$body", body=buffer)
                     if assistant is None:
-                        assistant = self._add(body)
+                        assistant = self._add_markdown(buffer)
                     else:
-                        assistant.update(body)
+                        assistant.update(f"**Paimon**\n\n{buffer}")
                     self._scroll()
 
                 elif isinstance(ev, ToolStart):
