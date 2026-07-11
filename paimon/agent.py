@@ -6,6 +6,12 @@ render however it likes.
 
 import asyncio
 import json
+import locale
+import ntpath
+import os
+import platform
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -64,6 +70,131 @@ ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
 CONTEXT_FILE = "AGENTS.md"
 
+_VERSION_COMMANDS = {
+    "rg": ("--version",),
+    "jq": ("--version",),
+    "fd": ("--version",),
+    "curl": ("--version",),
+    "wget": ("--version",),
+    "unzip": ("-v",),
+    "tree": ("--version",),
+    "uv": ("--version",),
+    "npm": ("--version",),
+    "python": ("--version",),
+    "node": ("--version",),
+    "perl": ("-v",),
+    "ruby": ("--version",),
+    "git": ("--version",),
+}
+
+_WINDOWS_VERSION_COMMANDS = {
+    "pwsh": ("-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"),
+    "powershell": ("-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"),
+    "dotnet": ("--version",),
+    "py": ("--version",),
+}
+
+def _command_version(executable: str, args: tuple[str, ...] = ("--version",)) -> str:
+    """Return a compact version line without letting probes delay startup."""
+    try:
+        result = subprocess.run(
+            [executable, *args],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "version unknown"
+    output = result.stdout or result.stderr
+    return next((line.strip()[:160] for line in output.splitlines() if line.strip()), "version unknown")
+
+
+def _terminal_description() -> str:
+    if os.environ.get("WT_SESSION"):
+        host = "Windows Terminal"
+    elif os.environ.get("TERM_PROGRAM"):
+        host = os.environ["TERM_PROGRAM"]
+    elif os.environ.get("VSCODE_INJECTION") or os.environ.get("VSCODE_PID"):
+        host = "Visual Studio Code"
+    elif os.environ.get("ConEmuANSI"):
+        host = "ConEmu"
+    else:
+        host = "unknown"
+    details = [f"host={host}", f"TERM={os.environ.get('TERM') or 'unknown'}"]
+    if os.environ.get("COLORTERM"):
+        details.append(f"COLORTERM={os.environ['COLORTERM']}")
+    return ", ".join(details)
+
+
+def _shell_description(system: str) -> str:
+    if system == "Windows":
+        # Windows has no SHELL convention. PowerShell-specific environment
+        # variables are the best portable hint without adding a dependency.
+        powershell_hint = os.environ.get("POWERSHELL_DISTRIBUTION_CHANNEL") or os.environ.get("PSModulePath")
+        candidates = ("pwsh", "powershell") if powershell_hint else ()
+        executable = next((path for name in candidates if (path := shutil.which(name))), None)
+        if executable:
+            name = ntpath.splitext(ntpath.basename(executable))[0].lower()
+            args = _WINDOWS_VERSION_COMMANDS[name]
+            return f"{executable} ({_command_version(executable, args)}; inferred from environment)"
+        comspec = os.environ.get("ComSpec") or shutil.which("cmd")
+        if comspec:
+            return f"{comspec} ({_command_version(comspec, ('/d', '/c', 'ver'))}; inferred from environment)"
+        return "unknown"
+
+    shell_path = os.environ.get("SHELL") or "unknown"
+    executable = shutil.which(shell_path) if shell_path != "unknown" else None
+    version = _command_version(executable) if executable else "unknown"
+    return f"{shell_path} ({version})"
+
+
+def _runtime_flags(system: str) -> str:
+    flags = []
+    if Path("/.dockerenv").exists() or os.environ.get("container"):
+        flags.append("container")
+    if os.environ.get("CI"):
+        flags.append("CI")
+    return ", ".join(flags) or ("native Windows" if system == "Windows" else "native")
+
+
+def _environment_context() -> str:
+    """Describe the host and useful installed CLIs for the model."""
+    system = platform.system()
+    try:
+        os_name = platform.freedesktop_os_release().get("PRETTY_NAME", system)
+    except OSError:
+        os_name = platform.platform()
+
+    lines = [
+        f"Operating system: {os_name}",
+        f"Kernel: {system} {platform.release()}",
+        f"CPU architecture: {platform.machine()}",
+        f"Runtime: {_runtime_flags(system)}",
+        f"Locale/encoding: {locale.getlocale()[0] or 'unknown'} / {locale.getpreferredencoding(False)}",
+        f"Terminal: {_terminal_description()}",
+        f"Shell: {_shell_description(system)}",
+        "Available command-line tools:",
+    ]
+    aliases = {"fd": ("fd", "fdfind"), "python": ("python", "python3")}
+    version_commands = dict(_VERSION_COMMANDS)
+    if system == "Windows":
+        version_commands.update(_WINDOWS_VERSION_COMMANDS)
+        aliases["python"] = ("python", "py")
+    for name, version_args in version_commands.items():
+        candidates = aliases.get(name, (name,))
+        executable = next((path for candidate in candidates if (path := shutil.which(candidate))), None)
+        if executable:
+            executable_name = (
+                ntpath.splitext(ntpath.basename(executable))[0] if system == "Windows" else Path(executable).name
+            )
+            displayed_name = ntpath.basename(executable) if system == "Windows" else Path(executable).name
+            alias = "" if executable_name == name else f" (executable: {displayed_name})"
+            lines.append(f"- {name}: {_command_version(executable, version_args)}{alias}")
+        else:
+            lines.append(f"- {name}: not installed")
+    return "\n".join(lines)
+
 
 def _load_context_files(cwd: Path) -> list[tuple[Path, str]]:
     """Find AGENTS.md from cwd up to the filesystem root.
@@ -110,8 +241,11 @@ Guidelines:
             prompt += f'<project_instructions path="{path}">\n{content}\n</project_instructions>\n\n'
         prompt += "</project_context>"
 
-    prompt += f"\n\nCurrent date: {date.today().isoformat()}"
+    prompt += "\n\n<environment>"
+    prompt += f"\nCurrent date: {date.today().isoformat()}"
     prompt += f"\nCurrent working directory: {cwd}"
+    prompt += f"\n{_environment_context()}"
+    prompt += "\n</environment>"
     return prompt
 
 
