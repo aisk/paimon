@@ -8,10 +8,7 @@ class UserMessage(Static):
     """Visually distinct user prompt."""
 
     def __init__(self, body: str) -> None:
-        super().__init__(
-            Content.from_markup("[$text-muted]You[/]\n$body", body=body),
-            classes="user-message",
-        )
+        super().__init__(Content(body), classes="user-message")
 
 
 class AssistantMessage(Markdown):

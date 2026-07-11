@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static, TextArea
+from textual.widgets import Button, LoadingIndicator, Static, TextArea
 from textual.worker import Worker
 
 from .agent import (
@@ -108,6 +108,14 @@ class PaimonApp(App):
     }
     #log > * { margin-bottom: 1; }
     .assistant { padding: 0 1; }
+    .response-status {
+        width: auto;
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    .response-status LoadingIndicator { width: 3; height: 1; color: $primary; }
+    .response-status .status-label { width: auto; }
     .user-message {
         width: 100%;
         height: auto;
@@ -187,6 +195,7 @@ class PaimonApp(App):
             yield prompt
 
     def on_mount(self) -> None:
+        self.query_one("#log", VerticalScroll).anchor()
         self.query_one(PromptInput).focus()
         if self._resumed:
             self._render_history()
@@ -250,17 +259,26 @@ class PaimonApp(App):
         self._scroll()
         return widget
 
+    def _add_response_status(self) -> Horizontal:
+        log = self.query_one("#log", VerticalScroll)
+        widget = Horizontal(
+            LoadingIndicator(),
+            Static(" Thinking…", classes="status-label"),
+            classes="response-status",
+        )
+        log.mount(widget)
+        self._scroll()
+        return widget
+
     def _scroll(self) -> None:
         log = self.query_one("#log", VerticalScroll)
-        # Markdown is laid out asynchronously after a streaming update. Scrolling
-        # immediately uses its previous height and can leave the newest lines
-        # below the viewport, which looks like a truncated response.
-        def scroll_after_layout() -> None:
-            log.scroll_end(animate=False)
-            # Markdown may request one more layout pass after rendering its blocks.
-            self.call_after_refresh(log.scroll_end, animate=False)
-
-        self.call_after_refresh(scroll_after_layout)
+        # Anchoring is Textual's built-in tail-following mode. Unlike a one-off
+        # scroll_end call, it keeps following as streamed Markdown changes height.
+        log.anchor()
+        # anchor() performs its initial scroll immediately, before newly mounted
+        # or updated widgets have necessarily completed layout. This deferred
+        # pass uses the final max_scroll_y and covers rapid tool → reply changes.
+        log.scroll_end(animate=False, force=True)
 
     def _render_todos(self, todos: list[dict]) -> Content:
         if not todos:
@@ -299,10 +317,18 @@ class PaimonApp(App):
         buffer = ""
         reasoning: Static | None = None
         reasoning_buf = ""
+        status: Horizontal | None = self._add_response_status()
+
+        def clear_status() -> None:
+            nonlocal status
+            if status is not None:
+                status.remove()
+                status = None
 
         try:
             async for ev in self.agent.run(text):
                 if isinstance(ev, ReasoningDelta):
+                    clear_status()
                     reasoning_buf += ev.text
                     body = Content(reasoning_buf)
                     if reasoning is None:
@@ -312,6 +338,7 @@ class PaimonApp(App):
                     self._scroll()
 
                 elif isinstance(ev, TextDelta):
+                    clear_status()
                     buffer += ev.text
                     if assistant is None:
                         assistant = self._add_markdown(buffer)
@@ -320,6 +347,7 @@ class PaimonApp(App):
                     self._scroll()
 
                 elif isinstance(ev, ToolStart):
+                    clear_status()
                     # start fresh assistant/reasoning blocks after a tool runs
                     assistant, buffer = None, ""
                     reasoning, reasoning_buf = None, ""
@@ -336,18 +364,22 @@ class PaimonApp(App):
                     )
 
                 elif isinstance(ev, TodosUpdate):
+                    clear_status()
                     self._add(self._render_todos(ev.todos))
 
                 elif isinstance(ev, ToolEnd):
                     if ev.name == "write_todos":
+                        status = self._add_response_status()
                         continue
                     preview = "\n".join(ev.result.splitlines()[:15])
                     if len(ev.result.splitlines()) > 15:
                         preview += "\n…"
                     classes = "tool-result denied" if ev.denied else "tool-result"
                     self._add(Content(preview or "(no output)"), classes=classes)
+                    status = self._add_response_status()
 
                 elif isinstance(ev, TurnEnd):
+                    clear_status()
                     self._scroll()
         except asyncio.CancelledError:
             self._add(Content.from_markup("[$text-warning]⏹ Interrupted[/]"))
@@ -355,6 +387,7 @@ class PaimonApp(App):
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
+            clear_status()
             inp.disabled = False
             inp.focus()
 
