@@ -208,8 +208,19 @@ class PaimonApp(App):
             role, body = message.get("role"), message.get("content")
             if role == "user" and body:
                 self._add_user(body)
-            elif role == "assistant" and body:
-                self._add_markdown(body)
+            elif role == "assistant":
+                if body:
+                    self._add_markdown(body)
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    name = function.get("name") or "tool"
+                    try:
+                        args = json.loads(function.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    self._add_tool_start(name, args)
+            elif role == "tool":
+                self._add_tool_result(str(body or "(no output)"))
 
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
@@ -269,6 +280,24 @@ class PaimonApp(App):
         log.mount(widget)
         self._scroll()
         return widget
+
+    def _add_tool_start(self, name: str, args: dict) -> Static:
+        detail = args.get("command") or args.get("path") or json.dumps(args)
+        return self._add(
+            Content.from_markup(
+                "[$text-accent b]$name[/]  [$text-muted]$detail[/]",
+                name=name,
+                detail=detail,
+            )
+        )
+
+    def _add_tool_result(self, result: str, *, denied: bool = False) -> Static:
+        lines = result.splitlines()
+        preview = "\n".join(lines[:15])
+        if len(lines) > 15:
+            preview += "\n…"
+        classes = "tool-result denied" if denied else "tool-result"
+        return self._add(Content(preview or "(no output)"), classes=classes)
 
     def _scroll(self) -> None:
         log = self.query_one("#log", VerticalScroll)
@@ -354,14 +383,7 @@ class PaimonApp(App):
                     # write_todos renders its own panel via TodosUpdate
                     if ev.name == "write_todos":
                         continue
-                    detail = ev.args.get("command") or ev.args.get("path") or json.dumps(ev.args)
-                    self._add(
-                        Content.from_markup(
-                            "[$text-accent b]$name[/]  [$text-muted]$detail[/]",
-                            name=ev.name,
-                            detail=detail,
-                        )
-                    )
+                    self._add_tool_start(ev.name, ev.args)
 
                 elif isinstance(ev, TodosUpdate):
                     clear_status()
@@ -371,11 +393,7 @@ class PaimonApp(App):
                     if ev.name == "write_todos":
                         status = self._add_response_status()
                         continue
-                    preview = "\n".join(ev.result.splitlines()[:15])
-                    if len(ev.result.splitlines()) > 15:
-                        preview += "\n…"
-                    classes = "tool-result denied" if ev.denied else "tool-result"
-                    self._add(Content(preview or "(no output)"), classes=classes)
+                    self._add_tool_result(ev.result, denied=ev.denied)
                     status = self._add_response_status()
 
                 elif isinstance(ev, TurnEnd):

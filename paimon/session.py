@@ -62,11 +62,16 @@ class Session:
         if not directory.is_dir():
             return None
         paths = sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        fallback: Optional["Session"] = None
         for path in paths:
             records = cls._read_records(path)
             if records and records[0].get("type") == "session" and records[0].get("version") == FORMAT_VERSION:
-                return cls(path, str(records[0]["id"]), cwd)
-        return None
+                session = cls(path, str(records[0]["id"]), cwd)
+                if fallback is None:
+                    fallback = session
+                if any(record.get("type") == "message" for record in records):
+                    return session
+        return fallback
 
     @staticmethod
     def _read_records(path: Path) -> list[dict]:
