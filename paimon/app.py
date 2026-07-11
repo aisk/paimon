@@ -161,12 +161,13 @@ class PaimonApp(App):
             SystemCommand("New session", "Start a new empty session", self.action_new_session),
         ]
 
-    def __init__(self, continue_session: bool = False) -> None:
+    def __init__(self, continue_session: bool = False, yolo: bool = False) -> None:
         self._persist_theme_changes = False
         super().__init__()
+        self.yolo = yolo
         cwd = Path.cwd()
         session = Session.latest(cwd) if continue_session else None
-        self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session)
+        self.agent = Agent(cwd=cwd, confirm=None if yolo else self._confirm, session=session)
         self._resumed = session is not None
         self._turn: Worker | None = None
         if config.THEME in self.available_themes:
@@ -204,7 +205,7 @@ class PaimonApp(App):
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
-        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm)
+        self.agent = Agent(cwd=Path.cwd(), confirm=None if self.yolo else self._confirm)
         self.query_one("#log", VerticalScroll).remove_children()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
 
@@ -362,8 +363,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Paimon terminal code agent")
     parser.add_argument("-c", "--continue", dest="continue_session", action="store_true",
                         help="continue the most recent session for this directory")
+    parser.add_argument("--yolo", action="store_true",
+                        help="allow dangerous tool calls without confirmation")
     args = parser.parse_args()
-    PaimonApp(continue_session=args.continue_session).run()
+    PaimonApp(continue_session=args.continue_session, yolo=args.yolo).run()
 
 
 if __name__ == "__main__":

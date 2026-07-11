@@ -19,6 +19,7 @@ On first launch (no config yet) Paimon walks you through provider → model → 
 ```bash
 uv run paimon        # or: uv run main.py
 uv run paimon -c     # continue the most recent session for this directory
+uv run paimon --yolo # run commands and file changes without confirmation
 ```
 
 Sessions are appended as JSONL under `~/.local/share/paimon/sessions/` (or
