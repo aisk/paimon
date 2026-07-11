@@ -14,6 +14,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 import litellm
 
 from . import config, tools
+from .session import Session
 
 litellm.telemetry = False
 litellm.suppress_debug_info = True
@@ -115,17 +116,22 @@ Guidelines:
 
 
 class Agent:
-    def __init__(self, cwd: Optional[Path] = None, confirm: Optional[ConfirmFn] = None):
+    def __init__(self, cwd: Optional[Path] = None, confirm: Optional[ConfirmFn] = None,
+                 session: Optional[Session] = None):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
         self.todos: list[dict] = []
-        self.messages: list[dict] = [
-            {"role": "system", "content": _system_prompt(self.cwd)}
-        ]
+        self.session = session or Session.create(self.cwd)
+        self.messages: list[dict] = [{"role": "system", "content": _system_prompt(self.cwd)}]
+        self.messages.extend(self.session.messages())
+
+    def _append_message(self, message: dict) -> None:
+        self.messages.append(message)
+        self.session.append_message(message)
 
     async def run(self, user_input: str) -> AsyncIterator[object]:
         """Run one user turn to completion, yielding events along the way."""
-        self.messages.append({"role": "user", "content": user_input})
+        self._append_message({"role": "user", "content": user_input})
 
         while True:
             response = await litellm.acompletion(
@@ -164,7 +170,7 @@ class Agent:
             except asyncio.CancelledError:
                 # Interrupted mid-stream: keep partial text (drop incomplete tool
                 # calls) so the message history stays valid for the next request.
-                self.messages.append({"role": "assistant", "content": content or "(interrupted)"})
+                self._append_message({"role": "assistant", "content": content or "(interrupted)"})
                 raise
 
             ordered = [calls[i] for i in sorted(calls)]
@@ -179,7 +185,7 @@ class Agent:
                     }
                     for c in ordered
                 ]
-            self.messages.append(assistant_msg)
+            self._append_message(assistant_msg)
 
             if not ordered:
                 yield TurnEnd()
@@ -194,8 +200,9 @@ class Agent:
                 for c in ordered
             ]
             self.messages.extend(tool_msgs)
+            persisted_tool_ids = [self.session.append_message(message) for message in tool_msgs]
 
-            for slot, c in zip(tool_msgs, ordered):
+            for slot, c, persisted_id in zip(tool_msgs, ordered, persisted_tool_ids):
                 try:
                     args = json.loads(c["args"] or "{}")
                 except json.JSONDecodeError:
@@ -209,6 +216,7 @@ class Agent:
                     self.todos = args.get("todos") or []
                     result = tools.render_todos(self.todos)
                     slot["content"] = result
+                    self.session.append_message(slot, replaces=persisted_id)
                     yield TodosUpdate(list(self.todos))
                     yield ToolEnd(c["id"], name, result)
                     continue
@@ -223,5 +231,6 @@ class Agent:
                     result = await tools.execute_tool(name, args, self.cwd)
 
                 slot["content"] = result
+                self.session.append_message(slot, replaces=persisted_id)
                 yield ToolEnd(c["id"], name, result, denied=denied)
             # loop again so the model can react to tool results

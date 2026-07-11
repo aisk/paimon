@@ -1,5 +1,6 @@
 """Textual TUI for the Paimon agent."""
 
+import argparse
 import asyncio
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ from .agent import (
 )
 from . import config
 from .login import LoginScreen
+from .session import Session
 
 _TODO_STYLE = {
     "completed": ("✔", "$text-success"),
@@ -126,12 +128,16 @@ class PaimonApp(App):
                 "Reconfigure model, API base and API key",
                 self.action_login,
             ),
+            SystemCommand("New session", "Start a new empty session", self.action_new_session),
         ]
 
-    def __init__(self) -> None:
+    def __init__(self, continue_session: bool = False) -> None:
         self._persist_theme_changes = False
         super().__init__()
-        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm)
+        cwd = Path.cwd()
+        session = Session.latest(cwd) if continue_session else None
+        self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session)
+        self._resumed = session is not None
         self._turn: Worker | None = None
         if config.THEME in self.available_themes:
             self.theme = config.THEME
@@ -150,8 +156,26 @@ class PaimonApp(App):
 
     def on_mount(self) -> None:
         self.query_one(PromptInput).focus()
+        if self._resumed:
+            self._render_history()
+            self._add(Content.from_markup("[$text-muted]Continued session $id[/]", id=self.agent.session.id[:8]))
         if not config.MODEL:
             self.action_login()
+
+    def _render_history(self) -> None:
+        for message in self.agent.messages[1:]:
+            role, body = message.get("role"), message.get("content")
+            if role == "user" and body:
+                self._add(Content.from_markup("[$text-primary b]Traveler[/]\n$body", body=body))
+            elif role == "assistant" and body:
+                self._add(Content.from_markup("[$text-success b]Paimon[/]\n$body", body=body))
+
+    def action_new_session(self) -> None:
+        if self._turn is not None and self._turn.is_running:
+            return
+        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm)
+        self.query_one("#log", VerticalScroll).remove_children()
+        self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
 
     # ---- login --------------------------------------------------------------
 
@@ -282,7 +306,11 @@ class PaimonApp(App):
 
 
 def main() -> None:
-    PaimonApp().run()
+    parser = argparse.ArgumentParser(description="Paimon terminal code agent")
+    parser.add_argument("-c", "--continue", dest="continue_session", action="store_true",
+                        help="continue the most recent session for this directory")
+    args = parser.parse_args()
+    PaimonApp(continue_session=args.continue_session).run()
 
 
 if __name__ == "__main__":

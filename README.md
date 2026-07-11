@@ -18,7 +18,13 @@ On first launch (no config yet) Paimon walks you through provider → model → 
 
 ```bash
 uv run paimon        # or: uv run main.py
+uv run paimon -c     # continue the most recent session for this directory
 ```
+
+Sessions are appended as JSONL under `~/.local/share/paimon/sessions/` (or
+`$XDG_DATA_HOME/paimon/sessions/`) and separated by working directory. Override
+the data directory with `PAIMON_DATA_HOME`. Use “New session” from the command
+palette to leave the current history and start fresh.
 
 ## Layout
 
