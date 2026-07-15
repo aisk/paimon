@@ -16,6 +16,8 @@ from textual.worker import Worker
 
 from .agent import (
     Agent,
+    ContextCompactionFailed,
+    ContextCompacted,
     ReasoningDelta,
     TextDelta,
     TodosUpdate,
@@ -24,6 +26,7 @@ from .agent import (
     TurnEnd,
 )
 from . import config
+from .compaction import SUMMARY_NAME
 from .login import LoginScreen
 from .session import Session
 from .ui import AssistantMessage, UserMessage
@@ -206,6 +209,9 @@ class PaimonApp(App):
     def _render_history(self) -> None:
         for message in self.agent.messages[1:]:
             role, body = message.get("role"), message.get("content")
+            if message.get("name") == SUMMARY_NAME:
+                self._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
+                continue
             if role == "user" and body:
                 self._add_user(body)
             elif role == "assistant":
@@ -394,6 +400,27 @@ class PaimonApp(App):
                         status = self._add_response_status()
                         continue
                     self._add_tool_result(ev.result, denied=ev.denied)
+                    status = self._add_response_status()
+
+                elif isinstance(ev, ContextCompacted):
+                    clear_status()
+                    self._add(
+                        Content.from_markup(
+                            "[$text-muted]Context compacted: $before → ~$after tokens[/]",
+                            before=f"{ev.tokens_before:,}",
+                            after=f"{ev.tokens_after:,}",
+                        )
+                    )
+                    status = self._add_response_status()
+
+                elif isinstance(ev, ContextCompactionFailed):
+                    clear_status()
+                    self._add(
+                        Content.from_markup(
+                            "[$text-warning]Context compaction failed; continuing without it: $error[/]",
+                            error=ev.error,
+                        )
+                    )
                     status = self._add_response_status()
 
                 elif isinstance(ev, TurnEnd):

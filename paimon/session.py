@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+from .compaction import summary_message
+
 FORMAT_VERSION = 1
 
 
@@ -93,6 +95,17 @@ class Session:
         messages: list[dict] = []
         positions: dict[str, int] = {}
         for record in self._read_records(self.path):
+            if record.get("type") == "compaction":
+                summary = record.get("summary")
+                kept_messages = record.get("kept_messages")
+                if isinstance(summary, str) and isinstance(kept_messages, list):
+                    kept = [message for message in kept_messages if isinstance(message, dict)]
+                    messages = [summary_message(summary), *kept]
+                    # Compaction snapshots are final: later replacement records
+                    # only refer to messages appended after this checkpoint.
+                    positions = {}
+                continue
+
             message = record.get("message")
             if record.get("type") != "message" or not isinstance(message, dict):
                 continue
@@ -112,6 +125,17 @@ class Session:
             record["replaces"] = replaces
         self.append(record)
         return record_id
+
+    def append_compaction(self, summary: str, kept_messages: list[dict], tokens_before: int) -> None:
+        """Persist a checkpoint without deleting any earlier JSONL records."""
+        self.append({
+            "type": "compaction",
+            "id": str(uuid4()),
+            "timestamp": _now(),
+            "summary": summary,
+            "kept_messages": kept_messages,
+            "tokens_before": tokens_before,
+        })
 
     def append(self, record: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
