@@ -37,6 +37,13 @@ API_BASE: Optional[str] = _cfg.get("api_base")
 API_KEY: Optional[str] = _cfg.get("api_key")
 THEME: Optional[str] = _cfg.get("theme")
 
+_compaction = _cfg.get("compaction") if isinstance(_cfg.get("compaction"), dict) else {}
+COMPACTION_ENABLED: bool = _compaction.get("enabled", True)
+COMPACTION_RESERVE_TOKENS: int = _compaction.get("reserve_tokens", 16_384)
+COMPACTION_KEEP_RECENT_TOKENS: int = _compaction.get("keep_recent_tokens", 20_000)
+# Useful for custom model names that are absent from LiteLLM's model catalog.
+COMPACTION_CONTEXT_WINDOW: Optional[int] = _compaction.get("context_window")
+
 
 def save(
     model: Optional[str] = None,

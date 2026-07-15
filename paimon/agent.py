@@ -19,7 +19,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 
 import litellm
 
-from . import config, tools
+from . import compaction, config, tools
 from .session import Session
 
 litellm.telemetry = False
@@ -62,6 +62,17 @@ class TodosUpdate:
 @dataclass
 class TurnEnd:
     pass
+
+
+@dataclass
+class ContextCompacted:
+    tokens_before: int
+    tokens_after: int
+
+
+@dataclass
+class ContextCompactionFailed:
+    error: str
 
 
 # A confirm callback returns True to allow a dangerous tool, False to deny.
@@ -263,11 +274,48 @@ class Agent:
         self.messages.append(message)
         self.session.append_message(message)
 
+    async def _maybe_compact(self) -> Optional[compaction.CompactionResult]:
+        if not config.COMPACTION_ENABLED:
+            return None
+
+        window = compaction.context_window(config.MODEL, config.COMPACTION_CONTEXT_WINDOW)
+        tokens_before = compaction.count_tokens(config.MODEL, self.messages, tools.TOOLS)
+        if not compaction.should_compact(tokens_before, window, config.COMPACTION_RESERVE_TOKENS):
+            return None
+
+        result = await compaction.compact(
+            self.messages[1:],
+            model=config.MODEL,
+            api_base=config.API_BASE,
+            api_key=config.API_KEY,
+            keep_recent_tokens=config.COMPACTION_KEEP_RECENT_TOKENS,
+            tokens_before=tokens_before,
+            tool_schemas=tools.TOOLS,
+        )
+        if result is None:
+            return None
+
+        self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
+        self.messages = [self.messages[0], compaction.summary_message(result.summary), *result.kept_messages]
+        result.tokens_after = compaction.count_tokens(config.MODEL, self.messages, tools.TOOLS)
+        return result
+
     async def run(self, user_input: str) -> AsyncIterator[object]:
         """Run one user turn to completion, yielding events along the way."""
         self._append_message({"role": "user", "content": user_input})
+        compaction_failed = False
 
         while True:
+            if not compaction_failed:
+                try:
+                    compacted = await self._maybe_compact()
+                except Exception as exc:  # noqa: BLE001 - the normal request may still fit
+                    compaction_failed = True
+                    yield ContextCompactionFailed(str(exc))
+                else:
+                    if compacted:
+                        yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
+
             response = await litellm.acompletion(
                 model=config.MODEL,
                 api_base=config.API_BASE,
