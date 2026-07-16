@@ -118,6 +118,22 @@ class Session:
                 messages.append(message)
         return messages
 
+    def system_prompt(self) -> Optional[str]:
+        """Return the system prompt snapshot stored for this session."""
+        for record in self._read_records(self.path):
+            if record.get("type") == "system_prompt" and isinstance(record.get("content"), str):
+                return record["content"]
+        return None
+
+    def append_system_prompt(self, content: str) -> None:
+        """Persist the system prompt generated when the session is first loaded."""
+        self.append({
+            "type": "system_prompt",
+            "version": 1,
+            "timestamp": _now(),
+            "content": content,
+        })
+
     def append_message(self, message: dict, replaces: Optional[str] = None) -> str:
         record_id = str(uuid4())
         record = {"type": "message", "id": record_id, "timestamp": _now(), "message": message}

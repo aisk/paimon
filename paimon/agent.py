@@ -267,7 +267,11 @@ class Agent:
         self.confirm = confirm
         self.todos: list[dict] = []
         self.session = session or Session.create(self.cwd)
-        self.messages: list[dict] = [{"role": "system", "content": _system_prompt(self.cwd)}]
+        system_prompt = self.session.system_prompt()
+        if system_prompt is None:
+            system_prompt = _system_prompt(self.cwd)
+            self.session.append_system_prompt(system_prompt)
+        self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
         self.messages.extend(self.session.messages())
 
     def _append_message(self, message: dict) -> None:
