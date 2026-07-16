@@ -25,8 +25,11 @@ class AgentSystemPromptTest(unittest.TestCase):
             cwd = Path(directory)
             session = self._session(cwd)
 
-            with patch("paimon.agent._system_prompt", return_value="snapshot") as generate:
-                first = Agent(cwd=cwd, session=session)
+            with (
+                patch("paimon.agent.Session.create", return_value=session),
+                patch("paimon.agent._system_prompt", return_value="snapshot") as generate,
+            ):
+                first = Agent(cwd=cwd)
 
             self.assertEqual(first.messages[0], {"role": "system", "content": "snapshot"})
             self.assertEqual(session.system_prompt(), "snapshot")
@@ -38,18 +41,16 @@ class AgentSystemPromptTest(unittest.TestCase):
             self.assertEqual(resumed.messages[0], {"role": "system", "content": "snapshot"})
             generate.assert_not_called()
 
-    def test_existing_session_without_snapshot_is_backfilled_once(self) -> None:
+    def test_session_without_snapshot_does_not_regenerate_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             session = self._session(cwd)
-            session.append_message({"role": "user", "content": "legacy message"})
 
-            with patch("paimon.agent._system_prompt", return_value="backfilled") as generate:
-                agent = Agent(cwd=cwd, session=session)
+            with patch("paimon.agent._system_prompt") as generate:
+                with self.assertRaisesRegex(RuntimeError, "persisted system prompt"):
+                    Agent(cwd=cwd, session=session)
 
-            self.assertEqual(agent.messages[0]["content"], "backfilled")
-            self.assertEqual(session.system_prompt(), "backfilled")
-            generate.assert_called_once_with(cwd)
+            generate.assert_not_called()
 
 
 if __name__ == "__main__":

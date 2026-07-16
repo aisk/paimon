@@ -266,11 +266,15 @@ class Agent:
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
         self.todos: list[dict] = []
-        self.session = session or Session.create(self.cwd)
-        system_prompt = self.session.system_prompt()
-        if system_prompt is None:
+        if session is None:
+            self.session = Session.create(self.cwd)
             system_prompt = _system_prompt(self.cwd)
             self.session.append_system_prompt(system_prompt)
+        else:
+            self.session = session
+            system_prompt = self.session.system_prompt()
+            if system_prompt is None:
+                raise RuntimeError("Session does not contain a persisted system prompt")
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
         self.messages.extend(self.session.messages())
 
