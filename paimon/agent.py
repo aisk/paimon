@@ -20,6 +20,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 import litellm
 
 from . import compaction, config, tools
+from .mentions import MentionExpander
 from .session import Session
 
 litellm.telemetry = False
@@ -243,6 +244,11 @@ Guidelines:
   (grep), git, and running tests.
 - For tasks with several steps, call write_todos first to lay out a plan, then keep
   it updated as you go (one task in_progress at a time). Skip it for simple tasks.
+- User @path mentions are expanded into <mentioned_file> tags. A tag with
+  exposure="full" contains the complete file version. exposure="preview" contains
+  only its beginning; use read_file for omitted or exact content. A tag with
+  status="previously_mentioned" repeats no content but identifies a version already
+  present in this active context. A tag with another status is an attachment error.
 - Be direct. When the task is done, briefly state what you did. Don't narrate every step."""
 
     context_files = _load_context_files(cwd)
@@ -277,6 +283,7 @@ class Agent:
                 raise RuntimeError("Session does not contain a persisted system prompt")
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
         self.messages.extend(self.session.messages())
+        self.mentions = MentionExpander(self.cwd, self.messages[1:])
 
     def _append_message(self, message: dict) -> None:
         self.messages.append(message)
@@ -305,12 +312,15 @@ class Agent:
 
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.messages = [self.messages[0], compaction.summary_message(result.summary), *result.kept_messages]
+        # Mentions may only reference file bodies that remain in the effective
+        # prompt. A compacted prefix is no longer available to the model.
+        self.mentions = MentionExpander(self.cwd, self.messages[1:])
         result.tokens_after = compaction.count_tokens(config.MODEL, self.messages, tools.TOOLS)
         return result
 
     async def run(self, user_input: str) -> AsyncIterator[object]:
         """Run one user turn to completion, yielding events along the way."""
-        self._append_message({"role": "user", "content": user_input})
+        self._append_message({"role": "user", "content": self.mentions.expand(user_input)})
         compaction_failed = False
 
         while True:
