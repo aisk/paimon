@@ -41,12 +41,22 @@ _TODO_STYLE = {
 
 
 class PromptInput(TextArea):
-    """Multi-line prompt editor. Enter submits; Shift+Enter / Ctrl+J insert a newline."""
+    """Multi-line prompt editor. Enter submits; Shift+Enter / Ctrl+J insert a newline.
+
+    Up on the first line / Down on the last line walk previously submitted
+    prompts, bash-style; walking past the newest entry restores the draft.
+    """
 
     class Submitted(Message):
         def __init__(self, text: str) -> None:
             self.text = text
             super().__init__()
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._history: list[str] = []
+        self._history_index: int | None = None
+        self._draft = ""
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
@@ -54,6 +64,7 @@ class PromptInput(TextArea):
             event.stop()
             text = self.text.strip()
             if text:
+                self._remember(text)
                 self.post_message(self.Submitted(text))
             return
         if event.key in ("ctrl+j", "shift+enter"):
@@ -61,13 +72,68 @@ class PromptInput(TextArea):
             event.stop()
             self.insert("\n")
             return
+        if event.key == "up" and self._history and self.cursor_location[0] == 0:
+            event.prevent_default()
+            event.stop()
+            self._history_prev()
+            return
+        if (
+            event.key == "down"
+            and self._history_index is not None
+            and self.cursor_location[0] == self.document.line_count - 1
+        ):
+            event.prevent_default()
+            event.stop()
+            self._history_next()
+            return
         await super()._on_key(event)
 
+    def _remember(self, text: str) -> None:
+        if not self._history or self._history[-1] != text:
+            self._history.append(text)
+        self._history_index = None
+        self._draft = ""
 
-class ConfirmScreen(ModalScreen[bool]):
-    """Yes/No confirmation for a dangerous tool call."""
+    def _recall(self, text: str) -> None:
+        self.load_text(text)
+        self.move_cursor(self.document.end)
 
-    BINDINGS = [("y", "allow", "Allow"), ("n", "deny", "Deny"), ("escape", "deny", "Deny")]
+    def _history_prev(self) -> None:
+        if self._history_index is None:
+            self._draft = self.text
+            self._history_index = len(self._history) - 1
+        elif self._history_index > 0:
+            self._history_index -= 1
+        else:
+            return
+        self._recall(self._history[self._history_index])
+
+    def _history_next(self) -> None:
+        if self._history_index is None:
+            return
+        if self._history_index < len(self._history) - 1:
+            self._history_index += 1
+            self._recall(self._history[self._history_index])
+        else:
+            self._history_index = None
+            self._recall(self._draft)
+
+
+class ConfirmScreen(ModalScreen[str]):
+    """Confirmation for a dangerous tool call.
+
+    Dismisses with "allow", "always" (allow this tool for the rest of the
+    session) or "deny". Shows what would actually run/change, not just a path.
+    """
+
+    BINDINGS = [
+        ("y", "allow", "Allow"),
+        ("a", "always", "Always (session)"),
+        ("n", "deny", "Deny"),
+        ("escape", "deny", "Deny"),
+    ]
+
+    _CLIP = 1_500
 
     def __init__(self, tool_name: str, args: dict) -> None:
         super().__init__()
@@ -75,25 +141,52 @@ class ConfirmScreen(ModalScreen[bool]):
         self.args = args
 
     def compose(self) -> ComposeResult:
-        detail = self.args.get("command") or self.args.get("path") or ""
-        body = Content.from_markup(
-            "[b]Allow this action?[/]\n\n[$text-warning b]$tool[/]  [$text-muted]$detail[/]",
-            tool=self.tool_name,
-            detail=detail,
+        title = Content.from_markup(
+            "[b]Allow this action?[/]  [$text-warning b]$tool[/]", tool=self.tool_name
         )
         with Vertical(id="confirm-box"):
-            yield Static(body)
+            yield Static(title)
+            with VerticalScroll(id="confirm-detail"):
+                yield Static(self._detail())
             with Horizontal(id="confirm-buttons"):
                 yield Button("Allow (y)", variant="success", id="allow")
+                yield Button("Always · session (a)", variant="primary", id="always")
                 yield Button("Deny (n)", variant="error", id="deny")
+
+    @staticmethod
+    def _clip(text: str, limit: int = _CLIP) -> str:
+        return text if len(text) <= limit else text[:limit] + " …"
+
+    def _detail(self) -> Content:
+        args = self.args
+        if self.tool_name == "bash":
+            return Content(self._clip(str(args.get("command") or "")))
+        if self.tool_name == "write_file":
+            return Content.from_markup(
+                "$path\n\n[$text-muted]$content[/]",
+                path=str(args.get("path") or ""),
+                content=self._clip(str(args.get("content") or "")),
+            )
+        if self.tool_name == "edit_file":
+            return Content.from_markup(
+                "$path\n\n[$text-error]- $old[/]\n[$text-success]+ $new[/]",
+                path=str(args.get("path") or ""),
+                old=self._clip(str(args.get("old_string") or ""), 500),
+                new=self._clip(str(args.get("new_string") or ""), 500),
+            )
+        return Content(self._clip(json.dumps(args, ensure_ascii=False)))
 
     @on(Button.Pressed, "#allow")
     def action_allow(self) -> None:
-        self.dismiss(True)
+        self.dismiss("allow")
+
+    @on(Button.Pressed, "#always")
+    def action_always(self) -> None:
+        self.dismiss("always")
 
     @on(Button.Pressed, "#deny")
     def action_deny(self) -> None:
-        self.dismiss(False)
+        self.dismiss("deny")
 
 
 class PaimonApp(App):
@@ -144,10 +237,14 @@ class PaimonApp(App):
     .tool-result { color: $text-muted; }
     .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
     ConfirmScreen { align: center middle; }
-    #confirm-box { width: 70%; height: auto; padding: 1 2; border: round $warning; background: $surface; }
+    #confirm-box {
+        width: 70%; height: auto; max-height: 80%;
+        padding: 1 2; border: round $warning; background: $surface;
+    }
+    #confirm-detail { height: auto; max-height: 16; margin-top: 1; color: $text-muted; }
     #confirm-buttons { height: auto; margin-top: 1; }
     #confirm-buttons Button { width: 1fr; }
-    #confirm-buttons #allow { margin-right: 1; }
+    #confirm-buttons #allow, #confirm-buttons #always { margin-right: 1; }
 
     LoginScreen, PickerScreen, PromptScreen { align: center middle; }
     #picker-box, #prompt-screen-box, #login-status {
@@ -185,6 +282,7 @@ class PaimonApp(App):
         self._resumed = session is not None
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
+        self._session_allowed: set[str] = set()
         if config.THEME in self.available_themes:
             self.theme = config.THEME
         self._persist_theme_changes = True
@@ -253,6 +351,7 @@ class PaimonApp(App):
         self.agent = Agent(cwd=Path.cwd(), confirm=None if self.yolo else self._confirm)
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
+        self._session_allowed.clear()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._refresh_statusbar()
 
@@ -365,7 +464,12 @@ class PaimonApp(App):
     # ---- confirmation hook (called from the agent loop) --------------------
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
-        return await self.push_screen_wait(ConfirmScreen(tool_name, args))
+        if tool_name in self._session_allowed:
+            return True
+        verdict = await self.push_screen_wait(ConfirmScreen(tool_name, args))
+        if verdict == "always":
+            self._session_allowed.add(tool_name)
+        return verdict in ("allow", "always")
 
     # ---- input → turn -------------------------------------------------------
 
