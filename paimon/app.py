@@ -12,6 +12,7 @@ from textual.content import Content
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, LoadingIndicator, Static, TextArea
+from textual.widgets.markdown import MarkdownStream
 from textual.worker import Worker
 
 from .agent import (
@@ -255,25 +256,27 @@ class PaimonApp(App):
 
     # ---- rendering helpers --------------------------------------------------
 
+    # The #log container is anchored once in on_mount: the compositor keeps an
+    # anchored scrollable pinned to the bottom as content grows, releases the
+    # anchor while the user scrolls up, and re-engages it when they return to
+    # the bottom. Helpers therefore just mount widgets — no manual scrolling.
+
     def _add(self, renderable, classes: str = "") -> Static:
         log = self.query_one("#log", VerticalScroll)
         widget = Static(renderable, classes=classes)
         log.mount(widget)
-        self._scroll()
         return widget
 
     def _add_markdown(self, body: str) -> AssistantMessage:
         log = self.query_one("#log", VerticalScroll)
         widget = AssistantMessage(body)
         log.mount(widget)
-        self._scroll()
         return widget
 
     def _add_user(self, body: str) -> UserMessage:
         log = self.query_one("#log", VerticalScroll)
         widget = UserMessage(body)
         log.mount(widget)
-        self._scroll()
         return widget
 
     def _add_response_status(self) -> Horizontal:
@@ -284,7 +287,6 @@ class PaimonApp(App):
             classes="response-status",
         )
         log.mount(widget)
-        self._scroll()
         return widget
 
     def _add_tool_start(self, name: str, args: dict) -> Static:
@@ -304,16 +306,6 @@ class PaimonApp(App):
             preview += "\n…"
         classes = "tool-result denied" if denied else "tool-result"
         return self._add(Content(preview or "(no output)"), classes=classes)
-
-    def _scroll(self) -> None:
-        log = self.query_one("#log", VerticalScroll)
-        # Anchoring is Textual's built-in tail-following mode. Unlike a one-off
-        # scroll_end call, it keeps following as streamed Markdown changes height.
-        log.anchor()
-        # anchor() performs its initial scroll immediately, before newly mounted
-        # or updated widgets have necessarily completed layout. This deferred
-        # pass uses the final max_scroll_y and covers rapid tool → reply changes.
-        log.scroll_end(animate=False, force=True)
 
     def _render_todos(self, todos: list[dict]) -> Content:
         if not todos:
@@ -348,8 +340,7 @@ class PaimonApp(App):
         inp = self.query_one(PromptInput)
         inp.disabled = True
 
-        assistant: AssistantMessage | None = None
-        buffer = ""
+        stream: MarkdownStream | None = None
         reasoning: Static | None = None
         reasoning_buf = ""
         status: Horizontal | None = self._add_response_status()
@@ -359,6 +350,12 @@ class PaimonApp(App):
             if status is not None:
                 status.remove()
                 status = None
+
+        async def close_stream() -> None:
+            nonlocal stream
+            if stream is not None:
+                await stream.stop()
+                stream = None
 
         try:
             async for ev in self.agent.run(text):
@@ -370,21 +367,21 @@ class PaimonApp(App):
                         reasoning = self._add(body, classes="reasoning")
                     else:
                         reasoning.update(body)
-                    self._scroll()
 
                 elif isinstance(ev, TextDelta):
                     clear_status()
-                    buffer += ev.text
-                    if assistant is None:
-                        assistant = self._add_markdown(buffer)
-                    else:
-                        assistant.update_body(buffer)
-                    self._scroll()
+                    if stream is None:
+                        widget = AssistantMessage("")
+                        # Await the mount so the initial document (the Paimon
+                        # heading) is rendered before the stream appends to it.
+                        await self.query_one("#log", VerticalScroll).mount(widget)
+                        stream = AssistantMessage.get_stream(widget)
+                    await stream.write(ev.text)
 
                 elif isinstance(ev, ToolStart):
                     clear_status()
                     # start fresh assistant/reasoning blocks after a tool runs
-                    assistant, buffer = None, ""
+                    await close_stream()
                     reasoning, reasoning_buf = None, ""
                     # write_todos renders its own panel via TodosUpdate
                     if ev.name == "write_todos":
@@ -425,13 +422,13 @@ class PaimonApp(App):
 
                 elif isinstance(ev, TurnEnd):
                     clear_status()
-                    self._scroll()
         except asyncio.CancelledError:
             self._add(Content.from_markup("[$text-warning]⏹ Interrupted[/]"))
             raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
+            await close_stream()
             clear_status()
             inp.disabled = False
             inp.focus()

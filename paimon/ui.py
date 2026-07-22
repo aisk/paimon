@@ -17,9 +17,6 @@ class AssistantMessage(Markdown):
     def __init__(self, body: str) -> None:
         super().__init__(self._format_body(body), classes="assistant")
 
-    def update_body(self, body: str) -> None:
-        self.update(self._format_body(body))
-
     @staticmethod
     def _format_body(body: str) -> str:
         return f"**Paimon**\n\n{body}"
