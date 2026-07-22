@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import time
 from pathlib import Path
 
 from textual import events, on, work
@@ -26,11 +27,11 @@ from .agent import (
     ToolStart,
     TurnEnd,
 )
-from . import config
+from . import compaction, config, tools
 from .compaction import SUMMARY_NAME
 from .login import LoginScreen
 from .session import Session
-from .ui import AssistantMessage, UserMessage
+from .ui import AssistantMessage, ToolResult, UserMessage
 
 _TODO_STYLE = {
     "completed": ("✔", "$text-success"),
@@ -138,6 +139,7 @@ class PaimonApp(App):
     }
     #prompt:focus { border: round $primary; background: transparent; }
     #prompt:disabled { border: round $surface-lighten-1; opacity: 60%; }
+    #statusbar { height: 1; padding: 0 1; color: $text-muted; }
     .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
     .tool-result { color: $text-muted; }
     .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
@@ -182,6 +184,7 @@ class PaimonApp(App):
         self.agent = Agent(cwd=cwd, confirm=None if yolo else self._confirm, session=session)
         self._resumed = session is not None
         self._turn: Worker | None = None
+        self._todo_panel: Static | None = None
         if config.THEME in self.available_themes:
             self.theme = config.THEME
         self._persist_theme_changes = True
@@ -197,27 +200,35 @@ class PaimonApp(App):
             prompt = PromptInput(id="prompt", soft_wrap=True)
             prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt"
             yield prompt
+            yield Static(id="statusbar")
 
     def on_mount(self) -> None:
         self.query_one("#log", VerticalScroll).anchor()
         self.query_one(PromptInput).focus()
+        self._refresh_statusbar()
         if self._resumed:
             self._render_history()
             self._add(Content.from_markup("[$text-muted]Continued session $id[/]", id=self.agent.session.id[:8]))
+            self._update_statusbar_tokens()
         if not config.MODEL:
             self.action_login()
 
     def _render_history(self) -> None:
+        show_heading = True
+        pending_tools: list[str] = []
         for message in self.agent.messages[1:]:
             role, body = message.get("role"), message.get("content")
             if message.get("name") == SUMMARY_NAME:
                 self._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
+                show_heading = True
                 continue
             if role == "user" and body:
                 self._add_user(body)
+                show_heading = True
             elif role == "assistant":
                 if body:
-                    self._add_markdown(body)
+                    self._add_markdown(body, heading=show_heading)
+                    show_heading = False
                 for call in message.get("tool_calls") or []:
                     function = call.get("function") or {}
                     name = function.get("name") or "tool"
@@ -225,16 +236,25 @@ class PaimonApp(App):
                         args = json.loads(function.get("arguments") or "{}")
                     except json.JSONDecodeError:
                         args = {}
-                    self._add_tool_start(name, args)
+                    pending_tools.append(name)
+                    if name == "write_todos":
+                        self._show_todos(args.get("todos") or [])
+                    else:
+                        self._add_tool_start(name, args)
             elif role == "tool":
-                self._add_tool_result(str(body or "(no output)"))
+                name = pending_tools.pop(0) if pending_tools else ""
+                # the todos panel already shows this result
+                if name != "write_todos":
+                    self._add_tool_result(str(body or "(no output)"))
 
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
         self.agent = Agent(cwd=Path.cwd(), confirm=None if self.yolo else self._confirm)
         self.query_one("#log", VerticalScroll).remove_children()
+        self._todo_panel = None
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
+        self._refresh_statusbar()
 
     # ---- login --------------------------------------------------------------
 
@@ -250,6 +270,7 @@ class PaimonApp(App):
             elif not config.MODEL:
                 self._add(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
                 self.exit()
+            self._refresh_statusbar()
             self.query_one(PromptInput).focus()
 
         self.push_screen(LoginScreen(), _done)
@@ -267,9 +288,9 @@ class PaimonApp(App):
         log.mount(widget)
         return widget
 
-    def _add_markdown(self, body: str) -> AssistantMessage:
+    def _add_markdown(self, body: str, *, heading: bool = True) -> AssistantMessage:
         log = self.query_one("#log", VerticalScroll)
-        widget = AssistantMessage(body)
+        widget = AssistantMessage(body, heading=heading)
         log.mount(widget)
         return widget
 
@@ -299,13 +320,17 @@ class PaimonApp(App):
             )
         )
 
-    def _add_tool_result(self, result: str, *, denied: bool = False) -> Static:
-        lines = result.splitlines()
-        preview = "\n".join(lines[:15])
-        if len(lines) > 15:
-            preview += "\n…"
-        classes = "tool-result denied" if denied else "tool-result"
-        return self._add(Content(preview or "(no output)"), classes=classes)
+    def _add_tool_result(self, result: str, *, denied: bool = False) -> ToolResult:
+        log = self.query_one("#log", VerticalScroll)
+        widget = ToolResult(result, denied=denied)
+        log.mount(widget)
+        return widget
+
+    def _show_todos(self, todos: list[dict]) -> None:
+        """Keep a single todos panel, moving it to the end of the log on updates."""
+        if self._todo_panel is not None:
+            self._todo_panel.remove()
+        self._todo_panel = self._add(self._render_todos(todos))
 
     def _render_todos(self, todos: list[dict]) -> Content:
         if not todos:
@@ -316,6 +341,26 @@ class PaimonApp(App):
             kwargs[f"c{i}"] = t.get("content", "")
             lines.append(f"[{style}]{marker} ${f'c{i}'}[/]")
         return Content.from_markup("\n".join(lines), **kwargs)
+
+    # ---- status bar ---------------------------------------------------------
+
+    def _refresh_statusbar(self, tokens: int | None = None) -> None:
+        parts = [config.MODEL or "no model", f"session {self.agent.session.id[:8]}"]
+        if tokens is not None:
+            window = compaction.context_window(config.MODEL, config.COMPACTION_CONTEXT_WINDOW)
+            if window:
+                parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
+            else:
+                parts.append(f"context ~{tokens / 1000:.1f}k tokens")
+        self.query_one("#statusbar", Static).update(Content("  ·  ".join(parts)))
+
+    @work(exclusive=True, group="statusbar")
+    async def _update_statusbar_tokens(self) -> None:
+        # Token counting walks the whole history; keep it off the UI loop.
+        tokens = await asyncio.to_thread(
+            compaction.count_tokens, config.MODEL, list(self.agent.messages), tools.TOOLS
+        )
+        self._refresh_statusbar(tokens)
 
     # ---- confirmation hook (called from the agent loop) --------------------
 
@@ -343,13 +388,22 @@ class PaimonApp(App):
         stream: MarkdownStream | None = None
         reasoning: Static | None = None
         reasoning_buf = ""
+        first_text_block = True
         status: Horizontal | None = self._add_response_status()
+        turn_started = time.monotonic()
 
         def clear_status() -> None:
             nonlocal status
             if status is not None:
                 status.remove()
                 status = None
+
+        def tick() -> None:
+            if status is not None:
+                elapsed = int(time.monotonic() - turn_started)
+                status.query_one(".status-label", Static).update(f" Thinking… {elapsed}s")
+
+        timer = self.set_interval(1, tick)
 
         async def close_stream() -> None:
             nonlocal stream
@@ -371,7 +425,8 @@ class PaimonApp(App):
                 elif isinstance(ev, TextDelta):
                     clear_status()
                     if stream is None:
-                        widget = AssistantMessage("")
+                        widget = AssistantMessage("", heading=first_text_block)
+                        first_text_block = False
                         # Await the mount so the initial document (the Paimon
                         # heading) is rendered before the stream appends to it.
                         await self.query_one("#log", VerticalScroll).mount(widget)
@@ -390,7 +445,7 @@ class PaimonApp(App):
 
                 elif isinstance(ev, TodosUpdate):
                     clear_status()
-                    self._add(self._render_todos(ev.todos))
+                    self._show_todos(ev.todos)
 
                 elif isinstance(ev, ToolEnd):
                     if ev.name == "write_todos":
@@ -422,12 +477,14 @@ class PaimonApp(App):
 
                 elif isinstance(ev, TurnEnd):
                     clear_status()
+                    self._update_statusbar_tokens()
         except asyncio.CancelledError:
             self._add(Content.from_markup("[$text-warning]⏹ Interrupted[/]"))
             raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
+            timer.stop()
             await close_stream()
             clear_status()
             inp.disabled = False
