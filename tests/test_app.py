@@ -68,6 +68,42 @@ class ConfirmPanelTest(AppTestCase):
             self.assertFalse(await task)
 
 
+class ModeCycleTest(AppTestCase):
+    async def test_shift_tab_cycles_mode_and_updates_indicators(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            self.assertEqual(app.mode, "read")
+            prompt = app.query_one(PromptInput)
+            self.assertEqual(prompt.border_title, " read ")
+
+            await pilot.press("shift+tab")
+            self.assertEqual(app.mode, "edit")
+            self.assertEqual(app.agent.mode, "edit")
+            self.assertEqual(prompt.border_title, " edit ")
+            self.assertIn("edit mode", str(app.query_one("#statusbar", Static).render()))
+
+            await pilot.press("shift+tab", "shift+tab")
+            self.assertEqual(app.mode, "read")
+
+    async def test_new_session_keeps_current_mode(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            await pilot.press("shift+tab")
+            app.action_new_session()
+            self.assertEqual(app.agent.mode, "edit")
+
+    async def test_shift_tab_while_confirm_panel_open_keeps_pending_future(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            task = asyncio.ensure_future(app._confirm("bash", {"command": "echo hi"}))
+            await pilot.pause()
+            await pilot.press("shift+tab")
+            self.assertEqual(app.mode, "edit")
+            self.assertTrue(app.query("#confirm-panel"), "panel survives a mode switch")
+            await pilot.press("enter")
+            self.assertTrue(await task)
+
+
 class StatusLineTest(AppTestCase):
     async def test_pinned_status_layout_and_toggle(self) -> None:
         app = PaimonApp()

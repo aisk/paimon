@@ -8,6 +8,7 @@ from pathlib import Path
 
 from textual import on, work
 from textual.app import App, ComposeResult, SystemCommand
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.widgets import LoadingIndicator, Static
@@ -119,6 +120,8 @@ class PaimonApp(App):
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("escape", "interrupt", "Interrupt"),
+        # priority so the focused PromptInput (a TextArea) can't swallow the key
+        Binding("shift+tab", "cycle_mode", "Cycle permission mode", priority=True),
     ]
 
     def get_system_commands(self, screen) -> list[SystemCommand]:
@@ -132,13 +135,13 @@ class PaimonApp(App):
             SystemCommand("New session", "Start a new empty session", self.action_new_session),
         ]
 
-    def __init__(self, continue_session: bool = False, yolo: bool = False) -> None:
+    def __init__(self, continue_session: bool = False, mode: str = "read") -> None:
         self._persist_theme_changes = False
         super().__init__()
-        self.yolo = yolo
+        self.mode = mode
         cwd = Path.cwd()
         session = Session.latest(cwd) if continue_session else None
-        self.agent = Agent(cwd=cwd, confirm=None if yolo else self._confirm, session=session)
+        self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session, mode=mode)
         self._resumed = session is not None
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
@@ -167,13 +170,14 @@ class PaimonApp(App):
             queued.display = False
             yield queued
             prompt = PromptInput(id="prompt", soft_wrap=True)
-            prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt"
+            prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt · Shift+Tab mode"
             yield prompt
             yield Static(id="statusbar")
 
     def on_mount(self) -> None:
         self.query_one("#log", VerticalScroll).anchor()
         self.query_one(PromptInput).focus()
+        self._refresh_mode()
         self._refresh_statusbar()
         if self._resumed:
             self._render_history()
@@ -219,7 +223,7 @@ class PaimonApp(App):
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
-        self.agent = Agent(cwd=Path.cwd(), confirm=None if self.yolo else self._confirm)
+        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm, mode=self.mode)
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._session_allowed.clear()
@@ -227,6 +231,17 @@ class PaimonApp(App):
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._refresh_statusbar()
+
+    # ---- permission mode ----------------------------------------------------
+
+    def action_cycle_mode(self) -> None:
+        self.mode = tools.MODES[(tools.MODES.index(self.mode) + 1) % len(tools.MODES)]
+        self.agent.mode = self.mode
+        self._refresh_mode()
+        self._refresh_statusbar()
+
+    def _refresh_mode(self) -> None:
+        self.query_one(PromptInput).border_title = f" {self.mode} "
 
     # ---- login --------------------------------------------------------------
 
@@ -313,7 +328,7 @@ class PaimonApp(App):
     # ---- status bar ---------------------------------------------------------
 
     def _refresh_statusbar(self, tokens: int | None = None) -> None:
-        parts = [config.MODEL or "no model", f"session {self.agent.session.id[:8]}"]
+        parts = [f"{self.mode} mode", config.MODEL or "no model", f"session {self.agent.session.id[:8]}"]
         if tokens is not None:
             window = compaction.context_window(config.MODEL, config.COMPACTION_CONTEXT_WINDOW)
             if window:

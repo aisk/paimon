@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from paimon import compaction
-from paimon.agent import Agent
+from paimon.agent import Agent, ToolEnd
 from paimon.mentions import MentionExpander
 from paimon.session import Session
 
@@ -156,6 +156,88 @@ class MentionAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             expanded = agent.mentions.expand("@hello.txt")
             self.assertIn("hello", expanded)
             self.assertNotIn('status="previously_mentioned"', expanded)
+
+class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
+    """The gate decides per tool call, from the agent's current mode."""
+
+    @staticmethod
+    def _completion_with_tool_call(name: str, arguments: str):
+        """Stub stream: one tool call on the first request, then a bare turn end."""
+        requests = 0
+
+        async def completion(**_kwargs):
+            nonlocal requests
+            requests += 1
+
+            async def stream(with_call: bool):
+                if with_call:
+                    call = SimpleNamespace(
+                        index=0, id="call-1",
+                        function=SimpleNamespace(name=name, arguments=arguments),
+                    )
+                    delta = SimpleNamespace(content=None, tool_calls=[call], reasoning_content=None)
+                else:
+                    delta = SimpleNamespace(content="done", tool_calls=[], reasoning_content=None)
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+            return stream(requests == 1)
+
+        return completion
+
+    @staticmethod
+    def _agent(cwd: Path, **kwargs) -> Agent:
+        session = AgentSystemPromptTest._session(cwd)
+        session.append_system_prompt("snapshot")
+        return Agent(cwd=cwd, session=session, **kwargs)
+
+    async def _run_tool_turn(self, agent: Agent, name: str, arguments: str) -> ToolEnd:
+        completion = self._completion_with_tool_call(name, arguments)
+        with patch("paimon.agent.litellm.acompletion", new=completion):
+            events = [event async for event in agent.run("go")]
+        return next(event for event in events if isinstance(event, ToolEnd))
+
+    async def test_read_mode_confirms_writes_and_denial_sticks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            confirm = AsyncMock(return_value=False)
+            agent = self._agent(cwd, confirm=confirm, mode="read")
+
+            end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
+
+            confirm.assert_awaited_once()
+            self.assertTrue(end.denied)
+            self.assertFalse((cwd / "a.txt").exists())
+
+    async def test_edit_mode_auto_approves_writes_in_cwd_but_confirms_bash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            confirm = AsyncMock(return_value=False)
+            agent = self._agent(cwd, confirm=confirm, mode="edit")
+
+            end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
+            confirm.assert_not_awaited()
+            self.assertFalse(end.denied)
+            self.assertEqual((cwd / "a.txt").read_text(), "hi")
+
+            end = await self._run_tool_turn(agent, "bash", '{"command": "touch b.txt"}')
+            confirm.assert_awaited_once()
+            self.assertTrue(end.denied)
+
+    async def test_mode_switch_applies_to_the_next_tool_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            confirm = AsyncMock(return_value=False)
+            agent = self._agent(cwd, confirm=confirm, mode="read")
+
+            end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
+            self.assertTrue(end.denied)
+
+            agent.mode = "yolo"
+            end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
+            confirm.assert_awaited_once()
+            self.assertFalse(end.denied)
+            self.assertEqual((cwd / "a.txt").read_text(), "hi")
+
 
 if __name__ == "__main__":
     unittest.main()

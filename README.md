@@ -7,10 +7,10 @@ A minimal terminal code agent built on litellm and textual.
 ## Run
 
 ```bash
-uv run paimon         # or: python -m paimon
-uv run paimon -c      # continue the last session in this directory
-uv run paimon --yolo  # skip tool confirmations
-uv run paimon --web   # serve the UI in a browser (--port, default 8000)
+uv run paimon              # or: python -m paimon
+uv run paimon -c           # continue the last session in this directory
+uv run paimon --mode yolo  # permission mode: read (default), edit or yolo
+uv run paimon --web        # serve the UI in a browser (--port, default 8000)
 ```
 
 First launch asks for a provider, model, API base and key, saved to
@@ -20,8 +20,10 @@ provider" in the command palette (Ctrl+P).
 ## Notes
 
 - `@path` in a prompt attaches that file.
-- `bash`, `write_file` and `edit_file` ask for confirmation before running;
-  file changes are shown as a side-by-side diff (nicer if
+- Shift+Tab cycles the permission mode: read (writes, commands and access
+  outside the working directory ask for confirmation), edit (edits inside the
+  working directory run without asking) and yolo (nothing asks). File changes
+  are shown as a side-by-side diff (nicer if
   [delta](https://github.com/dandavison/delta) is installed).
 - Prompts typed while the agent is busy are queued and sent when it finishes.
 - Sessions are JSONL files under `~/.local/share/paimon/sessions/`, split by

@@ -257,4 +257,15 @@ class ConfirmPanel(Vertical, can_focus=True):
                 width=self._diff_width(),
             )
             return Group(Text(str(args.get("path") or "")), Text(), diff)
+        if self.tool_name == "read_file":
+            return Content.from_markup(
+                "$path\n[$text-muted]outside the working directory[/]",
+                path=str(args.get("path") or ""),
+            )
+        if self.tool_name == "glob":
+            return Content.from_markup(
+                "$pattern in $path\n[$text-muted]outside the working directory[/]",
+                pattern=str(args.get("pattern") or ""),
+                path=str(args.get("path") or ""),
+            )
         return Content(self._clip(json.dumps(args, ensure_ascii=False)))

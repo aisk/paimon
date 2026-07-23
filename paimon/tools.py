@@ -12,6 +12,10 @@ from pathlib import Path
 # Tools whose side effects warrant a user confirmation before running.
 DANGEROUS = {"bash", "write_file", "edit_file"}
 
+# Permission modes: read (confirm writes, bash and reads outside cwd),
+# edit (auto-approve writes inside cwd), yolo (no confirmation at all).
+MODES = ("read", "edit", "yolo")
+
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
 TOOLS = [
@@ -140,6 +144,29 @@ def _resolve(path: str, cwd: Path) -> Path:
     return p if p.is_absolute() else cwd / p
 
 
+def _inside(path: Path, cwd: Path) -> bool:
+    """True if path (symlinks resolved) is inside cwd."""
+    try:
+        return path.resolve().is_relative_to(cwd.resolve())
+    except OSError:
+        return False
+
+
+def gate(name: str, args: dict, mode: str, cwd: Path) -> str:
+    """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm")."""
+    if mode == "yolo":
+        return "allow"
+    if name in ("read_file", "glob"):
+        # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
+        target = _resolve(str(args.get("path") or ""), cwd)
+        return "allow" if _inside(target, cwd) else "confirm"
+    if name not in DANGEROUS:
+        return "allow"
+    if mode == "edit" and name in ("write_file", "edit_file") and _inside(_resolve(str(args.get("path") or ""), cwd), cwd):
+        return "allow"
+    return "confirm"
+
+
 def _read_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
@@ -189,7 +216,7 @@ _GLOB_IGNORE = {
 }
 
 
-def _glob(args: dict, cwd: Path) -> str:
+def _glob(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     base = _resolve(args["path"], cwd) if args.get("path") else cwd
     if not base.is_dir():
         return f"Error: not a directory: {base}"
@@ -197,7 +224,10 @@ def _glob(args: dict, cwd: Path) -> str:
     matches = [
         p
         for p in base.glob(args["pattern"])
-        if p.is_file() and not skip.intersection(p.relative_to(base).parts)
+        if p.is_file()
+        and not skip.intersection(p.relative_to(base).parts)
+        # sandboxed keeps symlinks under base from listing files outside it
+        and (not sandboxed or _inside(p, base))
     ]
     if not matches:
         return "(no files matched)"
@@ -256,7 +286,7 @@ async def _bash(args: dict, cwd: Path) -> str:
     return f"{out}\n{status}" if out.strip() else status
 
 
-async def execute_tool(name: str, args: dict, cwd: Path) -> str:
+async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo") -> str:
     """Dispatch a tool call. Always returns a string for the model."""
     try:
         if name == "read_file":
@@ -266,7 +296,7 @@ async def execute_tool(name: str, args: dict, cwd: Path) -> str:
         if name == "edit_file":
             return _edit_file(args, cwd)
         if name == "glob":
-            return _glob(args, cwd)
+            return _glob(args, cwd, sandboxed=mode != "yolo")
         if name == "bash":
             result = await _bash(args, cwd)
         else:

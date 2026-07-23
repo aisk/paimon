@@ -11,8 +11,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Paimon terminal code agent")
     parser.add_argument("-c", "--continue", dest="continue_session", action="store_true",
                         help="continue the most recent session for this directory")
-    parser.add_argument("--yolo", action="store_true",
-                        help="allow dangerous tool calls without confirmation")
+    parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="read",
+                        help="permission mode: read (confirm writes, commands and reads outside cwd), "
+                             "edit (auto-approve edits in cwd), yolo (no confirmation)")
     parser.add_argument("--web", action="store_true",
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
@@ -25,11 +26,13 @@ def main() -> None:
     if args.web:
         from textual_serve.server import Server
 
-        flags = [flag for flag, enabled in (("-c", args.continue_session), ("--yolo", args.yolo)) if enabled]
+        flags = ["-c"] if args.continue_session else []
+        if args.mode != "read":
+            flags += ["--mode", args.mode]
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
         Server(command, port=args.port).serve()
         return
-    PaimonApp(continue_session=args.continue_session, yolo=args.yolo).run()
+    PaimonApp(continue_session=args.continue_session, mode=args.mode).run()
 
 
 if __name__ == "__main__":

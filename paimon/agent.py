@@ -268,9 +268,10 @@ Guidelines:
 
 class Agent:
     def __init__(self, cwd: Optional[Path] = None, confirm: Optional[ConfirmFn] = None,
-                 session: Optional[Session] = None):
+                 session: Optional[Session] = None, mode: str = "read"):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
+        self.mode = mode
         self.todos: list[dict] = []
         if session is None:
             self.session = Session.create(self.cwd)
@@ -422,13 +423,13 @@ class Agent:
                     continue
 
                 denied = False
-                if self.confirm and name in tools.DANGEROUS:
+                if self.confirm and tools.gate(name, args, self.mode, self.cwd) == "confirm":
                     allowed = await self.confirm(name, args)
                     if not allowed:
                         denied = True
                         result = "User denied this operation."
                 if not denied:
-                    result = await tools.execute_tool(name, args, self.cwd)
+                    result = await tools.execute_tool(name, args, self.cwd, mode=self.mode)
 
                 slot["content"] = result
                 self.session.append_message(slot, replaces=persisted_id)
