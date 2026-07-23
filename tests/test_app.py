@@ -27,14 +27,17 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfirmPanelTest(AppTestCase):
-    async def test_allow_deny_always_and_shortcuts(self) -> None:
+    @staticmethod
+    async def _open(app: PaimonApp, pilot, tool: str = "bash", args: dict | None = None) -> asyncio.Future:
+        task = asyncio.ensure_future(app._confirm(tool, args or {"command": "echo hi"}))
+        await pilot.pause()
+        return task
+
+    async def test_enter_allows_and_restores_prompt(self) -> None:
         app = PaimonApp()
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptInput)
-
-            # Enter on the default option allows
-            task = asyncio.ensure_future(app._confirm("bash", {"command": "echo hi"}))
-            await pilot.pause()
+            task = await self._open(app, pilot)
             panel = app.query_one("#confirm-panel", ConfirmPanel)
             self.assertFalse(prompt.display, "prompt hidden while confirming")
             self.assertIs(app.focused, panel)
@@ -44,26 +47,29 @@ class ConfirmPanelTest(AppTestCase):
             self.assertFalse(app.query("#confirm-panel"))
             self.assertTrue(prompt.display)
 
-            # Esc denies
-            task = asyncio.ensure_future(app._confirm("bash", {"command": "rm -rf x"}))
-            await pilot.pause()
+    async def test_escape_denies(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot, args={"command": "rm -rf x"})
             await pilot.press("escape")
             self.assertFalse(await task)
 
-            # Down+Enter picks "always": allowed now and for the session
-            task = asyncio.ensure_future(
-                app._confirm("edit_file", {"path": "a.py", "old_string": "a", "new_string": "b"})
+    async def test_always_allows_for_the_rest_of_the_session(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            task = await self._open(
+                app, pilot, "edit_file", {"path": "a.py", "old_string": "a", "new_string": "b"}
             )
-            await pilot.pause()
             await pilot.press("down", "enter")
             self.assertTrue(await task)
             self.assertIn("edit_file", app._session_allowed)
             self.assertTrue(await app._confirm("edit_file", {"path": "b.py"}))
             self.assertFalse(app.query("#confirm-panel"))
 
-            # Number shortcut: 3 = deny
-            task = asyncio.ensure_future(app._confirm("write_file", {"path": "c.py", "content": "x"}))
-            await pilot.pause()
+    async def test_number_shortcut_denies(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot, "write_file", {"path": "c.py", "content": "x"})
             await pilot.press("3")
             self.assertFalse(await task)
 
