@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from rich.console import Group, RenderableType
+from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -31,6 +33,7 @@ from .agent import (
 )
 from . import compaction, config, tools
 from .compaction import SUMMARY_NAME
+from .diff import render_diff
 from .login import LoginScreen
 from .session import Session
 from .ui import AssistantMessage, ToolResult, UserMessage
@@ -209,23 +212,34 @@ class ConfirmPanel(Vertical, can_focus=True):
     def _clip(text: str, limit: int = _CLIP) -> str:
         return text if len(text) <= limit else text[:limit] + " …"
 
-    def _detail(self) -> Content:
+    def _diff_width(self) -> int:
+        # workspace margins + panel padding + border eat ~10 cells
+        return max(60, self.app.size.width - 10)
+
+    def _detail(self) -> RenderableType:
         args = self.args
         if self.tool_name == "bash":
             return Content(self._clip(str(args.get("command") or "")))
         if self.tool_name == "write_file":
+            path = str(args.get("path") or "")
+            content = self._clip(str(args.get("content") or ""))
+            try:
+                existing = Path(path).read_text() if path else ""
+            except OSError:
+                existing = ""
+            if existing:
+                diff = render_diff(self._clip(existing), content, width=self._diff_width())
+                return Group(Text(path), Text(), diff)
             return Content.from_markup(
-                "$path\n\n[$text-muted]$content[/]",
-                path=str(args.get("path") or ""),
-                content=self._clip(str(args.get("content") or "")),
+                "$path\n\n[$text-muted]$content[/]", path=path, content=content
             )
         if self.tool_name == "edit_file":
-            return Content.from_markup(
-                "$path\n\n[$text-error]- $old[/]\n[$text-success]+ $new[/]",
-                path=str(args.get("path") or ""),
-                old=self._clip(str(args.get("old_string") or ""), 500),
-                new=self._clip(str(args.get("new_string") or ""), 500),
+            diff = render_diff(
+                self._clip(str(args.get("old_string") or "")),
+                self._clip(str(args.get("new_string") or "")),
+                width=self._diff_width(),
             )
+            return Group(Text(str(args.get("path") or "")), Text(), diff)
         return Content(self._clip(json.dumps(args, ensure_ascii=False)))
 
 
