@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import random
 import shlex
 import sys
 import time
@@ -39,6 +40,18 @@ _TODO_STYLE = {
     "in_progress": ("▶", "$text-accent b"),
     "pending": ("○", "$text-muted"),
 }
+
+# One is picked per turn, Genshin style.
+_STATUS_PHRASES = [
+    "Paimon is thinking…",
+    "Paimon is NOT emergency food…",
+    "Counting mora…",
+    "Ehe…",
+    "Exploring the area ahead…",
+    "Snacking on Sweet Madame…",
+    "Asking the Traveler…",
+    "Wow, treasure…!",
+]
 
 
 class PromptInput(TextArea):
@@ -145,7 +158,7 @@ class ConfirmPanel(Vertical, can_focus=True):
     def compose(self) -> ComposeResult:
         yield Static(
             Content.from_markup(
-                "[b]Allow this action?[/]  [$text-warning b]$tool[/]", tool=self.tool_name
+                "[b]Paimon needs permission![/]  [$text-warning b]$tool[/]", tool=self.tool_name
             )
         )
         with VerticalScroll(id="confirm-detail"):
@@ -233,14 +246,13 @@ class PaimonApp(App):
     }
     #log > * { margin-bottom: 1; }
     .assistant { padding: 0 1; }
-    .response-status {
-        width: auto;
+    #response-status {
         height: 1;
         padding: 0 1;
         color: $text-muted;
     }
-    .response-status LoadingIndicator { width: 3; height: 1; color: $primary; }
-    .response-status .status-label { width: auto; }
+    #response-status LoadingIndicator { width: 3; height: 1; color: $primary; }
+    #response-status .status-label { width: auto; }
     .user-message {
         width: 100%;
         height: auto;
@@ -252,7 +264,6 @@ class PaimonApp(App):
         height: auto;
         min-height: 4;
         max-height: 12;
-        margin-top: 1;
         padding: 0 1;
         border: round $surface-lighten-2;
         background: transparent;
@@ -323,6 +334,13 @@ class PaimonApp(App):
     def compose(self) -> ComposeResult:
         with Vertical(id="workspace"):
             yield VerticalScroll(id="log")
+            status = Horizontal(
+                LoadingIndicator(),
+                Static(classes="status-label"),
+                id="response-status",
+            )
+            status.display = False
+            yield status
             prompt = PromptInput(id="prompt", soft_wrap=True)
             prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt"
             yield prompt
@@ -427,15 +445,11 @@ class PaimonApp(App):
         log.mount(widget)
         return widget
 
-    def _add_response_status(self) -> Horizontal:
-        log = self.query_one("#log", VerticalScroll)
-        widget = Horizontal(
-            LoadingIndicator(),
-            Static(" Thinking…", classes="status-label"),
-            classes="response-status",
-        )
-        log.mount(widget)
-        return widget
+    def _set_status(self, visible: bool, label: str = "") -> None:
+        status = self.query_one("#response-status", Horizontal)
+        status.display = visible
+        if visible and label:
+            status.query_one(".status-label", Static).update(label)
 
     def _add_tool_start(self, name: str, args: dict) -> Static:
         detail = args.get("command") or args.get("path") or json.dumps(args)
@@ -530,19 +544,29 @@ class PaimonApp(App):
         reasoning: Static | None = None
         reasoning_buf = ""
         first_text_block = True
-        status: Horizontal | None = self._add_response_status()
+        status_visible = True
+        phrase = random.choice(_STATUS_PHRASES)
         turn_started = time.monotonic()
 
+        def status_label() -> str:
+            elapsed = int(time.monotonic() - turn_started)
+            return f" {phrase} {elapsed}s" if elapsed else f" {phrase}"
+
+        self._set_status(True, status_label())
+
+        def show_status() -> None:
+            nonlocal status_visible
+            status_visible = True
+            self._set_status(True, status_label())
+
         def clear_status() -> None:
-            nonlocal status
-            if status is not None:
-                status.remove()
-                status = None
+            nonlocal status_visible
+            status_visible = False
+            self._set_status(False)
 
         def tick() -> None:
-            if status is not None:
-                elapsed = int(time.monotonic() - turn_started)
-                status.query_one(".status-label", Static).update(f" Thinking… {elapsed}s")
+            if status_visible:
+                self._set_status(True, status_label())
 
         timer = self.set_interval(1, tick)
 
@@ -590,10 +614,10 @@ class PaimonApp(App):
 
                 elif isinstance(ev, ToolEnd):
                     if ev.name == "write_todos":
-                        status = self._add_response_status()
+                        show_status()
                         continue
                     self._add_tool_result(ev.result, denied=ev.denied)
-                    status = self._add_response_status()
+                    show_status()
 
                 elif isinstance(ev, ContextCompacted):
                     clear_status()
@@ -604,7 +628,7 @@ class PaimonApp(App):
                             after=f"{ev.tokens_after:,}",
                         )
                     )
-                    status = self._add_response_status()
+                    show_status()
 
                 elif isinstance(ev, ContextCompactionFailed):
                     clear_status()
@@ -614,13 +638,13 @@ class PaimonApp(App):
                             error=ev.error,
                         )
                     )
-                    status = self._add_response_status()
+                    show_status()
 
                 elif isinstance(ev, TurnEnd):
                     clear_status()
                     self._update_statusbar_tokens()
         except asyncio.CancelledError:
-            self._add(Content.from_markup("[$text-warning]⏹ Interrupted[/]"))
+            self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
             raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
