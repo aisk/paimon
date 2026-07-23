@@ -3,6 +3,8 @@
 import argparse
 import asyncio
 import json
+import shlex
+import sys
 import time
 from pathlib import Path
 
@@ -636,7 +638,18 @@ def main() -> None:
                         help="continue the most recent session for this directory")
     parser.add_argument("--yolo", action="store_true",
                         help="allow dangerous tool calls without confirmation")
+    parser.add_argument("--web", action="store_true",
+                        help="serve the app in a browser instead of the terminal")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="port for --web (default: 8000)")
     args = parser.parse_args()
+    if args.web:
+        from textual_serve.server import Server
+
+        flags = [flag for flag, enabled in (("-c", args.continue_session), ("--yolo", args.yolo)) if enabled]
+        command = shlex.join([sys.executable, "-m", "paimon.app", *flags])
+        Server(command, port=args.port).serve()
+        return
     PaimonApp(continue_session=args.continue_session, yolo=args.yolo).run()
 
 
