@@ -16,7 +16,7 @@ from textual.content import Content
 from textual.message import Message
 from textual.widgets import LoadingIndicator, Static, TextArea
 from textual.widgets.markdown import MarkdownStream
-from textual.worker import Worker
+from textual.worker import Worker, WorkerState
 
 from .agent import (
     Agent,
@@ -253,6 +253,7 @@ class PaimonApp(App):
     }
     #response-status LoadingIndicator { width: 3; height: 1; color: $primary; }
     #response-status .status-label { width: auto; }
+    #queued { height: auto; padding: 0 1; color: $text-muted; }
     .user-message {
         width: 100%;
         height: auto;
@@ -269,7 +270,6 @@ class PaimonApp(App):
         background: transparent;
     }
     #prompt:focus { border: round $primary; background: transparent; }
-    #prompt:disabled { border: round $surface-lighten-1; opacity: 60%; }
     #statusbar { height: 1; padding: 0 1; color: $text-muted; }
     .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
     .tool-result { color: $text-muted; }
@@ -322,6 +322,7 @@ class PaimonApp(App):
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
         self._session_allowed: set[str] = set()
+        self._queue: list[str] = []
         if config.THEME in self.available_themes:
             self.theme = config.THEME
         self._persist_theme_changes = True
@@ -341,6 +342,9 @@ class PaimonApp(App):
             )
             status.display = False
             yield status
+            queued = Static(id="queued")
+            queued.display = False
+            yield queued
             prompt = PromptInput(id="prompt", soft_wrap=True)
             prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt"
             yield prompt
@@ -398,6 +402,8 @@ class PaimonApp(App):
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._session_allowed.clear()
+        self._queue.clear()
+        self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._refresh_statusbar()
 
@@ -528,8 +534,46 @@ class PaimonApp(App):
     def handle_submit(self, event: PromptInput.Submitted) -> None:
         text = event.text
         self.query_one(PromptInput).clear()
+        if self._turn is not None and self._turn.is_running:
+            self._queue.append(text)
+            self._refresh_queued()
+            return
+        self._start_turn(text)
+
+    def _start_turn(self, text: str) -> None:
         self._add_user(text)
         self._turn = self.run_turn(text)
+
+    def _refresh_queued(self) -> None:
+        widget = self.query_one("#queued", Static)
+        widget.display = bool(self._queue)
+        if not self._queue:
+            widget.update("")
+            return
+        kwargs = {f"q{i}": text for i, text in enumerate(self._queue)}
+        lines = "\n".join(f"[$text-muted]⏸ ${key}[/]" for key in kwargs)
+        widget.update(Content.from_markup(lines, **kwargs))
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """Flush queued prompts once the running turn is over.
+
+        A finished turn submits them as the next turn; an interrupted turn
+        hands them back to the input so they aren't fired at a model the user
+        just stopped.
+        """
+        done = (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED)
+        if event.worker is not self._turn or event.state not in done or not self._queue:
+            return
+        text = "\n\n".join(self._queue)
+        self._queue.clear()
+        self._refresh_queued()
+        if event.state == WorkerState.CANCELLED:
+            prompt = self.query_one(PromptInput)
+            draft = prompt.text
+            prompt.load_text(f"{text}\n{draft}" if draft else text)
+            prompt.move_cursor(prompt.document.end)
+        else:
+            self._start_turn(text)
 
     def action_interrupt(self) -> None:
         if self._turn is not None and self._turn.is_running:
@@ -537,9 +581,6 @@ class PaimonApp(App):
 
     @work(exclusive=True)
     async def run_turn(self, text: str) -> None:
-        inp = self.query_one(PromptInput)
-        inp.disabled = True
-
         stream: MarkdownStream | None = None
         reasoning: Static | None = None
         reasoning_buf = ""
@@ -652,8 +693,7 @@ class PaimonApp(App):
             timer.stop()
             await close_stream()
             clear_status()
-            inp.disabled = False
-            inp.focus()
+            self.query_one(PromptInput).focus()
 
 
 def main() -> None:
