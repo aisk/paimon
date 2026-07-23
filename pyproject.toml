@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-paimon = "paimon.app:main"
+paimon = "paimon.cli:main"
 
 [tool.uv]
 package = true
