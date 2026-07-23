@@ -1,6 +1,8 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,8 +11,10 @@ from textual.widgets import Static
 from textual.worker import WorkerState
 
 from paimon import config
-from paimon.app import PaimonApp
-from paimon.ui import ConfirmPanel, PromptInput
+from paimon.app import PaimonApp, _session_label
+from paimon.login import PickerScreen
+from paimon.session import Session
+from paimon.ui import ConfirmPanel, PromptInput, UserMessage
 
 
 class AppTestCase(unittest.IsolatedAsyncioTestCase):
@@ -108,6 +112,73 @@ class ModeCycleTest(AppTestCase):
             self.assertTrue(app.query("#confirm-panel"), "panel survives a mode switch")
             await pilot.press("enter")
             self.assertTrue(await task)
+
+
+class ResumeSessionTest(AppTestCase):
+    @staticmethod
+    def _old_session(content: str = "hello there") -> Session:
+        session = Session.create(Path.cwd())
+        session.append_system_prompt("sys")
+        session.append_message({"role": "user", "content": content})
+        return session
+
+    def _log_text(self, app: PaimonApp) -> str:
+        return " ".join(str(widget.render()) for widget in app.query_one("#log").children)
+
+    async def test_palette_resume_swaps_agent_and_renders_history(self) -> None:
+        old = self._old_session()
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            app.action_cycle_mode()  # read -> edit, must survive the resume
+            app.action_resume_session()
+            await pilot.pause()
+            self.assertIsInstance(app.screen, PickerScreen)
+            app.screen.dismiss(_session_label(old))
+            await pilot.pause()
+            self.assertEqual(app.agent.session.id, old.id)
+            self.assertEqual(app.agent.mode, "edit")
+            self.assertTrue(app.query(UserMessage), "history re-rendered")
+            self.assertIn("Resumed session", self._log_text(app))
+
+    async def test_noop_while_turn_is_running(self) -> None:
+        self._old_session()
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            before = app.agent
+            app._turn = SimpleNamespace(is_running=True)
+            app.action_resume_session()
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, PickerScreen)
+            self.assertIs(app.agent, before)
+
+    async def test_no_sessions_shows_notice(self) -> None:
+        app = PaimonApp()
+        async with app.run_test() as pilot:
+            app.action_resume_session()
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, PickerScreen)
+            self.assertIn("No sessions to resume", self._log_text(app))
+
+    async def test_constructor_session_param_resumes_on_mount(self) -> None:
+        old = self._old_session()
+        app = PaimonApp(session=old)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(app.agent.session.id, old.id)
+            self.assertTrue(app.query(UserMessage))
+            self.assertIn("Resumed session", self._log_text(app))
+
+
+class SessionLabelTest(AppTestCase):
+    def test_label_has_local_time_short_id_and_flattened_preview(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_message({"role": "user", "content": "fix the\nbug " + "x" * 50})
+
+        label = _session_label(session)
+
+        when = datetime.fromisoformat(session.created_at()).astimezone().strftime("%m-%d %H:%M")
+        preview = " ".join(("fix the\nbug " + "x" * 50).split())
+        self.assertEqual(label, f"{when} · {session.id[:8]} · {preview[:40]}…")
 
 
 class StatusLineTest(AppTestCase):

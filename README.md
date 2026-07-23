@@ -8,7 +8,7 @@ A minimal terminal code agent built on litellm and textual.
 
 ```bash
 uv run paimon              # or: python -m paimon
-uv run paimon -c           # continue the last session in this directory
+uv run paimon -r [ID]      # pick a session to resume, or resume one by id prefix
 uv run paimon --mode yolo  # permission mode: read (default), edit or yolo
 uv run paimon --web        # serve the UI in a browser (--port, default 8000)
 ```

@@ -4,6 +4,7 @@ import asyncio
 import json
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 
 from textual import on, work
@@ -28,7 +29,7 @@ from .agent import (
 )
 from . import compaction, config, tools
 from .compaction import SUMMARY_NAME
-from .login import LoginScreen
+from .login import LoginScreen, PickerScreen
 from .session import Session
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
@@ -49,6 +50,21 @@ _STATUS_PHRASES = [
     "Asking the Traveler…",
     "Wow, treasure…!",
 ]
+
+
+def _session_label(session: Session) -> str:
+    """'07-24 15:30 · 3f2a8b1c · first user message…' (local time)."""
+    when = ""
+    created = session.created_at()
+    if created:
+        try:
+            when = datetime.fromisoformat(created).astimezone().strftime("%m-%d %H:%M")
+        except ValueError:
+            pass
+    preview = " ".join((session.first_user_text() or "").split())
+    if len(preview) > 40:
+        preview = preview[:40] + "…"
+    return f"{when} · {session.id[:8]} · {preview}"
 
 
 class PaimonApp(App):
@@ -133,16 +149,19 @@ class PaimonApp(App):
                 self.action_login,
             ),
             SystemCommand("New session", "Start a new empty session", self.action_new_session),
+            SystemCommand("Resume session", "Pick an earlier session in this directory to resume",
+                          self.action_resume_session),
         ]
 
-    def __init__(self, continue_session: bool = False, mode: str = "read") -> None:
+    def __init__(self, mode: str = "read",
+                 session: Session | None = None, pick_session: bool = False) -> None:
         self._persist_theme_changes = False
         super().__init__()
         self.mode = mode
         cwd = Path.cwd()
-        session = Session.latest(cwd) if continue_session else None
         self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session, mode=mode)
         self._resumed = session is not None
+        self._pick_session = pick_session
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
         self._session_allowed: set[str] = set()
@@ -180,11 +199,16 @@ class PaimonApp(App):
         self._refresh_mode()
         self._refresh_statusbar()
         if self._resumed:
-            self._render_history()
-            self._add(Content.from_markup("[$text-muted]Continued session $id[/]", id=self.agent.session.id[:8]))
-            self._update_statusbar_tokens()
+            self._show_resumed()
         if not config.MODEL:
             self.action_login()
+        elif self._pick_session:
+            self.action_resume_session()
+
+    def _show_resumed(self) -> None:
+        self._render_history()
+        self._add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
+        self._update_statusbar_tokens()
 
     def _render_history(self) -> None:
         show_heading = True
@@ -231,6 +255,33 @@ class PaimonApp(App):
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._refresh_statusbar()
+
+    @work
+    async def action_resume_session(self) -> None:
+        if self._turn is not None and self._turn.is_running:
+            return
+        labels = {_session_label(session): session for session in Session.list(Path.cwd())}
+        if not labels:
+            self._add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
+            return
+        choice = await self.push_screen_wait(PickerScreen("Resume session", list(labels)))
+        if choice is None or (self._turn is not None and self._turn.is_running):
+            self.query_one(PromptInput).focus()
+            return
+        try:
+            agent = Agent(cwd=Path.cwd(), confirm=self._confirm, session=labels[choice], mode=self.mode)
+        except RuntimeError as exc:  # session without a persisted system prompt
+            self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
+            return
+        self.agent = agent
+        self.query_one("#log", VerticalScroll).remove_children()
+        self._todo_panel = None
+        self._session_allowed.clear()
+        self._queue.clear()
+        self._refresh_queued()
+        self._show_resumed()
+        self._refresh_statusbar()
+        self.query_one(PromptInput).focus()
 
     # ---- permission mode ----------------------------------------------------
 

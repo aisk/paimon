@@ -1,5 +1,9 @@
 """Append-only JSONL session persistence."""
 
+# Deferred annotations: the ``list`` classmethod shadows the builtin in the
+# class body, which would otherwise break ``list[dict]`` annotations below it.
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -59,21 +63,23 @@ class Session:
         return session
 
     @classmethod
-    def latest(cls, cwd: Path) -> Optional["Session"]:
+    def _scan(cls, cwd: Path) -> list[tuple["Session", list[dict]]]:
+        """Valid sessions for cwd with their records, newest first by mtime."""
         directory = _project_dir(cwd)
         if not directory.is_dir():
-            return None
+            return []
         paths = sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        fallback: Optional["Session"] = None
-        for path in paths:
-            records = cls._read_records(path)
-            if records and records[0].get("type") == "session" and records[0].get("version") == FORMAT_VERSION:
-                session = cls(path, str(records[0]["id"]), cwd)
-                if fallback is None:
-                    fallback = session
-                if any(record.get("type") == "message" for record in records):
-                    return session
-        return fallback
+        return [(cls(path, str(records[0]["id"]), cwd), records)
+                for path in paths
+                if (records := cls._read_records(path))
+                and records[0].get("type") == "session"
+                and records[0].get("version") == FORMAT_VERSION]
+
+    @classmethod
+    def list(cls, cwd: Path) -> list["Session"]:
+        """Sessions that have at least one message, newest first."""
+        return [session for session, records in cls._scan(cwd)
+                if any(record.get("type") == "message" for record in records)]
 
     @staticmethod
     def _read_records(path: Path) -> list[dict]:
@@ -123,6 +129,22 @@ class Session:
         for record in self._read_records(self.path):
             if record.get("type") == "system_prompt" and isinstance(record.get("content"), str):
                 return record["content"]
+        return None
+
+    def created_at(self) -> Optional[str]:
+        """ISO timestamp from the session header record, if present."""
+        records = self._read_records(self.path)
+        if records and records[0].get("type") == "session" and isinstance(records[0].get("created_at"), str):
+            return records[0]["created_at"]
+        return None
+
+    def first_user_text(self) -> Optional[str]:
+        """The first user message, for picker previews."""
+        for record in self._read_records(self.path):
+            message = record.get("message")
+            if (record.get("type") == "message" and isinstance(message, dict)
+                    and message.get("role") == "user" and isinstance(message.get("content"), str)):
+                return message["content"]
         return None
 
     def append_system_prompt(self, content: str) -> None:
