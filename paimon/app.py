@@ -11,8 +11,7 @@ from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Button, LoadingIndicator, Static, TextArea
+from textual.widgets import LoadingIndicator, Static, TextArea
 from textual.widgets.markdown import MarkdownStream
 from textual.worker import Worker
 
@@ -119,39 +118,77 @@ class PromptInput(TextArea):
             self._recall(self._draft)
 
 
-class ConfirmScreen(ModalScreen[str]):
-    """Confirmation for a dangerous tool call.
+class ConfirmPanel(Vertical, can_focus=True):
+    """Inline confirmation for a dangerous tool call, shown in place of the prompt.
 
-    Dismisses with "allow", "always" (allow this tool for the rest of the
-    session) or "deny". Shows what would actually run/change, not just a path.
+    Resolves its future with "allow", "always" (allow this tool for the rest of
+    the session) or "deny". Shows what would actually run/change, not just a path.
+    Navigate with Up/Down or 1-3, Enter to confirm, Esc to deny.
     """
 
-    BINDINGS = [
-        ("y", "allow", "Allow"),
-        ("a", "always", "Always (session)"),
-        ("n", "deny", "Deny"),
-        ("escape", "deny", "Deny"),
+    _CLIP = 1_500
+    _OPTIONS = [
+        ("allow", "Yes"),
+        ("always", "Yes, and don't ask again for this tool this session"),
+        ("deny", "No (esc)"),
     ]
 
-    _CLIP = 1_500
-
-    def __init__(self, tool_name: str, args: dict) -> None:
-        super().__init__()
+    def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]") -> None:
+        super().__init__(id="confirm-panel")
         self.tool_name = tool_name
         self.args = args
+        self._future = future
+        self._selected = 0
 
     def compose(self) -> ComposeResult:
-        title = Content.from_markup(
-            "[b]Allow this action?[/]  [$text-warning b]$tool[/]", tool=self.tool_name
+        yield Static(
+            Content.from_markup(
+                "[b]Allow this action?[/]  [$text-warning b]$tool[/]", tool=self.tool_name
+            )
         )
-        with Vertical(id="confirm-box"):
-            yield Static(title)
-            with VerticalScroll(id="confirm-detail"):
-                yield Static(self._detail())
-            with Horizontal(id="confirm-buttons"):
-                yield Button("Allow (y)", variant="success", id="allow")
-                yield Button("Always · session (a)", variant="primary", id="always")
-                yield Button("Deny (n)", variant="error", id="deny")
+        with VerticalScroll(id="confirm-detail"):
+            yield Static(self._detail())
+        yield Static(id="confirm-options")
+
+    def on_mount(self) -> None:
+        self._render_options()
+        self.focus()
+
+    def _render_options(self) -> None:
+        lines = []
+        for i, (_, label) in enumerate(self._OPTIONS):
+            if i == self._selected:
+                lines.append(f"[$text-accent b]❯ {i + 1}. {label}[/]")
+            else:
+                lines.append(f"[$text-muted]  {i + 1}. {label}[/]")
+        self.query_one("#confirm-options", Static).update(Content.from_markup("\n".join(lines)))
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key
+        if key in ("up", "k"):
+            self._selected = (self._selected - 1) % len(self._OPTIONS)
+            self._render_options()
+        elif key in ("down", "j", "tab"):
+            self._selected = (self._selected + 1) % len(self._OPTIONS)
+            self._render_options()
+        elif key == "enter":
+            self._resolve(self._OPTIONS[self._selected][0])
+        elif key in ("1", "2", "3"):
+            self._resolve(self._OPTIONS[int(key) - 1][0])
+        elif key == "y":
+            self._resolve("allow")
+        elif key == "a":
+            self._resolve("always")
+        elif key in ("n", "escape"):
+            self._resolve("deny")
+        else:
+            return
+        event.prevent_default()
+        event.stop()
+
+    def _resolve(self, verdict: str) -> None:
+        if not self._future.done():
+            self._future.set_result(verdict)
 
     @staticmethod
     def _clip(text: str, limit: int = _CLIP) -> str:
@@ -175,18 +212,6 @@ class ConfirmScreen(ModalScreen[str]):
                 new=self._clip(str(args.get("new_string") or ""), 500),
             )
         return Content(self._clip(json.dumps(args, ensure_ascii=False)))
-
-    @on(Button.Pressed, "#allow")
-    def action_allow(self) -> None:
-        self.dismiss("allow")
-
-    @on(Button.Pressed, "#always")
-    def action_always(self) -> None:
-        self.dismiss("always")
-
-    @on(Button.Pressed, "#deny")
-    def action_deny(self) -> None:
-        self.dismiss("deny")
 
 
 class PaimonApp(App):
@@ -236,15 +261,16 @@ class PaimonApp(App):
     .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
     .tool-result { color: $text-muted; }
     .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
-    ConfirmScreen { align: center middle; }
-    #confirm-box {
-        width: 70%; height: auto; max-height: 80%;
-        padding: 1 2; border: round $warning; background: $surface;
+    #confirm-panel {
+        height: auto;
+        margin-top: 1;
+        padding: 1 2;
+        border: round $warning;
+        background: transparent;
     }
-    #confirm-detail { height: auto; max-height: 16; margin-top: 1; color: $text-muted; }
-    #confirm-buttons { height: auto; margin-top: 1; }
-    #confirm-buttons Button { width: 1fr; }
-    #confirm-buttons #allow, #confirm-buttons #always { margin-right: 1; }
+    #confirm-panel:focus { border: round $warning; }
+    #confirm-detail { height: auto; max-height: 12; margin-top: 1; color: $text-muted; }
+    #confirm-options { height: auto; margin-top: 1; }
 
     LoginScreen, PickerScreen, PromptScreen { align: center middle; }
     #picker-box, #prompt-screen-box, #login-status {
@@ -466,7 +492,16 @@ class PaimonApp(App):
     async def _confirm(self, tool_name: str, args: dict) -> bool:
         if tool_name in self._session_allowed:
             return True
-        verdict = await self.push_screen_wait(ConfirmScreen(tool_name, args))
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        panel = ConfirmPanel(tool_name, args, future)
+        prompt = self.query_one(PromptInput)
+        await self.query_one("#workspace", Vertical).mount(panel, before=prompt)
+        prompt.display = False
+        try:
+            verdict = await future
+        finally:
+            prompt.display = True
+            panel.remove()
         if verdict == "always":
             self._session_allowed.add(tool_name)
         return verdict in ("allow", "always")
