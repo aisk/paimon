@@ -259,7 +259,6 @@ class PaimonApp(App):
         self._pick_session = pick_session
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
-        self._session_allowed: set[str] = set()
         self._queue: list[str] = []
         if self.config.theme in self.available_themes:
             self.theme = self.config.theme
@@ -315,7 +314,6 @@ class PaimonApp(App):
         self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm, mode=self.mode, config=self.config)
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
-        self._session_allowed.clear()
         self._queue.clear()
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
@@ -343,7 +341,6 @@ class PaimonApp(App):
         self.agent = agent
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
-        self._session_allowed.clear()
         self._queue.clear()
         self._refresh_queued()
         await self._show_resumed()
@@ -465,8 +462,6 @@ class PaimonApp(App):
     # ---- confirmation hook (called from the agent loop) --------------------
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
-        if tool_name in self._session_allowed:
-            return True
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         panel = ConfirmPanel(tool_name, args, future)
         prompt = self.query_one(PromptInput)
@@ -477,9 +472,7 @@ class PaimonApp(App):
         finally:
             prompt.display = True
             panel.remove()
-        if verdict == "always":
-            self._session_allowed.add(tool_name)
-        return verdict in ("allow", "always")
+        return verdict == "allow"
 
     # ---- input → turn -------------------------------------------------------
 

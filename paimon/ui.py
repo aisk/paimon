@@ -156,15 +156,14 @@ class PromptInput(TextArea):
 class ConfirmPanel(Vertical, can_focus=True):
     """Inline confirmation for a dangerous tool call, shown in place of the prompt.
 
-    Resolves its future with "allow", "always" (allow this tool for the rest of
-    the session) or "deny". Shows what would actually run/change, not just a path.
-    Navigate with Up/Down or 1-3, Enter to confirm, Esc to deny.
+    Resolves its future with "allow" or "deny". Shows what would actually
+    run/change, not just a path.
+    Navigate with Up/Down or 1-2, Enter to confirm, Esc to deny.
     """
 
     _CLIP = 1_500
     _OPTIONS = [
         ("allow", "Yes"),
-        ("always", "Yes, and don't ask again for this tool this session"),
         ("deny", "No (esc)"),
     ]
 
@@ -208,12 +207,10 @@ class ConfirmPanel(Vertical, can_focus=True):
             self._render_options()
         elif key == "enter":
             self._resolve(self._OPTIONS[self._selected][0])
-        elif key in ("1", "2", "3"):
+        elif key in ("1", "2"):
             self._resolve(self._OPTIONS[int(key) - 1][0])
         elif key == "y":
             self._resolve("allow")
-        elif key == "a":
-            self._resolve("always")
         elif key in ("n", "escape"):
             self._resolve("deny")
         else:

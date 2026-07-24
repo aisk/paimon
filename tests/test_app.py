@@ -70,23 +70,11 @@ class ConfirmPanelTest(AppTestCase):
             await pilot.press("escape")
             self.assertFalse(await task)
 
-    async def test_always_allows_for_the_rest_of_the_session(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            task = await self._open(
-                app, pilot, "edit_file", {"path": "a.py", "old_string": "a", "new_string": "b"}
-            )
-            await pilot.press("down", "enter")
-            self.assertTrue(await task)
-            self.assertIn("edit_file", app._session_allowed)
-            self.assertTrue(await app._confirm("edit_file", {"path": "b.py"}))
-            self.assertFalse(app.query("#confirm-panel"))
-
     async def test_number_shortcut_denies(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             task = await self._open(app, pilot, "write_file", {"path": "c.py", "content": "x"})
-            await pilot.press("3")
+            await pilot.press("2")
             self.assertFalse(await task)
 
 
