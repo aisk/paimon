@@ -8,6 +8,10 @@ import asyncio
 import os
 import signal
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
+
+# A confirm callback returns True to allow a dangerous tool, False to deny.
+ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
 # Tools whose side effects warrant a user confirmation before running.
 DANGEROUS = {"bash", "write_file", "edit_file"}
@@ -165,6 +169,21 @@ def gate(name: str, args: dict, mode: str, cwd: Path) -> str:
     if mode == "edit" and name in ("write_file", "edit_file") and _inside(_resolve(str(args.get("path") or ""), cwd), cwd):
         return "allow"
     return "confirm"
+
+
+async def run_tool(name: str, args: dict, cwd: Path, mode: str,
+                   confirm: Optional[ConfirmFn] = None) -> tuple[str, bool]:
+    """Gate, optionally confirm, then execute a tool call.
+
+    Returns ``(result, denied)``. This is the enforcement point: a call that
+    needs confirmation is denied when no confirm hook is available, so a
+    headless Agent cannot bypass the permission mode.
+    """
+    if gate(name, args, mode, cwd) == "confirm":
+        allowed = await confirm(name, args) if confirm else False
+        if not allowed:
+            return "User denied this operation.", True
+    return await execute_tool(name, args, cwd, mode=mode), False
 
 
 def _read_file(args: dict, cwd: Path) -> str:

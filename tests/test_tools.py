@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
-from paimon.tools import MODES, _glob, _inside, gate
+from paimon.tools import MODES, _glob, _inside, gate, run_tool
 
 
 class GateTest(unittest.TestCase):
@@ -39,6 +40,37 @@ class GateTest(unittest.TestCase):
         for mode in MODES:
             self.assertEqual(gate("write_todos", {"todos": []}, mode, self.cwd), "allow")
         self.assertEqual(gate("read_file", {}, "read", self.cwd), "allow")
+
+
+class RunToolTest(unittest.IsolatedAsyncioTestCase):
+    """run_tool is the enforcement point: gating cannot be bypassed by omitting the hook."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    async def test_without_confirm_hook_dangerous_calls_are_denied(self) -> None:
+        result, denied = await run_tool("write_file", {"path": "a.txt", "content": "hi"}, self.cwd, "read")
+        self.assertTrue(denied)
+        self.assertEqual(result, "User denied this operation.")
+        self.assertFalse((self.cwd / "a.txt").exists())
+
+    async def test_confirm_hook_allows_execution(self) -> None:
+        confirm = AsyncMock(return_value=True)
+        result, denied = await run_tool("write_file", {"path": "a.txt", "content": "hi"}, self.cwd, "read", confirm)
+        confirm.assert_awaited_once()
+        self.assertFalse(denied)
+        self.assertIn("Wrote", result)
+        self.assertEqual((self.cwd / "a.txt").read_text(), "hi")
+
+    async def test_allowed_calls_skip_the_hook(self) -> None:
+        (self.cwd / "a.txt").write_text("hi")
+        confirm = AsyncMock(return_value=False)
+        result, denied = await run_tool("read_file", {"path": "a.txt"}, self.cwd, "read", confirm)
+        confirm.assert_not_awaited()
+        self.assertFalse(denied)
+        self.assertIn("hi", result)
 
 
 class InsideTest(unittest.TestCase):

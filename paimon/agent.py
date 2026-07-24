@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import AsyncIterator, Optional
 
 import litellm
 
@@ -76,8 +76,8 @@ class ContextCompactionFailed:
     error: str
 
 
-# A confirm callback returns True to allow a dangerous tool, False to deny.
-ConfirmFn = Callable[[str, dict], Awaitable[bool]]
+# Re-exported so UI code can keep importing it from here.
+ConfirmFn = tools.ConfirmFn
 
 
 CONTEXT_FILE = "AGENTS.md"
@@ -422,14 +422,7 @@ class Agent:
                     yield ToolEnd(c["id"], name, result)
                     continue
 
-                denied = False
-                if self.confirm and tools.gate(name, args, self.mode, self.cwd) == "confirm":
-                    allowed = await self.confirm(name, args)
-                    if not allowed:
-                        denied = True
-                        result = "User denied this operation."
-                if not denied:
-                    result = await tools.execute_tool(name, args, self.cwd, mode=self.mode)
+                result, denied = await tools.run_tool(name, args, self.cwd, self.mode, self.confirm)
 
                 slot["content"] = result
                 self.session.append_message(slot, replaces=persisted_id)
