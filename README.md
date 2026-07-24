@@ -2,7 +2,7 @@
 
 ![Paimon](https://automaton-media.com/wp-content/uploads/2020/10/20201019-140524-header.jpg)
 
-A minimal terminal code agent built on litellm and textual.
+A minimal terminal code agent built on pydantic-ai and textual.
 
 ## Run
 
@@ -28,8 +28,8 @@ provider" in the command palette (Ctrl+P).
 - Prompts typed while the agent is busy are queued and sent when it finishes.
 - Sessions are JSONL files under `~/.local/share/paimon/sessions/`, split by
   working directory (`PAIMON_DATA_HOME` overrides).
-- Near the context limit old history is summarized in place. For models litellm
-  doesn't know, set the window in `config.json`:
+- Near the context limit old history is summarized in place, once a window is
+  set in `config.json`:
 
   ```json
   {

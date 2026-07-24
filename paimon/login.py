@@ -1,14 +1,16 @@
 """Login flow: pick provider → pick model → enter api_base → enter api_key.
 
-Provider and model lists come from litellm's static catalog
-(`litellm.models_by_provider`); no network calls are made.
+Provider and model lists come from pydantic-ai's static ``KnownModelName``
+catalog; no network calls are made. The picker accepts free-typed entries, so
+unlisted providers or brand-new model names still work.
 """
 
 from __future__ import annotations
 
+import typing
 from typing import Optional
 
-import litellm
+from pydantic_ai.models import KnownModelName
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -18,12 +20,17 @@ from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 
+def _known_models() -> list[str]:
+    return sorted(typing.get_args(KnownModelName.__value__))
+
+
 def _providers() -> list[str]:
-    return sorted(litellm.models_by_provider.keys())
+    return sorted({name.split(":", 1)[0] for name in _known_models() if ":" in name})
 
 
 def _models(provider: str) -> list[str]:
-    return sorted(litellm.models_by_provider.get(provider, set()))
+    prefix = provider + ":"
+    return [name.removeprefix(prefix) for name in _known_models() if name.startswith(prefix)]
 
 
 class PickerScreen(ModalScreen[Optional[str]]):
@@ -93,11 +100,14 @@ class PickerScreen(ModalScreen[Optional[str]]):
 
     def _confirm(self) -> None:
         ol = self.query_one("#picker-list", OptionList)
-        if ol.highlighted is None:
+        if ol.highlighted is not None and 0 <= ol.highlighted < len(self._filtered):
+            self.dismiss(self._filtered[ol.highlighted])
             return
-        idx = ol.highlighted
-        if 0 <= idx < len(self._filtered):
-            self.dismiss(self._filtered[idx])
+        # Nothing matched: accept the typed text verbatim, so entries missing
+        # from the static catalog (new models, unlisted providers) still work.
+        typed = self.query_one("#picker-filter", Input).value.strip()
+        if typed:
+            self.dismiss(typed)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -184,7 +194,7 @@ class LoginScreen(ModalScreen[bool]):
             return
 
         self.app.config.save(  # type: ignore[attr-defined] — pushed only by PaimonApp
-            model=model,
+            model=f"{provider}:{model}",
             api_base=api_base.strip() or None,
             api_key=api_key.strip() or None,
         )

@@ -322,7 +322,7 @@ class PaimonApp(App):
             self._add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
             return
         choice = await self.push_screen_wait(PickerScreen("Resume session", list(labels)))
-        if choice is None or (self._turn is not None and self._turn.is_running):
+        if choice not in labels or (self._turn is not None and self._turn.is_running):
             self.query_one(PromptInput).focus()
             return
         try:

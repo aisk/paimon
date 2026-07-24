@@ -1,11 +1,10 @@
 [project]
 name = "paimon"
 version = "0.1.1"
-description = "A minimal code agent built on litellm + textual"
+description = "A minimal code agent built on pydantic-ai + textual"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "litellm>=1.89.4",
     "pydantic-ai-slim[openai]>=2.17.0",
     "textual>=8.2.7",
     "textual-serve>=1.1.3",

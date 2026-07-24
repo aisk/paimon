@@ -1,8 +1,8 @@
 """Model settings loaded from a JSON config file.
 
 File location: $PAIMON_CONFIG_HOME/config.json (default ~/.config/paimon/).
-API key resolution for the actual request is delegated to litellm via
-agent.py; paimon only stores what the user entered at login.
+The stored model/api_base/api_key are turned into a pydantic-ai model by
+paimon.llm; provider environment variables are the fallback when unset.
 """
 
 import json

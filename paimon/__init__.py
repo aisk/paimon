@@ -1,1 +1,1 @@
-"""Paimon, a minimal code agent built on litellm + textual."""
+"""Paimon, a minimal code agent built on pydantic-ai + textual."""
