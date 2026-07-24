@@ -286,9 +286,17 @@ class Agent:
         self.messages.extend(self.session.messages())
         self.mentions = MentionExpander(self.cwd, self.messages[1:])
 
-    def _append_message(self, message: dict) -> None:
+    # The two methods below are the only paths that write conversation state.
+    # They keep the invariant that ``self.messages`` (minus the system prompt)
+    # always equals what replaying the session log would produce.
+
+    def _append_message(self, message: dict) -> str:
         self.messages.append(message)
-        self.session.append_message(message)
+        return self.session.append_message(message)
+
+    def _replace_message(self, record_id: str, message: dict) -> None:
+        """Persist the final version of a message already present in ``self.messages``."""
+        self.session.append_message(message, replaces=record_id)
 
     async def _maybe_compact(self) -> Optional[compaction.CompactionResult]:
         if not config.COMPACTION_ENABLED:
@@ -311,6 +319,8 @@ class Agent:
         if result is None:
             return None
 
+        # Mirrors how Session.messages() replays a compaction record, so the
+        # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.messages = [self.messages[0], compaction.summary_message(result.summary), *result.kept_messages]
         # Mentions may only reference file bodies that remain in the effective
@@ -400,8 +410,7 @@ class Agent:
                 {"role": "tool", "tool_call_id": c["id"], "content": "Interrupted by user."}
                 for c in ordered
             ]
-            self.messages.extend(tool_msgs)
-            persisted_tool_ids = [self.session.append_message(message) for message in tool_msgs]
+            persisted_tool_ids = [self._append_message(message) for message in tool_msgs]
 
             for slot, c, persisted_id in zip(tool_msgs, ordered, persisted_tool_ids):
                 try:
@@ -417,7 +426,7 @@ class Agent:
                     self.todos = args.get("todos") or []
                     result = tools.render_todos(self.todos)
                     slot["content"] = result
-                    self.session.append_message(slot, replaces=persisted_id)
+                    self._replace_message(persisted_id, slot)
                     yield TodosUpdate(list(self.todos))
                     yield ToolEnd(c["id"], name, result)
                     continue
@@ -425,6 +434,6 @@ class Agent:
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode, self.confirm)
 
                 slot["content"] = result
-                self.session.append_message(slot, replaces=persisted_id)
+                self._replace_message(persisted_id, slot)
                 yield ToolEnd(c["id"], name, result, denied=denied)
             # loop again so the model can react to tool results
