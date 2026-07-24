@@ -1,20 +1,20 @@
 """Tool definitions and execution.
 
-Each tool is described with an OpenAI-style JSON schema (sent to the model) and
-implemented by a small Python function. ``execute_tool`` dispatches by name.
+Each tool is one ``Tool`` entry in ``REGISTRY``: the OpenAI-style JSON schema
+sent to the model, the function that runs it, and the access class that drives
+permission gating. Adding a tool means adding one registry entry.
 """
 
 import asyncio
+import inspect
 import os
 import signal
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 # A confirm callback returns True to allow a dangerous tool, False to deny.
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
-
-# Tools whose side effects warrant a user confirmation before running.
-DANGEROUS = {"bash", "write_file", "edit_file"}
 
 # Permission modes: read (confirm writes, bash and reads outside cwd),
 # edit (auto-approve writes inside cwd), yolo (no confirmation at all).
@@ -22,115 +22,21 @@ MODES = ("read", "edit", "yolo")
 
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a text file and return its contents with line numbers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path, relative to the working directory or absolute."},
-                    "offset": {"type": "integer", "description": "1-indexed line to start from (optional)."},
-                    "limit": {"type": "integer", "description": "Maximum number of lines to read (optional)."},
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Create or overwrite a file with the given content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Replace an exact substring in a file. old_string must appear exactly once.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "old_string": {"type": "string", "description": "Exact text to replace (must be unique in the file)."},
-                    "new_string": {"type": "string", "description": "Replacement text."},
-                },
-                "required": ["path", "old_string", "new_string"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "glob",
-            "description": "Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Glob pattern. Use '**' to match any number of directories."},
-                    "path": {"type": "string", "description": "Base directory to search in (optional, defaults to the working directory)."},
-                    "include_ignored": {"type": "boolean", "description": "Search inside noise dirs like node_modules/.venv/.git too (optional, default false)."},
-                },
-                "required": ["pattern"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Run a shell command in the working directory and return its combined stdout/stderr. Use this for listing, searching (grep/find/ls), git, running tests, etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string"},
-                },
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_todos",
-            "description": (
-                "Create or update the task list for a multi-step task. Always pass the COMPLETE list; "
-                "it overwrites the previous one. Use it to plan work and show progress on tasks with 3+ "
-                "steps; skip it for trivial single-step requests. Keep exactly one task in_progress at a time, "
-                "and mark a task completed as soon as it is done."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
-                        "description": "The complete task list, in order.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "content": {"type": "string", "description": "Short description of the task."},
-                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-                            },
-                            "required": ["content", "status"],
-                        },
-                    },
-                },
-                "required": ["todos"],
-            },
-        },
-    },
-]
+
+@dataclass(frozen=True)
+class Tool:
+    """One tool: its model-facing schema, executor, and gating class.
+
+    ``run`` takes (args, cwd, mode) and returns a string or an awaitable of
+    one; it is None for tools the agent loop handles itself (write_todos).
+    ``access`` drives gate(): "read" runs freely inside cwd, "write" is
+    auto-approved inside cwd in edit mode, "execute" always needs
+    confirmation outside yolo, "none" is never gated.
+    """
+
+    schema: dict
+    run: Optional[Callable[[dict, Path, str], object]]
+    access: str = "none"
 
 
 _TODO_MARKERS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
@@ -158,15 +64,14 @@ def _inside(path: Path, cwd: Path) -> bool:
 
 def gate(name: str, args: dict, mode: str, cwd: Path) -> str:
     """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm")."""
-    if mode == "yolo":
+    tool = REGISTRY.get(name)
+    if mode == "yolo" or tool is None or tool.access == "none":
         return "allow"
-    if name in ("read_file", "glob"):
-        # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
-        target = _resolve(str(args.get("path") or ""), cwd)
-        return "allow" if _inside(target, cwd) else "confirm"
-    if name not in DANGEROUS:
-        return "allow"
-    if mode == "edit" and name in ("write_file", "edit_file") and _inside(_resolve(str(args.get("path") or ""), cwd), cwd):
+    # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
+    inside = _inside(_resolve(str(args.get("path") or ""), cwd), cwd)
+    if tool.access == "read":
+        return "allow" if inside else "confirm"
+    if tool.access == "write" and mode == "edit" and inside:
         return "allow"
     return "confirm"
 
@@ -306,22 +211,156 @@ async def _bash(args: dict, cwd: Path) -> str:
 
 
 async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo") -> str:
-    """Dispatch a tool call. Always returns a string for the model."""
+    """Run a registered tool. Always returns a string for the model."""
+    tool = REGISTRY.get(name)
+    if tool is None or tool.run is None:
+        return f"Error: unknown tool {name!r}"
     try:
-        if name == "read_file":
-            return _read_file(args, cwd)
-        if name == "write_file":
-            return _write_file(args, cwd)
-        if name == "edit_file":
-            return _edit_file(args, cwd)
-        if name == "glob":
-            return _glob(args, cwd, sandboxed=mode != "yolo")
-        if name == "bash":
-            result = await _bash(args, cwd)
-        else:
-            return f"Error: unknown tool {name!r}"
+        result = tool.run(args, cwd, mode)
+        if inspect.isawaitable(result):
+            result = await result
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001 — surface any tool error to the model
         return f"Error executing {name}: {exc}"
     if len(result) > MAX_OUTPUT:
         result = result[:MAX_OUTPUT] + f"\n... (truncated, {len(result) - MAX_OUTPUT} more chars)"
     return result
+
+
+REGISTRY: dict[str, Tool] = {
+    "read_file": Tool(
+        access="read",
+        run=lambda args, cwd, mode: _read_file(args, cwd),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a text file and return its contents with line numbers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path, relative to the working directory or absolute."},
+                        "offset": {"type": "integer", "description": "1-indexed line to start from (optional)."},
+                        "limit": {"type": "integer", "description": "Maximum number of lines to read (optional)."},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+    ),
+    "write_file": Tool(
+        access="write",
+        run=lambda args, cwd, mode: _write_file(args, cwd),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Create or overwrite a file with the given content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+    ),
+    "edit_file": Tool(
+        access="write",
+        run=lambda args, cwd, mode: _edit_file(args, cwd),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": "Replace an exact substring in a file. old_string must appear exactly once.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_string": {"type": "string", "description": "Exact text to replace (must be unique in the file)."},
+                        "new_string": {"type": "string", "description": "Replacement text."},
+                    },
+                    "required": ["path", "old_string", "new_string"],
+                },
+            },
+        },
+    ),
+    "glob": Tool(
+        access="read",
+        run=lambda args, cwd, mode: _glob(args, cwd, sandboxed=mode != "yolo"),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern. Use '**' to match any number of directories."},
+                        "path": {"type": "string", "description": "Base directory to search in (optional, defaults to the working directory)."},
+                        "include_ignored": {"type": "boolean", "description": "Search inside noise dirs like node_modules/.venv/.git too (optional, default false)."},
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+    ),
+    "bash": Tool(
+        access="execute",
+        run=lambda args, cwd, mode: _bash(args, cwd),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run a shell command in the working directory and return its combined stdout/stderr. Use this for listing, searching (grep/find/ls), git, running tests, etc.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+    ),
+    # Stateful: mutates agent-held state, so the agent loop runs it itself.
+    "write_todos": Tool(
+        run=None,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "write_todos",
+                "description": (
+                    "Create or update the task list for a multi-step task. Always pass the COMPLETE list; "
+                    "it overwrites the previous one. Use it to plan work and show progress on tasks with 3+ "
+                    "steps; skip it for trivial single-step requests. Keep exactly one task in_progress at a time, "
+                    "and mark a task completed as soon as it is done."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "The complete task list, in order.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {"type": "string", "description": "Short description of the task."},
+                                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                                },
+                                "required": ["content", "status"],
+                            },
+                        },
+                    },
+                    "required": ["todos"],
+                },
+            },
+        },
+    ),
+}
+
+# The schema list sent with every model request, in registry order.
+TOOLS = [tool.schema for tool in REGISTRY.values()]
