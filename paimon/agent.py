@@ -5,6 +5,7 @@ render however it likes.
 """
 
 import asyncio
+import dataclasses
 import json
 import locale
 import ntpath
@@ -147,6 +148,26 @@ def replay_events(messages: list[ModelMessage]) -> list[object]:
                     else:
                         events.append(ToolStart(part.tool_call_id, part.tool_name, args))
     return events
+
+
+def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[ModelMessage]:
+    """Drop thinking parts produced by a different provider/model.
+
+    Preserved thinking is only valid replayed verbatim to the model that
+    produced it; other endpoints may reject or misread it (cf. pi's
+    transformMessages: same model keeps thinking, a changed model strips it).
+    """
+    current = (model.system, model.model_name)
+    sanitized: list[ModelMessage] = []
+    for message in history:
+        if (isinstance(message, ModelResponse)
+                and (message.provider_name, message.model_name) != current
+                and any(isinstance(part, ThinkingPart) for part in message.parts)):
+            message = dataclasses.replace(
+                message, parts=[part for part in message.parts if not isinstance(part, ThinkingPart)]
+            )
+        sanitized.append(message)
+    return sanitized
 
 
 def _user_texts(history: list[ModelMessage]) -> list[str]:
@@ -439,7 +460,7 @@ class Agent:
             model = self._model()
             request_messages: list[ModelMessage] = [
                 ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
-                *self.history,
+                *_strip_foreign_thinking(self.history, model),
             ]
             parameters = ModelRequestParameters(
                 function_tools=tools.TOOL_DEFINITIONS, allow_text_output=True
