@@ -19,9 +19,14 @@ from uuid import uuid4
 
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
+from . import lockfile
 from .compaction import SUMMARY_PREFIX, summary_message
 
 FORMAT_VERSION = 2
+
+
+class SessionBusyError(RuntimeError):
+    """The session is already active in another process."""
 
 
 def dump_message(message: ModelMessage) -> dict:
@@ -66,6 +71,19 @@ class Session:
         self.path = path
         self.id = session_id
         self.cwd = cwd.resolve()
+
+    def lock(self) -> None:
+        """Mark this session active: only one process may run a session.
+
+        Listing and previews never lock; the Agent locks on construction.
+        Raises SessionBusyError if another process holds the session.
+        """
+        if not lockfile.acquire(self.path):
+            raise SessionBusyError(f"session {self.id[:8]} is already active in another process")
+
+    def unlock(self) -> None:
+        """Release this process's claim; the lock drops with the last holder."""
+        lockfile.release(self.path)
 
     @classmethod
     def create(cls, cwd: Path) -> "Session":

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from paimon.session import Session, _project_dir
+from paimon.session import Session, SessionBusyError, _project_dir
 
 
 class SessionScanTestCase(unittest.TestCase):
@@ -69,6 +69,22 @@ class PreviewTest(SessionScanTestCase):
 
     def test_first_user_text_none_for_empty_session(self) -> None:
         self.assertIsNone(Session.create(self.cwd).first_user_text())
+
+
+class LockTest(SessionScanTestCase):
+    """Lock mechanics live in test_lockfile; this covers the session semantics."""
+
+    def test_lock_raises_busy_when_another_process_holds_it(self) -> None:
+        session = Session.create(self.cwd)
+        with patch("paimon.session.lockfile.acquire", return_value=False):
+            with self.assertRaisesRegex(SessionBusyError, "another process"):
+                session.lock()
+
+    def test_lock_and_unlock_round_trip(self) -> None:
+        session = Session.create(self.cwd)
+        session.lock()
+        session.unlock()
+        session.unlock()  # extra unlock is a no-op
 
 
 if __name__ == "__main__":

@@ -379,12 +379,15 @@ class Agent:
         self.todos: list[dict] = []
         if session is None:
             self.session = Session.create(self.cwd)
+            self.session.lock()
             system_prompt = _system_prompt(self.cwd)
             self.session.append_system_prompt(system_prompt)
         else:
             self.session = session
+            self.session.lock()  # raises SessionBusyError if another process has it
             system_prompt = self.session.system_prompt()
             if system_prompt is None:
+                self.session.unlock()
                 raise RuntimeError("Session does not contain a persisted system prompt")
         self.system_prompt = system_prompt
         self.history: list[ModelMessage] = self.session.messages()

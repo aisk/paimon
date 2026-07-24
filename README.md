@@ -27,7 +27,8 @@ provider" in the command palette (Ctrl+P).
   [delta](https://github.com/dandavison/delta) is installed).
 - Prompts typed while the agent is busy are queued and sent when it finishes.
 - Sessions are JSONL files under `~/.local/share/paimon/sessions/`, split by
-  working directory (`PAIMON_DATA_HOME` overrides).
+  working directory (`PAIMON_DATA_HOME` overrides). A session can only be
+  active in one process at a time.
 - Near the context limit old history is summarized in place, once a window is
   set in `config.json`:
 

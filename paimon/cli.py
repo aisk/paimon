@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .app import PaimonApp
-from .session import Session
+from .session import Session, SessionBusyError
 
 
 def _resolve_session(prefix: str) -> Session:
@@ -49,7 +49,12 @@ def main() -> None:
         Server(command, port=args.port).serve()
         return
     resume_session = _resolve_session(args.resume) if args.resume else None
-    PaimonApp(mode=args.mode, session=resume_session, pick_session=args.resume == "").run()
+    try:
+        app = PaimonApp(mode=args.mode, session=resume_session, pick_session=args.resume == "")
+    except SessionBusyError as exc:
+        print(f"paimon: {exc}", file=sys.stderr)
+        sys.exit(1)
+    app.run()
 
 
 if __name__ == "__main__":

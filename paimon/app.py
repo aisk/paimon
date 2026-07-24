@@ -304,6 +304,7 @@ class PaimonApp(App):
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
+        self.agent.session.unlock()
         self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm, mode=self.mode, config=self.config)
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
@@ -328,9 +329,10 @@ class PaimonApp(App):
         try:
             agent = Agent(cwd=Path.cwd(), confirm=self._confirm, session=labels[choice],
                           mode=self.mode, config=self.config)
-        except RuntimeError as exc:  # session without a persisted system prompt
+        except RuntimeError as exc:  # busy in another process, or no persisted system prompt
             self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return
+        self.agent.session.unlock()
         self.agent = agent
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
