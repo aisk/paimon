@@ -27,8 +27,9 @@ from .agent import (
     ToolStart,
     TurnEnd,
 )
-from . import compaction, config, tools
+from . import compaction, tools
 from .compaction import SUMMARY_NAME
+from .config import Config
 from .login import LoginScreen, PickerScreen
 from .session import Session
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
@@ -153,27 +154,28 @@ class PaimonApp(App):
                           self.action_resume_session),
         ]
 
-    def __init__(self, mode: str = "read",
-                 session: Session | None = None, pick_session: bool = False) -> None:
+    def __init__(self, mode: str = "read", session: Session | None = None,
+                 pick_session: bool = False, config: Config | None = None) -> None:
         self._persist_theme_changes = False
         super().__init__()
         self.mode = mode
+        self.config = config or Config.load()
         cwd = Path.cwd()
-        self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session, mode=mode)
+        self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session, mode=mode, config=self.config)
         self._resumed = session is not None
         self._pick_session = pick_session
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
         self._session_allowed: set[str] = set()
         self._queue: list[str] = []
-        if config.THEME in self.available_themes:
-            self.theme = config.THEME
+        if self.config.theme in self.available_themes:
+            self.theme = self.config.theme
         self._persist_theme_changes = True
 
     def _watch_theme(self, theme_name: str) -> None:
         super()._watch_theme(theme_name)
         if self._persist_theme_changes:
-            config.save(theme=theme_name)
+            self.config.save(theme=theme_name)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="workspace"):
@@ -200,7 +202,7 @@ class PaimonApp(App):
         self._refresh_statusbar()
         if self._resumed:
             self._show_resumed()
-        if not config.MODEL:
+        if not self.config.model:
             self.action_login()
         elif self._pick_session:
             self.action_resume_session()
@@ -247,7 +249,7 @@ class PaimonApp(App):
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
-        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm, mode=self.mode)
+        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm, mode=self.mode, config=self.config)
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._session_allowed.clear()
@@ -269,7 +271,8 @@ class PaimonApp(App):
             self.query_one(PromptInput).focus()
             return
         try:
-            agent = Agent(cwd=Path.cwd(), confirm=self._confirm, session=labels[choice], mode=self.mode)
+            agent = Agent(cwd=Path.cwd(), confirm=self._confirm, session=labels[choice],
+                          mode=self.mode, config=self.config)
         except RuntimeError as exc:  # session without a persisted system prompt
             self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return
@@ -302,10 +305,10 @@ class PaimonApp(App):
                 self._add(
                     Content.from_markup(
                         "[$text-success b]Logged in.[/]  [$text-muted]$model[/]",
-                        model=config.MODEL or "",
+                        model=self.config.model or "",
                     )
                 )
-            elif not config.MODEL:
+            elif not self.config.model:
                 self._add(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
                 self.exit()
             self._refresh_statusbar()
@@ -379,9 +382,9 @@ class PaimonApp(App):
     # ---- status bar ---------------------------------------------------------
 
     def _refresh_statusbar(self, tokens: int | None = None) -> None:
-        parts = [f"{self.mode} mode", config.MODEL or "no model", f"session {self.agent.session.id[:8]}"]
+        parts = [f"{self.mode} mode", self.config.model or "no model", f"session {self.agent.session.id[:8]}"]
         if tokens is not None:
-            window = compaction.context_window(config.MODEL, config.COMPACTION_CONTEXT_WINDOW)
+            window = compaction.context_window(self.config.model, self.config.compaction_context_window)
             if window:
                 parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
             else:
@@ -392,7 +395,7 @@ class PaimonApp(App):
     async def _update_statusbar_tokens(self) -> None:
         # Token counting walks the whole history; keep it off the UI loop.
         tokens = await asyncio.to_thread(
-            compaction.count_tokens, config.MODEL, list(self.agent.messages), tools.TOOLS
+            compaction.count_tokens, self.config.model, list(self.agent.messages), tools.TOOLS
         )
         self._refresh_statusbar(tokens)
 

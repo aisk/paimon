@@ -10,8 +10,8 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 from textual.worker import WorkerState
 
-from paimon import config
 from paimon.app import PaimonApp, _session_label
+from paimon.config import Config
 from paimon.login import PickerScreen
 from paimon.session import Session
 from paimon.ui import ConfirmPanel, PromptInput, UserMessage
@@ -24,10 +24,12 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name})
-        model = patch.object(config, "MODEL", "test-model")
-        for patcher in (env, model):
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def make_app(self, **kwargs) -> PaimonApp:
+        kwargs.setdefault("config", Config(model="test-model"))
+        return PaimonApp(**kwargs)
 
 
 class ConfirmPanelTest(AppTestCase):
@@ -38,7 +40,7 @@ class ConfirmPanelTest(AppTestCase):
         return task
 
     async def test_enter_allows_and_restores_prompt(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptInput)
             task = await self._open(app, pilot)
@@ -52,14 +54,14 @@ class ConfirmPanelTest(AppTestCase):
             self.assertTrue(prompt.display)
 
     async def test_escape_denies(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             task = await self._open(app, pilot, args={"command": "rm -rf x"})
             await pilot.press("escape")
             self.assertFalse(await task)
 
     async def test_always_allows_for_the_rest_of_the_session(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             task = await self._open(
                 app, pilot, "edit_file", {"path": "a.py", "old_string": "a", "new_string": "b"}
@@ -71,7 +73,7 @@ class ConfirmPanelTest(AppTestCase):
             self.assertFalse(app.query("#confirm-panel"))
 
     async def test_number_shortcut_denies(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             task = await self._open(app, pilot, "write_file", {"path": "c.py", "content": "x"})
             await pilot.press("3")
@@ -80,7 +82,7 @@ class ConfirmPanelTest(AppTestCase):
 
 class ModeCycleTest(AppTestCase):
     async def test_shift_tab_cycles_mode_and_updates_indicators(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             self.assertEqual(app.mode, "read")
             prompt = app.query_one(PromptInput)
@@ -96,14 +98,14 @@ class ModeCycleTest(AppTestCase):
             self.assertEqual(app.mode, "read")
 
     async def test_new_session_keeps_current_mode(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             await pilot.press("shift+tab")
             app.action_new_session()
             self.assertEqual(app.agent.mode, "edit")
 
     async def test_shift_tab_while_confirm_panel_open_keeps_pending_future(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             task = asyncio.ensure_future(app._confirm("bash", {"command": "echo hi"}))
             await pilot.pause()
@@ -127,7 +129,7 @@ class ResumeSessionTest(AppTestCase):
 
     async def test_palette_resume_swaps_agent_and_renders_history(self) -> None:
         old = self._old_session()
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             app.action_cycle_mode()  # read -> edit, must survive the resume
             app.action_resume_session()
@@ -142,7 +144,7 @@ class ResumeSessionTest(AppTestCase):
 
     async def test_noop_while_turn_is_running(self) -> None:
         self._old_session()
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             before = app.agent
             app._turn = SimpleNamespace(is_running=True)
@@ -152,7 +154,7 @@ class ResumeSessionTest(AppTestCase):
             self.assertIs(app.agent, before)
 
     async def test_no_sessions_shows_notice(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             app.action_resume_session()
             await pilot.pause()
@@ -161,7 +163,7 @@ class ResumeSessionTest(AppTestCase):
 
     async def test_constructor_session_param_resumes_on_mount(self) -> None:
         old = self._old_session()
-        app = PaimonApp(session=old)
+        app = self.make_app(session=old)
         async with app.run_test() as pilot:
             await pilot.pause()
             self.assertEqual(app.agent.session.id, old.id)
@@ -183,7 +185,7 @@ class SessionLabelTest(AppTestCase):
 
 class StatusLineTest(AppTestCase):
     async def test_pinned_status_layout_and_toggle(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             status = app.query_one("#response-status", Horizontal)
             self.assertFalse(status.display, "status hidden when idle")
@@ -202,7 +204,7 @@ class StatusLineTest(AppTestCase):
 
 class QueueTest(AppTestCase):
     async def test_queue_flush_and_cancel(self) -> None:
-        app = PaimonApp()
+        app = self.make_app()
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptInput)
             queued = app.query_one("#queued", Static)

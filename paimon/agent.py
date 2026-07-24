@@ -19,7 +19,8 @@ from typing import AsyncIterator, Optional
 
 import litellm
 
-from . import compaction, config, tools
+from . import compaction, tools
+from .config import Config
 from .mentions import MentionExpander
 from .session import Session
 
@@ -268,10 +269,12 @@ Guidelines:
 
 class Agent:
     def __init__(self, cwd: Optional[Path] = None, confirm: Optional[ConfirmFn] = None,
-                 session: Optional[Session] = None, mode: str = "read"):
+                 session: Optional[Session] = None, mode: str = "read",
+                 config: Optional[Config] = None):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
         self.mode = mode
+        self.config = config or Config.load()
         self.todos: list[dict] = []
         if session is None:
             self.session = Session.create(self.cwd)
@@ -299,20 +302,20 @@ class Agent:
         self.session.append_message(message, replaces=record_id)
 
     async def _maybe_compact(self) -> Optional[compaction.CompactionResult]:
-        if not config.COMPACTION_ENABLED:
+        if not self.config.compaction_enabled:
             return None
 
-        window = compaction.context_window(config.MODEL, config.COMPACTION_CONTEXT_WINDOW)
-        tokens_before = compaction.count_tokens(config.MODEL, self.messages, tools.TOOLS)
-        if not compaction.should_compact(tokens_before, window, config.COMPACTION_RESERVE_TOKENS):
+        window = compaction.context_window(self.config.model, self.config.compaction_context_window)
+        tokens_before = compaction.count_tokens(self.config.model, self.messages, tools.TOOLS)
+        if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
             return None
 
         result = await compaction.compact(
             self.messages[1:],
-            model=config.MODEL,
-            api_base=config.API_BASE,
-            api_key=config.API_KEY,
-            keep_recent_tokens=config.COMPACTION_KEEP_RECENT_TOKENS,
+            model=self.config.model,
+            api_base=self.config.api_base,
+            api_key=self.config.api_key,
+            keep_recent_tokens=self.config.compaction_keep_recent_tokens,
             tokens_before=tokens_before,
             tool_schemas=tools.TOOLS,
         )
@@ -326,7 +329,7 @@ class Agent:
         # Mentions may only reference file bodies that remain in the effective
         # prompt. A compacted prefix is no longer available to the model.
         self.mentions = MentionExpander(self.cwd, self.messages[1:])
-        result.tokens_after = compaction.count_tokens(config.MODEL, self.messages, tools.TOOLS)
+        result.tokens_after = compaction.count_tokens(self.config.model, self.messages, tools.TOOLS)
         return result
 
     async def run(self, user_input: str) -> AsyncIterator[object]:
@@ -346,9 +349,9 @@ class Agent:
                         yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
 
             response = await litellm.acompletion(
-                model=config.MODEL,
-                api_base=config.API_BASE,
-                api_key=config.API_KEY,
+                model=self.config.model,
+                api_base=self.config.api_base,
+                api_key=self.config.api_key,
                 messages=self.messages,
                 tools=tools.TOOLS,
                 stream=True,

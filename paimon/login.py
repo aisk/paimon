@@ -183,9 +183,7 @@ class LoginScreen(ModalScreen[bool]):
             self.dismiss(False)
             return
 
-        from . import config
-
-        config.save(
+        self.app.config.save(  # type: ignore[attr-defined] — pushed only by PaimonApp
             model=model,
             api_base=api_base.strip() or None,
             api_key=api_key.strip() or None,

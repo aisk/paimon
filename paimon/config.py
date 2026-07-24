@@ -7,6 +7,7 @@ agent.py; paimon only stores what the user entered at login.
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -31,46 +32,64 @@ def _load_file_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-_cfg = _load_file_config()
-MODEL: Optional[str] = _cfg.get("model")
-API_BASE: Optional[str] = _cfg.get("api_base")
-API_KEY: Optional[str] = _cfg.get("api_key")
-THEME: Optional[str] = _cfg.get("theme")
+@dataclass
+class Config:
+    """Settings owned by whoever constructed them — no module-level state."""
 
-_compaction = _cfg.get("compaction") if isinstance(_cfg.get("compaction"), dict) else {}
-COMPACTION_ENABLED: bool = _compaction.get("enabled", True)
-COMPACTION_RESERVE_TOKENS: int = _compaction.get("reserve_tokens", 16_384)
-COMPACTION_KEEP_RECENT_TOKENS: int = _compaction.get("keep_recent_tokens", 20_000)
-# Useful for custom model names that are absent from LiteLLM's model catalog.
-COMPACTION_CONTEXT_WINDOW: Optional[int] = _compaction.get("context_window")
+    model: Optional[str] = None
+    api_base: Optional[str] = None
+    api_key: Optional[str] = None
+    theme: Optional[str] = None
+    compaction_enabled: bool = True
+    compaction_reserve_tokens: int = 16_384
+    compaction_keep_recent_tokens: int = 20_000
+    # Useful for custom model names that are absent from LiteLLM's model catalog.
+    compaction_context_window: Optional[int] = None
 
+    @classmethod
+    def load(cls) -> "Config":
+        data = _load_file_config()
+        compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
+        return cls(
+            model=data.get("model"),
+            api_base=data.get("api_base"),
+            api_key=data.get("api_key"),
+            theme=data.get("theme"),
+            compaction_enabled=compaction.get("enabled", cls.compaction_enabled),
+            compaction_reserve_tokens=compaction.get("reserve_tokens", cls.compaction_reserve_tokens),
+            compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
+            compaction_context_window=compaction.get("context_window"),
+        )
 
-def save(
-    model: Optional[str] = None,
-    api_base: Optional[str] = None,
-    api_key: Optional[str] = None,
-    theme: Optional[str] = None,
-) -> None:
-    """Persist fields to config.json and refresh module-level constants.
+    def save(
+        self,
+        model: Optional[str] = None,
+        api_base: Optional[str] = None,
+        api_key: Optional[str] = None,
+        theme: Optional[str] = None,
+    ) -> None:
+        """Persist the fields passed (and not None) to config.json and update self.
 
-    Only the fields passed (and not None) are written; others are preserved.
-    """
-    cfg = _load_file_config()
-    if model is not None:
-        cfg["model"] = model
-    if api_base is not None:
-        cfg["api_base"] = api_base
-    if api_key is not None:
-        cfg["api_key"] = api_key
-    if theme is not None:
-        cfg["theme"] = theme
+        Other fields already in the file are preserved.
+        """
+        data = _load_file_config()
+        for key, value in (("model", model), ("api_base", api_base),
+                           ("api_key", api_key), ("theme", theme)):
+            if value is not None:
+                data[key] = value
 
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, indent=2, ensure_ascii=False)
+        # The file may hold an API key: create it private, repair old copies.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.chmod(path, 0o600)
 
-    global MODEL, API_BASE, API_KEY, THEME
-    MODEL = cfg.get("model")
-    API_BASE = cfg.get("api_base")
-    API_KEY = cfg.get("api_key")
-    THEME = cfg.get("theme")
+        self.model = data.get("model")
+        self.api_base = data.get("api_base")
+        self.api_key = data.get("api_key")
+        self.theme = data.get("theme")

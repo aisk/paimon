@@ -7,6 +7,7 @@ from helpers import make_session, stub_completion
 
 from paimon import compaction
 from paimon.agent import Agent, ToolEnd
+from paimon.config import Config
 
 
 class AgentSystemPromptTest(unittest.TestCase):
@@ -19,14 +20,14 @@ class AgentSystemPromptTest(unittest.TestCase):
                 patch("paimon.agent.Session.create", return_value=session),
                 patch("paimon.agent._system_prompt", return_value="snapshot") as generate,
             ):
-                first = Agent(cwd=cwd)
+                first = Agent(cwd=cwd, config=Config())
 
             self.assertEqual(first.messages[0], {"role": "system", "content": "snapshot"})
             self.assertEqual(session.system_prompt(), "snapshot")
             generate.assert_called_once_with(cwd)
 
             with patch("paimon.agent._system_prompt") as generate:
-                resumed = Agent(cwd=cwd, session=session)
+                resumed = Agent(cwd=cwd, session=session, config=Config())
 
             self.assertEqual(resumed.messages[0], {"role": "system", "content": "snapshot"})
             generate.assert_not_called()
@@ -38,7 +39,7 @@ class AgentSystemPromptTest(unittest.TestCase):
 
             with patch("paimon.agent._system_prompt") as generate:
                 with self.assertRaisesRegex(RuntimeError, "persisted system prompt"):
-                    Agent(cwd=cwd, session=session)
+                    Agent(cwd=cwd, session=session, config=Config())
 
             generate.assert_not_called()
 
@@ -52,7 +53,7 @@ class MentionAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             session.append_system_prompt("snapshot")
 
             with patch("paimon.agent.litellm.acompletion", new=stub_completion()):
-                agent = Agent(cwd=cwd, session=session)
+                agent = Agent(cwd=cwd, session=session, config=Config())
                 _events = [event async for event in agent.run("review @hello.txt")]
 
             user_messages = [message for message in session.messages() if message.get("role") == "user"]
@@ -66,13 +67,12 @@ class MentionAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             (cwd / "hello.txt").write_text("hello")
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
-            agent = Agent(cwd=cwd, session=session)
+            agent = Agent(cwd=cwd, session=session, config=Config())
             agent._append_message({"role": "user", "content": agent.mentions.expand("@hello.txt")})
 
             self.assertIn('status="previously_mentioned"', agent.mentions.expand("@hello.txt"))
             result = compaction.CompactionResult("checkpoint", [], 100, 0)
             with (
-                patch("paimon.agent.config.COMPACTION_ENABLED", True),
                 patch("paimon.agent.compaction.context_window", return_value=100),
                 patch("paimon.agent.compaction.count_tokens", side_effect=[100, 10]),
                 patch("paimon.agent.compaction.compact", new=AsyncMock(return_value=result)),
@@ -92,7 +92,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
     def _agent(cwd: Path, **kwargs) -> Agent:
         session = make_session(cwd)
         session.append_system_prompt("snapshot")
-        return Agent(cwd=cwd, session=session, **kwargs)
+        return Agent(cwd=cwd, session=session, config=Config(), **kwargs)
 
     async def _run_tool_turn(self, agent: Agent, name: str, arguments: str) -> ToolEnd:
         with patch("paimon.agent.litellm.acompletion", new=stub_completion(name, arguments)):
