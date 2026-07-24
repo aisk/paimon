@@ -295,7 +295,7 @@ class PaimonApp(App):
 
     async def _show_resumed(self) -> None:
         renderer = _EventRenderer(self)
-        for ev in replay_events(self.agent.messages[1:]):
+        for ev in replay_events(self.agent.history):
             await renderer.handle(ev)
         await renderer.close()
         self._add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
@@ -433,7 +433,7 @@ class PaimonApp(App):
     def _refresh_statusbar(self, tokens: int | None = None) -> None:
         parts = [f"{self.mode} mode", self.config.model or "no model", f"session {self.agent.session.id[:8]}"]
         if tokens is not None:
-            window = compaction.context_window(self.config.model, self.config.compaction_context_window)
+            window = compaction.context_window(self.config.compaction_context_window)
             if window:
                 parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
             else:
@@ -444,7 +444,7 @@ class PaimonApp(App):
     async def _update_statusbar_tokens(self) -> None:
         # Token counting walks the whole history; keep it off the UI loop.
         tokens = await asyncio.to_thread(
-            compaction.count_tokens, self.config.model, list(self.agent.messages), tools.TOOLS
+            compaction.count_tokens, list(self.agent.history), tools.TOOLS
         )
         self._refresh_statusbar(tokens)
 

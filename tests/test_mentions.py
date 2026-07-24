@@ -53,7 +53,7 @@ class MentionExpanderTest(unittest.TestCase):
             target.write_text("hello")
             original = MentionExpander(cwd).expand("@hello.txt")
 
-            resumed = MentionExpander(cwd, [{"role": "user", "content": original}])
+            resumed = MentionExpander(cwd, [original])
             repeated = resumed.expand("@hello.txt")
 
             self.assertIn('status="previously_mentioned"', repeated)

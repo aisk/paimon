@@ -6,6 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from textual.containers import Horizontal
 from textual.widgets import Static
 from textual.worker import WorkerState
@@ -121,7 +129,7 @@ class ResumeSessionTest(AppTestCase):
     def _old_session(content: str = "hello there") -> Session:
         session = Session.create(Path.cwd())
         session.append_system_prompt("sys")
-        session.append_message({"role": "user", "content": content})
+        session.append_message(ModelRequest(parts=[UserPromptPart(content=content)]))
         return session
 
     def _log_text(self, app: PaimonApp) -> str:
@@ -172,10 +180,14 @@ class ResumeSessionTest(AppTestCase):
 
     async def test_history_replays_assistant_and_tool_widgets(self) -> None:
         session = self._old_session("do it")
-        session.append_message({"role": "assistant", "content": "working", "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]})
-        session.append_message({"role": "tool", "tool_call_id": "c1", "content": "a.py"})
-        session.append_message({"role": "assistant", "content": "done"})
+        session.append_message(ModelResponse(parts=[
+            TextPart(content="working"),
+            ToolCallPart(tool_name="bash", args='{"command": "ls"}', tool_call_id="c1"),
+        ]))
+        session.append_message(ModelRequest(parts=[
+            ToolReturnPart(tool_name="bash", content="a.py", tool_call_id="c1"),
+        ]))
+        session.append_message(ModelResponse(parts=[TextPart(content="done")]))
         app = self.make_app(session=session)
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -189,7 +201,7 @@ class ResumeSessionTest(AppTestCase):
 class SessionLabelTest(AppTestCase):
     def test_label_has_local_time_short_id_and_flattened_preview(self) -> None:
         session = Session.create(Path.cwd())
-        session.append_message({"role": "user", "content": "fix the\nbug " + "x" * 50})
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="fix the\nbug " + "x" * 50)]))
 
         label = _session_label(session)
 

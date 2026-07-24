@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+from pydantic_ai.tools import ToolDefinition
+
 # A confirm callback returns True to allow a dangerous tool, False to deny.
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
@@ -364,3 +366,13 @@ REGISTRY: dict[str, Tool] = {
 
 # The schema list sent with every model request, in registry order.
 TOOLS = [tool.schema for tool in REGISTRY.values()]
+
+# The same schemas as pydantic-ai tool definitions.
+TOOL_DEFINITIONS = [
+    ToolDefinition(
+        name=schema["function"]["name"],
+        description=schema["function"]["description"],
+        parameters_json_schema=schema["function"]["parameters"],
+    )
+    for schema in TOOLS
+]

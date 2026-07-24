@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
 from paimon.session import Session, _project_dir
 
 
@@ -21,7 +23,7 @@ class SessionScanTestCase(unittest.TestCase):
 
     def _session_with_message(self, content: str, mtime: float) -> Session:
         session = Session.create(self.cwd)
-        session.append_message({"role": "user", "content": content})
+        session.append_message(ModelRequest(parts=[UserPromptPart(content=content)]))
         os.utime(session.path, (mtime, mtime))
         return session
 
@@ -59,9 +61,9 @@ class PreviewTest(SessionScanTestCase):
 
     def test_first_user_text_skips_assistant_messages(self) -> None:
         session = Session.create(self.cwd)
-        session.append_message({"role": "assistant", "content": "hello!"})
-        session.append_message({"role": "user", "content": "fix the bug"})
-        session.append_message({"role": "user", "content": "second"})
+        session.append_message(ModelResponse(parts=[TextPart(content="hello!")]))
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="fix the bug")]))
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="second")]))
 
         self.assertEqual(session.first_user_text(), "fix the bug")
 

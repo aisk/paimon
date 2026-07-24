@@ -17,15 +17,29 @@ from datetime import date
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-import litellm
+from pydantic_ai.direct import model_request_stream
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    PartDeltaEvent,
+    PartStartEvent,
+    SystemPromptPart,
+    TextPart,
+    TextPartDelta,
+    ThinkingPart,
+    ThinkingPartDelta,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import compaction, tools
 from .config import Config
+from .llm import build_model
 from .mentions import MentionExpander
 from .session import Session
-
-litellm.telemetry = False
-litellm.suppress_debug_info = True
 
 
 # ---- Events yielded by Agent.run -------------------------------------------
@@ -90,40 +104,57 @@ class CompactionNotice:
     """A compaction checkpoint encountered while replaying history."""
 
 
-def replay_events(messages: list[dict]) -> list[object]:
+def _parse_args(args: object) -> dict:
+    """Tool-call arguments as a dict, tolerating malformed JSON from the model."""
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str) and args:
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def replay_events(messages: list[ModelMessage]) -> list[object]:
     """Persisted messages replayed as the events a live ``Agent.run`` yields.
 
     Lets a UI render resumed history through the same code path as live turns.
     """
     events: list[object] = []
-    pending: list[dict] = []  # tool calls awaiting their result message
     for message in messages:
-        role, body = message.get("role"), message.get("content")
-        if message.get("name") == compaction.SUMMARY_NAME:
+        if compaction.is_summary_message(message):
             events.append(CompactionNotice())
             continue
-        if role == "user" and body:
-            events.append(UserInput(str(body)))
-        elif role == "assistant":
-            if body:
-                events.append(TextDelta(str(body)))
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                name = function.get("name") or "tool"
-                try:
-                    args = json.loads(function.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                pending.append({"id": call.get("id") or "", "name": name})
-                if name == "write_todos":
-                    events.append(TodosUpdate(args.get("todos") or []))
-                else:
-                    events.append(ToolStart(call.get("id") or "", name, args))
-        elif role == "tool":
-            call = pending.pop(0) if pending else {"id": "", "name": ""}
-            if call["name"] != "write_todos":
-                events.append(ToolEnd(call["id"], call["name"], str(body or "(no output)")))
+        if isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, UserPromptPart) and isinstance(part.content, str) and part.content:
+                    events.append(UserInput(part.content))
+                elif isinstance(part, ToolReturnPart) and part.tool_name != "write_todos":
+                    events.append(ToolEnd(part.tool_call_id, part.tool_name,
+                                          str(part.content or "(no output)")))
+        elif isinstance(message, ModelResponse):
+            for part in message.parts:
+                if isinstance(part, ThinkingPart) and part.content:
+                    events.append(ReasoningDelta(part.content))
+                elif isinstance(part, TextPart) and part.content:
+                    events.append(TextDelta(part.content))
+                elif isinstance(part, ToolCallPart):
+                    args = _parse_args(part.args)
+                    if part.tool_name == "write_todos":
+                        events.append(TodosUpdate(args.get("todos") or []))
+                    else:
+                        events.append(ToolStart(part.tool_call_id, part.tool_name, args))
     return events
+
+
+def _user_texts(history: list[ModelMessage]) -> list[str]:
+    """All plain-text user prompt contents, for mention-version restoration."""
+    return [part.content
+            for message in history if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str)]
 
 
 # Re-exported so UI code can keep importing it from here.
@@ -334,36 +365,44 @@ class Agent:
             system_prompt = self.session.system_prompt()
             if system_prompt is None:
                 raise RuntimeError("Session does not contain a persisted system prompt")
-        self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        self.messages.extend(self.session.messages())
-        self.mentions = MentionExpander(self.cwd, self.messages[1:])
+        self.system_prompt = system_prompt
+        self.history: list[ModelMessage] = self.session.messages()
+        self.mentions = MentionExpander(self.cwd, _user_texts(self.history))
+        self._cached_model: Optional[tuple[tuple, Model]] = None
+
+    def _model(self) -> Model:
+        """The configured model, rebuilt when login changes the config."""
+        if not self.config.model:
+            raise RuntimeError("No model configured; log in first")
+        key = (self.config.model, self.config.api_base, self.config.api_key)
+        if self._cached_model is None or self._cached_model[0] != key:
+            self._cached_model = (key, build_model(*key))
+        return self._cached_model[1]
 
     # The two methods below are the only paths that write conversation state.
-    # They keep the invariant that ``self.messages`` (minus the system prompt)
-    # always equals what replaying the session log would produce.
+    # They keep the invariant that ``self.history`` always equals what
+    # replaying the session log would produce.
 
-    def _append_message(self, message: dict) -> str:
-        self.messages.append(message)
+    def _append_message(self, message: ModelMessage) -> str:
+        self.history.append(message)
         return self.session.append_message(message)
 
-    def _replace_message(self, record_id: str, message: dict) -> None:
-        """Persist the final version of a message already present in ``self.messages``."""
+    def _replace_message(self, record_id: str, message: ModelMessage) -> None:
+        """Persist the final version of a message already present in ``self.history``."""
         self.session.append_message(message, replaces=record_id)
 
     async def _maybe_compact(self) -> Optional[compaction.CompactionResult]:
         if not self.config.compaction_enabled:
             return None
 
-        window = compaction.context_window(self.config.model, self.config.compaction_context_window)
-        tokens_before = compaction.count_tokens(self.config.model, self.messages, tools.TOOLS)
+        window = compaction.context_window(self.config.compaction_context_window)
+        tokens_before = compaction.count_tokens(self.history, tools.TOOLS)
         if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
             return None
 
         result = await compaction.compact(
-            self.messages[1:],
-            model=self.config.model,
-            api_base=self.config.api_base,
-            api_key=self.config.api_key,
+            self.history,
+            model=self._model(),
             keep_recent_tokens=self.config.compaction_keep_recent_tokens,
             tokens_before=tokens_before,
             tool_schemas=tools.TOOLS,
@@ -374,16 +413,16 @@ class Agent:
         # Mirrors how Session.messages() replays a compaction record, so the
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
-        self.messages = [self.messages[0], compaction.summary_message(result.summary), *result.kept_messages]
+        self.history = [compaction.summary_message(result.summary), *result.kept_messages]
         # Mentions may only reference file bodies that remain in the effective
         # prompt. A compacted prefix is no longer available to the model.
-        self.mentions = MentionExpander(self.cwd, self.messages[1:])
-        result.tokens_after = compaction.count_tokens(self.config.model, self.messages, tools.TOOLS)
+        self.mentions = MentionExpander(self.cwd, _user_texts(self.history))
+        result.tokens_after = compaction.count_tokens(self.history, tools.TOOLS)
         return result
 
     async def run(self, user_input: str) -> AsyncIterator[object]:
         """Run one user turn to completion, yielding events along the way."""
-        self._append_message({"role": "user", "content": self.mentions.expand(user_input)})
+        self._append_message(ModelRequest(parts=[UserPromptPart(content=self.mentions.expand(user_input))]))
         compaction_failed = False
 
         while True:
@@ -397,95 +436,86 @@ class Agent:
                     if compacted:
                         yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
 
-            response = await litellm.acompletion(
-                model=self.config.model,
-                api_base=self.config.api_base,
-                api_key=self.config.api_key,
-                messages=self.messages,
-                tools=tools.TOOLS,
-                stream=True,
+            model = self._model()
+            request_messages: list[ModelMessage] = [
+                ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
+                *self.history,
+            ]
+            parameters = ModelRequestParameters(
+                function_tools=tools.TOOL_DEFINITIONS, allow_text_output=True
             )
 
-            content = ""
-            # index -> {"id", "name", "args"} accumulated across stream deltas
-            calls: dict[int, dict] = {}
+            content = ""  # accumulated text, kept if the stream is interrupted
 
             try:
-                async for chunk in response:
-                    delta = chunk.choices[0].delta
-
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        yield ReasoningDelta(reasoning)
-
-                    if delta.content:
-                        content += delta.content
-                        yield TextDelta(delta.content)
-
-                    for tc in delta.tool_calls or []:
-                        slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                        if tc.id:
-                            slot["id"] = tc.id
-                        if tc.function and tc.function.name:
-                            slot["name"] = tc.function.name
-                        if tc.function and tc.function.arguments:
-                            slot["args"] += tc.function.arguments
+                async with model_request_stream(
+                    model, request_messages, model_request_parameters=parameters
+                ) as stream:
+                    async for event in stream:
+                        if isinstance(event, PartStartEvent):
+                            part = event.part
+                            if isinstance(part, ThinkingPart) and part.content:
+                                yield ReasoningDelta(part.content)
+                            elif isinstance(part, TextPart) and part.content:
+                                content += part.content
+                                yield TextDelta(part.content)
+                        elif isinstance(event, PartDeltaEvent):
+                            delta = event.delta
+                            if isinstance(delta, ThinkingPartDelta) and delta.content_delta:
+                                yield ReasoningDelta(delta.content_delta)
+                            elif isinstance(delta, TextPartDelta) and delta.content_delta:
+                                content += delta.content_delta
+                                yield TextDelta(delta.content_delta)
+                    response = stream.get()
             except asyncio.CancelledError:
-                # Interrupted mid-stream: keep partial text (drop incomplete tool
-                # calls) so the message history stays valid for the next request.
-                self._append_message({"role": "assistant", "content": content or "(interrupted)"})
+                # Interrupted mid-stream: keep partial text but drop incomplete
+                # tool calls and thinking (Z.ai-style preserved thinking must be
+                # replayed complete or not at all) so the history stays valid.
+                self._append_message(ModelResponse(
+                    parts=[TextPart(content=content or "(interrupted)")],
+                    model_name=model.model_name,
+                    provider_name=model.system,
+                ))
                 raise
 
-            ordered = [calls[i] for i in sorted(calls)]
+            self._append_message(response)
 
-            assistant_msg: dict = {"role": "assistant", "content": content or None}
-            if ordered:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": c["id"],
-                        "type": "function",
-                        "function": {"name": c["name"], "arguments": c["args"]},
-                    }
-                    for c in ordered
-                ]
-            self._append_message(assistant_msg)
-
-            if not ordered:
+            calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
+            if not calls:
                 yield TurnEnd()
                 return
 
             # Pre-seed a tool result for every call up front, so even if we are
-            # interrupted mid-execution the history never has a dangling tool_call
+            # interrupted mid-execution the history never has a dangling tool call
             # (the API requires each tool_call_id to be answered). Unfinished ones
             # keep this placeholder.
-            tool_msgs = [
-                {"role": "tool", "tool_call_id": c["id"], "content": "Interrupted by user."}
-                for c in ordered
+            returns = [
+                ToolReturnPart(tool_name=call.tool_name, content="Interrupted by user.",
+                               tool_call_id=call.tool_call_id)
+                for call in calls
             ]
-            persisted_tool_ids = [self._append_message(message) for message in tool_msgs]
+            tool_request = ModelRequest(parts=returns)
+            record_id = self._append_message(tool_request)
 
-            for slot, c, persisted_id in zip(tool_msgs, ordered, persisted_tool_ids):
-                try:
-                    args = json.loads(c["args"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                name = c["name"]
-                yield ToolStart(c["id"], name, args)
+            for slot, call in zip(returns, calls):
+                args = _parse_args(call.args)
+                name = call.tool_name
+                yield ToolStart(call.tool_call_id, name, args)
 
                 # write_todos mutates agent-held state rather than the filesystem,
                 # so it is handled here instead of in the stateless execute_tool.
                 if name == "write_todos":
                     self.todos = args.get("todos") or []
                     result = tools.render_todos(self.todos)
-                    slot["content"] = result
-                    self._replace_message(persisted_id, slot)
+                    slot.content = result
+                    self._replace_message(record_id, tool_request)
                     yield TodosUpdate(list(self.todos))
-                    yield ToolEnd(c["id"], name, result)
+                    yield ToolEnd(call.tool_call_id, name, result)
                     continue
 
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode, self.confirm)
 
-                slot["content"] = result
-                self._replace_message(persisted_id, slot)
-                yield ToolEnd(c["id"], name, result, denied=denied)
+                slot.content = result
+                self._replace_message(record_id, tool_request)
+                yield ToolEnd(call.tool_call_id, name, result, denied=denied)
             # loop again so the model can react to tool results

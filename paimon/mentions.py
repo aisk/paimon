@@ -28,16 +28,15 @@ class MentionedVersion:
 class MentionExpander:
     """Expand file mentions and remember versions already present in context."""
 
-    def __init__(self, cwd: Path, messages: list[dict] | None = None):
+    def __init__(self, cwd: Path, texts: list[str] | None = None):
         self.cwd = cwd.resolve()
         self._versions: dict[tuple[str, str], MentionedVersion] = {}
-        if messages:
-            self.restore(messages)
+        if texts:
+            self.restore(texts)
 
-    def restore(self, messages: list[dict]) -> None:
+    def restore(self, texts: list[str]) -> None:
         """Restore prior file inclusions from persisted, expanded user messages."""
-        for message in messages:
-            content = message.get("content") if isinstance(message, dict) else None
+        for content in texts:
             if not isinstance(content, str):
                 continue
             for tag in _OPENING_TAG.finditer(content):

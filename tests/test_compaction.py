@@ -1,11 +1,27 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 
 from paimon import compaction
 from paimon.session import Session
+
+
+def _user(content: str) -> ModelRequest:
+    return ModelRequest(parts=[UserPromptPart(content=content)])
+
+
+def _assistant(content: str) -> ModelResponse:
+    return ModelResponse(parts=[TextPart(content=content)])
 
 
 class CompactionHelpersTest(unittest.TestCase):
@@ -16,34 +32,30 @@ class CompactionHelpersTest(unittest.TestCase):
 
     def test_cut_never_starts_at_tool_result(self) -> None:
         messages = [
-            {"role": "user", "content": "do work"},
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]},
-            {"role": "tool", "tool_call_id": "call-1", "content": "result"},
-            {"role": "assistant", "content": "done"},
+            _user("do work"),
+            ModelResponse(parts=[ToolCallPart(tool_name="bash", args="{}", tool_call_id="call-1")]),
+            ModelRequest(parts=[ToolReturnPart(tool_name="bash", content="result", tool_call_id="call-1")]),
+            _assistant("done"),
         ]
         with patch("paimon.compaction.count_tokens", return_value=10):
-            self.assertEqual(compaction.find_cut_index(messages, 15, "test/model"), 1)
+            self.assertEqual(compaction.find_cut_index(messages, 15), 1)
 
 
 class CompactTest(unittest.IsolatedAsyncioTestCase):
     async def test_compact_summarizes_prefix_and_keeps_suffix(self) -> None:
-        response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="## Goal\nKeep going"))]
-        )
+        response = ModelResponse(parts=[TextPart(content="## Goal\nKeep going")])
         messages = [
-            {"role": "user", "content": "old request"},
-            {"role": "assistant", "content": "old answer"},
-            {"role": "user", "content": "recent request"},
+            _user("old request"),
+            _assistant("old answer"),
+            _user("recent request"),
         ]
         with (
             patch("paimon.compaction.count_tokens", return_value=10),
-            patch("paimon.compaction.litellm.acompletion", new=AsyncMock(return_value=response)),
+            patch("paimon.compaction.model_request", new=AsyncMock(return_value=response)),
         ):
             result = await compaction.compact(
                 messages,
-                model="test/model",
-                api_base=None,
-                api_key=None,
+                model=object(),
                 keep_recent_tokens=15,
                 tokens_before=100,
             )
@@ -59,20 +71,24 @@ class SessionCompactionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
             session = Session(path, "session-id", Path(directory))
-            old = {"role": "user", "content": "old"}
-            recent = {"role": "assistant", "content": "recent"}
-            after = {"role": "user", "content": "after"}
+            old = _user("old")
+            recent = _assistant("recent")
+            after = _user("after")
             session.append_message(old)
             session.append_message(recent)
             session.append_compaction("checkpoint", [recent], 100)
             session.append_message(after)
 
-            self.assertEqual(
-                session.messages(),
-                [compaction.summary_message("checkpoint"), recent, after],
-            )
+            replayed = session.messages()
+            self.assertEqual(len(replayed), 3)
+            self.assertTrue(compaction.is_summary_message(replayed[0]))
+            self.assertIn("checkpoint", replayed[0].parts[0].content)
+            self.assertEqual(replayed[1], recent)
+            self.assertEqual(replayed[2], after)
+
             records = Session._read_records(path)
-            self.assertIn(old, [record.get("message") for record in records])
+            stored_texts = [str(record.get("message")) for record in records if record.get("type") == "message"]
+            self.assertTrue(any("old" in text for text in stored_texts))
             self.assertEqual([record.get("type") for record in records].count("compaction"), 1)
 
 

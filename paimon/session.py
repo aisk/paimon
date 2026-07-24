@@ -1,4 +1,9 @@
-"""Append-only JSONL session persistence."""
+"""Append-only JSONL session persistence.
+
+Format version 2 stores pydantic-ai ``ModelMessage`` JSON in message records.
+Version-1 (litellm dict) sessions are not converted; they are skipped when
+listing sessions to resume.
+"""
 
 # Deferred annotations: the ``list`` classmethod shadows the builtin in the
 # class body, which would otherwise break ``list[dict]`` annotations below it.
@@ -12,9 +17,20 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from .compaction import summary_message
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
-FORMAT_VERSION = 1
+from .compaction import SUMMARY_PREFIX, summary_message
+
+FORMAT_VERSION = 2
+
+
+def dump_message(message: ModelMessage) -> dict:
+    """One ModelMessage as plain JSON-compatible data."""
+    return ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
+
+
+def load_messages(raw: list) -> list[ModelMessage]:
+    return list(ModelMessagesTypeAdapter.validate_python(raw))
 
 
 def data_dir() -> Path:
@@ -97,8 +113,8 @@ class Session:
             return []
         return records
 
-    def messages(self) -> list[dict]:
-        messages: list[dict] = []
+    def messages(self) -> list[ModelMessage]:
+        raw_messages: list[dict] = []
         positions: dict[str, int] = {}
         for record in self._read_records(self.path):
             if record.get("type") == "compaction":
@@ -106,7 +122,7 @@ class Session:
                 kept_messages = record.get("kept_messages")
                 if isinstance(summary, str) and isinstance(kept_messages, list):
                     kept = [message for message in kept_messages if isinstance(message, dict)]
-                    messages = [summary_message(summary), *kept]
+                    raw_messages = [dump_message(summary_message(summary)), *kept]
                     # Compaction snapshots are final: later replacement records
                     # only refer to messages appended after this checkpoint.
                     positions = {}
@@ -117,12 +133,12 @@ class Session:
                 continue
             replaced = record.get("replaces")
             if replaced in positions:
-                messages[positions[replaced]] = message
+                raw_messages[positions[replaced]] = message
             else:
                 if isinstance(record.get("id"), str):
-                    positions[record["id"]] = len(messages)
-                messages.append(message)
-        return messages
+                    positions[record["id"]] = len(raw_messages)
+                raw_messages.append(message)
+        return load_messages(raw_messages)
 
     def system_prompt(self) -> Optional[str]:
         """Return the system prompt snapshot stored for this session."""
@@ -142,9 +158,15 @@ class Session:
         """The first user message, for picker previews."""
         for record in self._read_records(self.path):
             message = record.get("message")
-            if (record.get("type") == "message" and isinstance(message, dict)
-                    and message.get("role") == "user" and isinstance(message.get("content"), str)):
-                return message["content"]
+            if record.get("type") != "message" or not isinstance(message, dict):
+                continue
+            if message.get("kind") != "request":
+                continue
+            for part in message.get("parts") or []:
+                content = part.get("content") if isinstance(part, dict) else None
+                if (isinstance(part, dict) and part.get("part_kind") == "user-prompt"
+                        and isinstance(content, str) and not content.startswith(SUMMARY_PREFIX)):
+                    return content
         return None
 
     def append_system_prompt(self, content: str) -> None:
@@ -156,22 +178,22 @@ class Session:
             "content": content,
         })
 
-    def append_message(self, message: dict, replaces: Optional[str] = None) -> str:
+    def append_message(self, message: ModelMessage, replaces: Optional[str] = None) -> str:
         record_id = str(uuid4())
-        record = {"type": "message", "id": record_id, "timestamp": _now(), "message": message}
+        record = {"type": "message", "id": record_id, "timestamp": _now(), "message": dump_message(message)}
         if replaces:
             record["replaces"] = replaces
         self.append(record)
         return record_id
 
-    def append_compaction(self, summary: str, kept_messages: list[dict], tokens_before: int) -> None:
+    def append_compaction(self, summary: str, kept_messages: list[ModelMessage], tokens_before: int) -> None:
         """Persist a checkpoint without deleting any earlier JSONL records."""
         self.append({
             "type": "compaction",
             "id": str(uuid4()),
             "timestamp": _now(),
             "summary": summary,
-            "kept_messages": kept_messages,
+            "kept_messages": [dump_message(message) for message in kept_messages],
             "tokens_before": tokens_before,
         })
 

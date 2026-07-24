@@ -9,10 +9,21 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
-import litellm
+from pydantic_ai.direct import model_request
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    ThinkingPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai.models import Model, ModelRequestParameters
 
 
-SUMMARY_NAME = "paimon_context_summary"
 SUMMARY_PREFIX = "The conversation before this point was compacted into this checkpoint:\n\n"
 _TOOL_RESULT_LIMIT = 2_000
 
@@ -20,87 +31,100 @@ _TOOL_RESULT_LIMIT = 2_000
 @dataclass
 class CompactionResult:
     summary: str
-    kept_messages: list[dict]
+    kept_messages: list[ModelMessage]
     tokens_before: int
     tokens_after: int
 
 
-def summary_message(summary: str) -> dict:
+def summary_message(summary: str) -> ModelRequest:
     """Return the synthetic user message placed at the start of compacted context."""
-    return {"role": "user", "name": SUMMARY_NAME, "content": SUMMARY_PREFIX + summary}
+    return ModelRequest(parts=[UserPromptPart(content=SUMMARY_PREFIX + summary)])
 
 
-def context_window(model: Optional[str], override: Optional[int] = None) -> Optional[int]:
-    """Return the configured or LiteLLM-known input window for *model*."""
-    if override and override > 0:
-        return override
-    if not model:
-        return None
-    try:
-        value = litellm.get_model_info(model).get("max_input_tokens")
-    except Exception:  # noqa: BLE001 - unknown/custom models are expected here
-        return None
-    return int(value) if isinstance(value, (int, float)) and value > 0 else None
+def is_summary_message(message: ModelMessage) -> bool:
+    return (
+        isinstance(message, ModelRequest)
+        and any(
+            isinstance(part, UserPromptPart)
+            and isinstance(part.content, str)
+            and part.content.startswith(SUMMARY_PREFIX)
+            for part in message.parts
+        )
+    )
 
 
-def count_tokens(model: Optional[str], messages: list[dict], tool_schemas: Optional[list[dict]] = None) -> int:
-    """Count context tokens, falling back to a dependency-free approximation."""
-    try:
-        return int(litellm.token_counter(model=model or "", messages=messages, tools=tool_schemas))
-    except Exception:  # noqa: BLE001 - custom model names may have no tokenizer
-        payload = json.dumps(messages, ensure_ascii=False, default=str)
-        if tool_schemas:
-            payload += json.dumps(tool_schemas, ensure_ascii=False, default=str)
-        return max(1, (len(payload) + 3) // 4)
+def context_window(override: Optional[int] = None) -> Optional[int]:
+    """The configured input window; None disables compaction."""
+    return override if override and override > 0 else None
+
+
+def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None) -> int:
+    """Approximate context tokens as serialized characters / 4."""
+    payload = json.dumps(ModelMessagesTypeAdapter.dump_python(messages, mode="json"), ensure_ascii=False)
+    if tool_schemas:
+        payload += json.dumps(tool_schemas, ensure_ascii=False, default=str)
+    return max(1, (len(payload) + 3) // 4)
 
 
 def should_compact(tokens: int, window: Optional[int], reserve_tokens: int) -> bool:
     return window is not None and tokens > window - reserve_tokens
 
 
-def find_cut_index(messages: list[dict], keep_recent_tokens: int, model: Optional[str]) -> int:
+def _is_tool_return(message: ModelMessage) -> bool:
+    return isinstance(message, ModelRequest) and any(
+        isinstance(part, ToolReturnPart) for part in message.parts
+    )
+
+
+def find_cut_index(messages: list[ModelMessage], keep_recent_tokens: int) -> int:
     """Find the first recent message to retain.
 
-    The walk is intentionally approximate.  A tool result is never used as a
-    boundary, so an assistant tool call remains attached to all of its results.
+    The walk is intentionally approximate.  A tool-return request is never used
+    as a boundary, so a model response stays attached to all of its results.
     """
     accumulated = 0
     for index in range(len(messages) - 1, -1, -1):
-        accumulated += count_tokens(model, [messages[index]])
+        accumulated += count_tokens([messages[index]])
         if accumulated < keep_recent_tokens:
             continue
 
         cut = index
-        while cut > 0 and messages[cut].get("role") == "tool":
+        while cut > 0 and _is_tool_return(messages[cut]):
             cut -= 1
         return cut
     return 0
 
 
-def _serialize_messages(messages: list[dict]) -> str:
+def _serialize_messages(messages: list[ModelMessage]) -> str:
+    """Message-per-line JSON for the summary prompt, with reasoning dropped and
+    tool results truncated."""
     serialized: list[str] = []
     for message in messages:
-        copy = dict(message)
-        if copy.get("role") == "tool":
-            content = str(copy.get("content") or "")
-            if len(content) > _TOOL_RESULT_LIMIT:
-                copy["content"] = content[:_TOOL_RESULT_LIMIT] + "\n[tool result truncated for summary]"
-        serialized.append(json.dumps(copy, ensure_ascii=False, default=str))
+        if isinstance(message, ModelResponse):
+            message = ModelResponse(
+                parts=[part for part in message.parts if not isinstance(part, ThinkingPart)],
+                model_name=message.model_name,
+                timestamp=message.timestamp,
+            )
+        raw = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
+        for part in raw.get("parts") or []:
+            content = part.get("content")
+            if part.get("part_kind") == "tool-return" and isinstance(content, str) and len(content) > _TOOL_RESULT_LIMIT:
+                part["content"] = content[:_TOOL_RESULT_LIMIT] + "\n[tool result truncated for summary]"
+        serialized.append(json.dumps(raw, ensure_ascii=False))
     return "\n".join(serialized)
 
 
 async def compact(
-    messages: list[dict],
+    messages: list[ModelMessage],
     *,
-    model: Optional[str],
-    api_base: Optional[str],
-    api_key: Optional[str],
+    model: Model,
     keep_recent_tokens: int,
     tokens_before: int,
     tool_schemas: Optional[list[dict]] = None,
 ) -> Optional[CompactionResult]:
     """Summarize the old prefix and return a new effective context."""
-    cut = find_cut_index(messages, keep_recent_tokens, model)
+    cut = find_cut_index(messages, keep_recent_tokens)
     if cut <= 0:
         return None
 
@@ -122,20 +146,19 @@ Use these sections:
 {_serialize_messages(old_messages)}
 </conversation>"""
 
-    response = await litellm.acompletion(
-        model=model,
-        api_base=api_base,
-        api_key=api_key,
-        messages=[
-            {"role": "system", "content": "You create context checkpoint summaries for an AI coding agent."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=2_048,
+    response = await model_request(
+        model,
+        [ModelRequest(parts=[
+            SystemPromptPart(content="You create context checkpoint summaries for an AI coding agent."),
+            UserPromptPart(content=prompt),
+        ])],
+        model_settings={"max_tokens": 2_048},
+        model_request_parameters=ModelRequestParameters(allow_text_output=True),
     )
-    summary = response.choices[0].message.content
-    if not isinstance(summary, str) or not summary.strip():
+    summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))
+    if not summary.strip():
         raise RuntimeError("Context compaction returned an empty summary")
     summary = summary.strip()
     compacted_messages = [summary_message(summary), *kept_messages]
-    tokens_after = count_tokens(model, compacted_messages, tool_schemas)
+    tokens_after = count_tokens(compacted_messages, tool_schemas)
     return CompactionResult(summary, kept_messages, tokens_before, tokens_after)

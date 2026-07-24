@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic_ai.messages import ModelRequest, UserPromptPart
+
 from paimon import cli
 from paimon.session import FORMAT_VERSION, Session, _project_dir
 
@@ -30,7 +32,7 @@ class CliTestCase(unittest.TestCase):
         session = Session(directory / f"{session_id[:8]}.jsonl", session_id, self.cwd)
         session.append({"type": "session", "version": FORMAT_VERSION, "id": session_id,
                         "cwd": str(self.cwd), "created_at": "2026-07-24T00:00:00+00:00"})
-        session.append_message({"role": "user", "content": "hi"})
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
         return session
 
     def _main_exit(self, *argv: str) -> tuple[int, str]:

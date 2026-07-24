@@ -1,9 +1,10 @@
 """Shared fixtures for the test suite."""
 
 from pathlib import Path
-from types import SimpleNamespace
 
-from paimon.session import Session
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+
+from paimon.session import FORMAT_VERSION, Session
 
 
 def make_session(cwd: Path) -> Session:
@@ -11,7 +12,7 @@ def make_session(cwd: Path) -> Session:
     session = Session(cwd / "session.jsonl", "session-id", cwd)
     session.append({
         "type": "session",
-        "version": 1,
+        "version": FORMAT_VERSION,
         "id": "session-id",
         "cwd": str(cwd),
         "created_at": "2026-01-01T00:00:00+00:00",
@@ -19,26 +20,17 @@ def make_session(cwd: Path) -> Session:
     return session
 
 
-def stub_completion(tool_name: str | None = None, arguments: str = "{}"):
-    """litellm.acompletion replacement: streams one tool call on the first
-    request (when tool_name is given), then a bare text turn."""
+def stub_model(tool_name: str | None = None, arguments: str = "{}") -> FunctionModel:
+    """Model stub: streams one tool call on the first request (when tool_name
+    is given), then a bare text turn."""
     requests = 0
 
-    async def completion(**_kwargs):
+    async def stream(messages, info: AgentInfo):
         nonlocal requests
         requests += 1
+        if tool_name is not None and requests == 1:
+            yield {0: DeltaToolCall(name=tool_name, json_args=arguments, tool_call_id="call-1")}
+        else:
+            yield "done"
 
-        async def stream(with_call: bool):
-            if with_call:
-                call = SimpleNamespace(
-                    index=0, id="call-1",
-                    function=SimpleNamespace(name=tool_name, arguments=arguments),
-                )
-                delta = SimpleNamespace(content=None, tool_calls=[call], reasoning_content=None)
-            else:
-                delta = SimpleNamespace(content="done", tool_calls=[], reasoning_content=None)
-            yield SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
-
-        return stream(tool_name is not None and requests == 1)
-
-    return completion
+    return FunctionModel(stream_function=stream)
