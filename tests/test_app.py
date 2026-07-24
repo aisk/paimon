@@ -14,7 +14,7 @@ from paimon.app import PaimonApp, _session_label
 from paimon.config import Config
 from paimon.login import PickerScreen
 from paimon.session import Session
-from paimon.ui import ConfirmPanel, PromptInput, UserMessage
+from paimon.ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
 
 class AppTestCase(unittest.IsolatedAsyncioTestCase):
@@ -169,6 +169,21 @@ class ResumeSessionTest(AppTestCase):
             self.assertEqual(app.agent.session.id, old.id)
             self.assertTrue(app.query(UserMessage))
             self.assertIn("Resumed session", self._log_text(app))
+
+    async def test_history_replays_assistant_and_tool_widgets(self) -> None:
+        session = self._old_session("do it")
+        session.append_message({"role": "assistant", "content": "working", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]})
+        session.append_message({"role": "tool", "tool_call_id": "c1", "content": "a.py"})
+        session.append_message({"role": "assistant", "content": "done"})
+        app = self.make_app(session=session)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(len(app.query(UserMessage)), 1)
+            self.assertEqual(len(app.query(AssistantMessage)), 2)
+            results = app.query(ToolResult)
+            self.assertEqual(len(results), 1)
+            self.assertIn("a.py", results.first()._full)
 
 
 class SessionLabelTest(AppTestCase):

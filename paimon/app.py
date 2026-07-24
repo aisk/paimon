@@ -18,6 +18,7 @@ from textual.worker import Worker, WorkerState
 
 from .agent import (
     Agent,
+    CompactionNotice,
     ContextCompactionFailed,
     ContextCompacted,
     ReasoningDelta,
@@ -26,9 +27,10 @@ from .agent import (
     ToolEnd,
     ToolStart,
     TurnEnd,
+    UserInput,
+    replay_events,
 )
 from . import compaction, tools
-from .compaction import SUMMARY_NAME
 from .config import Config
 from .login import LoginScreen, PickerScreen
 from .session import Session
@@ -66,6 +68,90 @@ def _session_label(session: Session) -> str:
     if len(preview) > 40:
         preview = preview[:40] + "…"
     return f"{when} · {session.id[:8]} · {preview}"
+
+
+class _EventRenderer:
+    """Renders agent events into the log.
+
+    The single rendering path: live turns and resumed-history replay both feed
+    events through ``handle``, so history always looks like it did live.
+    """
+
+    def __init__(self, app: "PaimonApp") -> None:
+        self._app = app
+        self._stream: MarkdownStream | None = None
+        self._reasoning: Static | None = None
+        self._reasoning_buf = ""
+        self._first_text_block = True
+
+    async def handle(self, ev: object) -> None:
+        if isinstance(ev, UserInput):
+            await self.close()
+            self._first_text_block = True
+            self._app._add_user(ev.text)
+
+        elif isinstance(ev, CompactionNotice):
+            await self.close()
+            self._first_text_block = True
+            self._app._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
+
+        elif isinstance(ev, ReasoningDelta):
+            self._reasoning_buf += ev.text
+            body = Content(self._reasoning_buf)
+            if self._reasoning is None:
+                self._reasoning = self._app._add(body, classes="reasoning")
+            else:
+                self._reasoning.update(body)
+
+        elif isinstance(ev, TextDelta):
+            if self._stream is None:
+                widget = AssistantMessage("", heading=self._first_text_block)
+                self._first_text_block = False
+                # Await the mount so the initial document (the Paimon heading)
+                # is rendered before the stream appends to it.
+                await self._app.query_one("#log", VerticalScroll).mount(widget)
+                self._stream = AssistantMessage.get_stream(widget)
+            await self._stream.write(ev.text)
+
+        elif isinstance(ev, ToolStart):
+            # start fresh assistant/reasoning blocks after a tool runs
+            await self.close()
+            # write_todos renders its own panel via TodosUpdate
+            if ev.name != "write_todos":
+                self._app._add_tool_start(ev.name, ev.args)
+
+        elif isinstance(ev, TodosUpdate):
+            await self.close()
+            self._app._show_todos(ev.todos)
+
+        elif isinstance(ev, ToolEnd):
+            if ev.name != "write_todos":
+                self._app._add_tool_result(ev.result, denied=ev.denied)
+
+        elif isinstance(ev, ContextCompacted):
+            self._app._add(
+                Content.from_markup(
+                    "[$text-muted]Context compacted: $before → ~$after tokens[/]",
+                    before=f"{ev.tokens_before:,}",
+                    after=f"{ev.tokens_after:,}",
+                )
+            )
+
+        elif isinstance(ev, ContextCompactionFailed):
+            self._app._add(
+                Content.from_markup(
+                    "[$text-warning]Context compaction failed; continuing without it: $error[/]",
+                    error=ev.error,
+                )
+            )
+
+    async def close(self) -> None:
+        """End the current text/reasoning blocks so the next output starts fresh."""
+        if self._stream is not None:
+            await self._stream.stop()
+            self._stream = None
+        self._reasoning = None
+        self._reasoning_buf = ""
 
 
 class PaimonApp(App):
@@ -195,56 +281,25 @@ class PaimonApp(App):
             yield prompt
             yield Static(id="statusbar")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.query_one("#log", VerticalScroll).anchor()
         self.query_one(PromptInput).focus()
         self._refresh_mode()
         self._refresh_statusbar()
         if self._resumed:
-            self._show_resumed()
+            await self._show_resumed()
         if not self.config.model:
             self.action_login()
         elif self._pick_session:
             self.action_resume_session()
 
-    def _show_resumed(self) -> None:
-        self._render_history()
+    async def _show_resumed(self) -> None:
+        renderer = _EventRenderer(self)
+        for ev in replay_events(self.agent.messages[1:]):
+            await renderer.handle(ev)
+        await renderer.close()
         self._add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
         self._update_statusbar_tokens()
-
-    def _render_history(self) -> None:
-        show_heading = True
-        pending_tools: list[str] = []
-        for message in self.agent.messages[1:]:
-            role, body = message.get("role"), message.get("content")
-            if message.get("name") == SUMMARY_NAME:
-                self._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
-                show_heading = True
-                continue
-            if role == "user" and body:
-                self._add_user(body)
-                show_heading = True
-            elif role == "assistant":
-                if body:
-                    self._add_markdown(body, heading=show_heading)
-                    show_heading = False
-                for call in message.get("tool_calls") or []:
-                    function = call.get("function") or {}
-                    name = function.get("name") or "tool"
-                    try:
-                        args = json.loads(function.get("arguments") or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-                    pending_tools.append(name)
-                    if name == "write_todos":
-                        self._show_todos(args.get("todos") or [])
-                    else:
-                        self._add_tool_start(name, args)
-            elif role == "tool":
-                name = pending_tools.pop(0) if pending_tools else ""
-                # the todos panel already shows this result
-                if name != "write_todos":
-                    self._add_tool_result(str(body or "(no output)"))
 
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
@@ -282,7 +337,7 @@ class PaimonApp(App):
         self._session_allowed.clear()
         self._queue.clear()
         self._refresh_queued()
-        self._show_resumed()
+        await self._show_resumed()
         self._refresh_statusbar()
         self.query_one(PromptInput).focus()
 
@@ -326,12 +381,6 @@ class PaimonApp(App):
     def _add(self, renderable, classes: str = "") -> Static:
         log = self.query_one("#log", VerticalScroll)
         widget = Static(renderable, classes=classes)
-        log.mount(widget)
-        return widget
-
-    def _add_markdown(self, body: str, *, heading: bool = True) -> AssistantMessage:
-        log = self.query_one("#log", VerticalScroll)
-        widget = AssistantMessage(body, heading=heading)
         log.mount(widget)
         return widget
 
@@ -471,10 +520,7 @@ class PaimonApp(App):
 
     @work(exclusive=True)
     async def run_turn(self, text: str) -> None:
-        stream: MarkdownStream | None = None
-        reasoning: Static | None = None
-        reasoning_buf = ""
-        first_text_block = True
+        renderer = _EventRenderer(self)
         status_visible = True
         phrase = random.choice(_STATUS_PHRASES)
         turn_started = time.monotonic()
@@ -501,79 +547,17 @@ class PaimonApp(App):
 
         timer = self.set_interval(1, tick)
 
-        async def close_stream() -> None:
-            nonlocal stream
-            if stream is not None:
-                await stream.stop()
-                stream = None
-
         try:
             async for ev in self.agent.run(text):
-                if isinstance(ev, ReasoningDelta):
-                    clear_status()
-                    reasoning_buf += ev.text
-                    body = Content(reasoning_buf)
-                    if reasoning is None:
-                        reasoning = self._add(body, classes="reasoning")
-                    else:
-                        reasoning.update(body)
-
-                elif isinstance(ev, TextDelta):
-                    clear_status()
-                    if stream is None:
-                        widget = AssistantMessage("", heading=first_text_block)
-                        first_text_block = False
-                        # Await the mount so the initial document (the Paimon
-                        # heading) is rendered before the stream appends to it.
-                        await self.query_one("#log", VerticalScroll).mount(widget)
-                        stream = AssistantMessage.get_stream(widget)
-                    await stream.write(ev.text)
-
-                elif isinstance(ev, ToolStart):
-                    clear_status()
-                    # start fresh assistant/reasoning blocks after a tool runs
-                    await close_stream()
-                    reasoning, reasoning_buf = None, ""
-                    # write_todos renders its own panel via TodosUpdate
-                    if ev.name == "write_todos":
-                        continue
-                    self._add_tool_start(ev.name, ev.args)
-
-                elif isinstance(ev, TodosUpdate):
-                    clear_status()
-                    self._show_todos(ev.todos)
-
-                elif isinstance(ev, ToolEnd):
-                    if ev.name == "write_todos":
-                        show_status()
-                        continue
-                    self._add_tool_result(ev.result, denied=ev.denied)
-                    show_status()
-
-                elif isinstance(ev, ContextCompacted):
-                    clear_status()
-                    self._add(
-                        Content.from_markup(
-                            "[$text-muted]Context compacted: $before → ~$after tokens[/]",
-                            before=f"{ev.tokens_before:,}",
-                            after=f"{ev.tokens_after:,}",
-                        )
-                    )
-                    show_status()
-
-                elif isinstance(ev, ContextCompactionFailed):
-                    clear_status()
-                    self._add(
-                        Content.from_markup(
-                            "[$text-warning]Context compaction failed; continuing without it: $error[/]",
-                            error=ev.error,
-                        )
-                    )
-                    show_status()
-
-                elif isinstance(ev, TurnEnd):
+                await renderer.handle(ev)
+                if isinstance(ev, TurnEnd):
                     clear_status()
                     self._update_statusbar_tokens()
+                elif isinstance(ev, (ToolEnd, ContextCompacted, ContextCompactionFailed)):
+                    # the model is about to react to what just happened
+                    show_status()
+                else:
+                    clear_status()
         except asyncio.CancelledError:
             self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
             raise
@@ -581,7 +565,7 @@ class PaimonApp(App):
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
             timer.stop()
-            await close_stream()
+            await renderer.close()
             clear_status()
             self.query_one(PromptInput).focus()
 

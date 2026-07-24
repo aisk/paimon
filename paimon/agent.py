@@ -77,6 +77,55 @@ class ContextCompactionFailed:
     error: str
 
 
+# ---- Replay-only events (history has no deltas, so these mark structure) ----
+
+
+@dataclass
+class UserInput:
+    text: str
+
+
+@dataclass
+class CompactionNotice:
+    """A compaction checkpoint encountered while replaying history."""
+
+
+def replay_events(messages: list[dict]) -> list[object]:
+    """Persisted messages replayed as the events a live ``Agent.run`` yields.
+
+    Lets a UI render resumed history through the same code path as live turns.
+    """
+    events: list[object] = []
+    pending: list[dict] = []  # tool calls awaiting their result message
+    for message in messages:
+        role, body = message.get("role"), message.get("content")
+        if message.get("name") == compaction.SUMMARY_NAME:
+            events.append(CompactionNotice())
+            continue
+        if role == "user" and body:
+            events.append(UserInput(str(body)))
+        elif role == "assistant":
+            if body:
+                events.append(TextDelta(str(body)))
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                name = function.get("name") or "tool"
+                try:
+                    args = json.loads(function.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                pending.append({"id": call.get("id") or "", "name": name})
+                if name == "write_todos":
+                    events.append(TodosUpdate(args.get("todos") or []))
+                else:
+                    events.append(ToolStart(call.get("id") or "", name, args))
+        elif role == "tool":
+            call = pending.pop(0) if pending else {"id": "", "name": ""}
+            if call["name"] != "write_todos":
+                events.append(ToolEnd(call["id"], call["name"], str(body or "(no output)")))
+    return events
+
+
 # Re-exported so UI code can keep importing it from here.
 ConfirmFn = tools.ConfirmFn
 

@@ -6,7 +6,16 @@ from unittest.mock import AsyncMock, patch
 from helpers import make_session, stub_completion
 
 from paimon import compaction
-from paimon.agent import Agent, ToolEnd
+from paimon.agent import (
+    Agent,
+    CompactionNotice,
+    TextDelta,
+    TodosUpdate,
+    ToolEnd,
+    ToolStart,
+    UserInput,
+    replay_events,
+)
 from paimon.config import Config
 
 
@@ -127,6 +136,36 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
             confirm.assert_awaited_once()
             self.assertFalse(end.denied)
             self.assertEqual((cwd / "a.txt").read_text(), "hi")
+
+
+class ReplayEventsTest(unittest.TestCase):
+    """History replays as the same event sequence a live run would yield."""
+
+    def test_messages_replay_as_live_events(self) -> None:
+        messages = [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": "ok", "tool_calls": [
+                {"id": "c1", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+                {"id": "c2", "function": {"name": "write_todos",
+                                          "arguments": '{"todos": [{"content": "x", "status": "pending"}]}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "a.py"},
+            {"role": "tool", "tool_call_id": "c2", "content": "[ ] x"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        events = replay_events(messages)
+
+        self.assertEqual(
+            [type(event) for event in events],
+            [UserInput, TextDelta, ToolStart, TodosUpdate, ToolEnd, TextDelta],
+        )
+        tool_end = events[4]
+        self.assertEqual((tool_end.id, tool_end.name, tool_end.result), ("c1", "bash", "a.py"))
+
+    def test_compaction_summary_becomes_notice(self) -> None:
+        events = replay_events([compaction.summary_message("checkpoint"), {"role": "user", "content": "hi"}])
+        self.assertEqual([type(event) for event in events], [CompactionNotice, UserInput])
 
 
 if __name__ == "__main__":
