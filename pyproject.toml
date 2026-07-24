@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "litellm>=1.89.4",
+    "pydantic-ai-slim[openai]>=2.17.0",
     "textual>=8.2.7",
     "textual-serve>=1.1.3",
 ]
