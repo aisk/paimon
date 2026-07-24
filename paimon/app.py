@@ -42,17 +42,28 @@ _TODO_STYLE = {
     "pending": ("○", "$text-muted"),
 }
 
-# One is picked per turn, Genshin style.
-_STATUS_PHRASES = [
-    "Paimon is thinking…",
-    "Paimon is NOT emergency food…",
-    "Counting mora…",
-    "Ehe…",
-    "Exploring the area ahead…",
-    "Snacking on Sweet Madame…",
-    "Asking the Traveler…",
-    "Wow, treasure…!",
-]
+# One is picked whenever the spinner enters a new state, Genshin style.
+# The spinner only covers stretches with no visible stream: "thinking" while
+# reasoning is hidden, "tool" while a tool runs, "waiting" in between.
+_STATUS_PHRASES = {
+    "waiting": [
+        "Counting mora…",
+        "Ehe…",
+        "Asking the Traveler…",
+        "Paimon is NOT emergency food…",
+    ],
+    "thinking": [
+        "Paimon is thinking…",
+        "Hmm, let Paimon think…",
+        "Paimon will figure this out…",
+    ],
+    "tool": [
+        "Exploring the area ahead…",
+        "Wow, treasure…!",
+        "Let's go take a look!",
+        "Snacking on Sweet Madame…",
+    ],
+}
 
 
 def _session_label(session: Session) -> str:
@@ -528,43 +539,50 @@ class PaimonApp(App):
     @work(exclusive=True)
     async def run_turn(self, text: str) -> None:
         renderer = _EventRenderer(self)
-        status_visible = True
-        phrase = random.choice(_STATUS_PHRASES)
         turn_started = time.monotonic()
+        state: str | None = None
+        phrase = ""
 
         def status_label() -> str:
             elapsed = int(time.monotonic() - turn_started)
             return f" {phrase} {elapsed}s" if elapsed else f" {phrase}"
 
-        self._set_status(True, status_label())
-
-        def show_status() -> None:
-            nonlocal status_visible
-            status_visible = True
-            self._set_status(True, status_label())
-
-        def clear_status() -> None:
-            nonlocal status_visible
-            status_visible = False
-            self._set_status(False)
-
-        def tick() -> None:
-            if status_visible:
+        def set_state(new: str | None) -> None:
+            # The phrase is re-rolled only on state changes so it doesn't
+            # flicker through the pool while a state lasts.
+            nonlocal state, phrase
+            if new == state:
+                return
+            state = new
+            if new is None:
+                self._set_status(False)
+            else:
+                phrase = random.choice(_STATUS_PHRASES[new])
                 self._set_status(True, status_label())
 
+        def tick() -> None:
+            if state is not None:
+                self._set_status(True, status_label())
+
+        set_state("waiting")
         timer = self.set_interval(1, tick)
 
         try:
             async for ev in self.agent.run(text):
                 await renderer.handle(ev)
                 if isinstance(ev, TurnEnd):
-                    clear_status()
+                    set_state(None)
                     self._update_statusbar_tokens()
+                elif isinstance(ev, (ToolStart, TodosUpdate)):
+                    set_state("tool")
                 elif isinstance(ev, (ToolEnd, ContextCompacted, ContextCompactionFailed)):
                     # the model is about to react to what just happened
-                    show_status()
+                    set_state("waiting")
+                elif isinstance(ev, ReasoningDelta):
+                    # hidden reasoning has no visible stream, so the spinner stands in
+                    set_state(None if self.config.show_reasoning else "thinking")
                 else:
-                    clear_status()
+                    set_state(None)
         except asyncio.CancelledError:
             self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
             raise
@@ -573,7 +591,7 @@ class PaimonApp(App):
         finally:
             timer.stop()
             await renderer.close()
-            clear_status()
+            set_state(None)
             self.query_one(PromptInput).focus()
 
 
