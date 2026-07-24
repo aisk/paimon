@@ -96,6 +96,8 @@ class _EventRenderer:
             self._app._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
 
         elif isinstance(ev, ReasoningDelta):
+            if not self._app.config.show_reasoning:
+                return
             self._reasoning_buf += ev.text
             body = Content(self._reasoning_buf)
             if self._reasoning is None:
@@ -235,6 +237,11 @@ class PaimonApp(App):
                 "Reconfigure model, API base and API key",
                 self.action_login,
             ),
+            SystemCommand(
+                "Toggle thinking display",
+                "Show or hide the model's reasoning stream (it is generated either way)",
+                self.action_toggle_reasoning,
+            ),
             SystemCommand("New session", "Start a new empty session", self.action_new_session),
             SystemCommand("Resume session", "Pick an earlier session in this directory to resume",
                           self.action_resume_session),
@@ -353,6 +360,11 @@ class PaimonApp(App):
 
     def _refresh_mode(self) -> None:
         self.query_one(PromptInput).border_title = f" {self.mode} "
+
+    def action_toggle_reasoning(self) -> None:
+        self.config.save(show_reasoning=not self.config.show_reasoning)
+        state = "shown" if self.config.show_reasoning else "hidden"
+        self._add(Content.from_markup(f"[$text-muted]Thinking display: {state}[/]"))
 
     # ---- login --------------------------------------------------------------
 

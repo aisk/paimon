@@ -18,7 +18,8 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 from textual.worker import WorkerState
 
-from paimon.app import PaimonApp, _session_label
+from paimon.agent import ReasoningDelta
+from paimon.app import PaimonApp, _EventRenderer, _session_label
 from paimon.config import Config
 from paimon.login import PickerScreen
 from paimon.session import Session
@@ -31,7 +32,8 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name})
+        env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name,
+                                        "PAIMON_CONFIG_HOME": tmp.name})
         env.start()
         self.addCleanup(env.stop)
 
@@ -227,6 +229,36 @@ class StatusLineTest(AppTestCase):
             app._set_status(False)
             await pilot.pause()
             self.assertFalse(status.display)
+
+
+class ReasoningDisplayTest(AppTestCase):
+    async def test_reasoning_hidden_when_disabled(self) -> None:
+        app = self.make_app(config=Config(model="test-model", show_reasoning=False))
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app)
+            await renderer.handle(ReasoningDelta("thinking hard"))
+            await pilot.pause()
+            self.assertFalse(app.query(".reasoning"))
+
+    async def test_reasoning_rendered_by_default(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app)
+            await renderer.handle(ReasoningDelta("thinking hard"))
+            await pilot.pause()
+            widgets = app.query(".reasoning")
+            self.assertEqual(len(widgets), 1)
+            self.assertIn("thinking hard", str(widgets.first().render()))
+
+    async def test_toggle_flips_and_persists(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.action_toggle_reasoning()
+            await pilot.pause()
+            self.assertFalse(app.config.show_reasoning)
+            self.assertFalse(Config.load().show_reasoning, "persisted to config.json")
+            app.action_toggle_reasoning()
+            self.assertTrue(Config.load().show_reasoning)
 
 
 class QueueTest(AppTestCase):

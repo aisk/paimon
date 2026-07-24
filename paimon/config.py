@@ -40,6 +40,8 @@ class Config:
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     theme: Optional[str] = None
+    # Display-only: reasoning is still generated, persisted and sent back.
+    show_reasoning: bool = True
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
@@ -55,6 +57,7 @@ class Config:
             api_base=data.get("api_base"),
             api_key=data.get("api_key"),
             theme=data.get("theme"),
+            show_reasoning=data.get("show_reasoning", cls.show_reasoning),
             compaction_enabled=compaction.get("enabled", cls.compaction_enabled),
             compaction_reserve_tokens=compaction.get("reserve_tokens", cls.compaction_reserve_tokens),
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
@@ -67,6 +70,7 @@ class Config:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         theme: Optional[str] = None,
+        show_reasoning: Optional[bool] = None,
     ) -> None:
         """Persist the fields passed (and not None) to config.json and update self.
 
@@ -74,7 +78,8 @@ class Config:
         """
         data = _load_file_config()
         for key, value in (("model", model), ("api_base", api_base),
-                           ("api_key", api_key), ("theme", theme)):
+                           ("api_key", api_key), ("theme", theme),
+                           ("show_reasoning", show_reasoning)):
             if value is not None:
                 data[key] = value
 
@@ -93,3 +98,4 @@ class Config:
         self.api_base = data.get("api_base")
         self.api_key = data.get("api_key")
         self.theme = data.get("theme")
+        self.show_reasoning = data.get("show_reasoning", type(self).show_reasoning)
