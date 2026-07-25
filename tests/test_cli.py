@@ -59,7 +59,7 @@ class CliTestCase(unittest.TestCase):
         with patch("sys.argv", ["paimon", *argv]), \
                 patch("paimon.headless.Config.load", return_value=Config(model=model)), \
                 patch("paimon.agent.build_model", return_value=stub_model(tool)), \
-                patch("paimon.agent._system_prompt", return_value="sys"), \
+                patch("paimon.agent.build_system_prompt", return_value="sys"), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as ctx:
                 cli.main()

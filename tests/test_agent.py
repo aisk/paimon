@@ -41,7 +41,7 @@ class AgentSystemPromptTest(unittest.TestCase):
 
             with (
                 patch("paimon.agent.Session.create", return_value=session),
-                patch("paimon.agent._system_prompt", return_value="snapshot") as generate,
+                patch("paimon.agent.build_system_prompt", return_value="snapshot") as generate,
             ):
                 first = Agent(cwd=cwd, config=_config())
 
@@ -49,7 +49,7 @@ class AgentSystemPromptTest(unittest.TestCase):
             self.assertEqual(session.system_prompt(), "snapshot")
             generate.assert_called_once_with(cwd)
 
-            with patch("paimon.agent._system_prompt") as generate:
+            with patch("paimon.agent.build_system_prompt") as generate:
                 resumed = Agent(cwd=cwd, session=session, config=_config())
 
             self.assertEqual(resumed.system_prompt, "snapshot")
@@ -60,7 +60,7 @@ class AgentSystemPromptTest(unittest.TestCase):
             cwd = Path(directory)
             session = make_session(cwd)
 
-            with patch("paimon.agent._system_prompt") as generate:
+            with patch("paimon.agent.build_system_prompt") as generate:
                 with self.assertRaisesRegex(RuntimeError, "persisted system prompt"):
                     Agent(cwd=cwd, session=session, config=_config())
 
@@ -177,7 +177,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             with (
                 patch("paimon.agent.Session.create", return_value=session),
-                patch("paimon.agent._system_prompt", return_value="snapshot"),
+                patch("paimon.agent.build_system_prompt", return_value="snapshot"),
             ):
                 # A tiny history under a disabled auto-compaction config: the
                 # automatic path would decline on both counts.
