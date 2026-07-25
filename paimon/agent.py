@@ -339,19 +339,21 @@ class Agent:
             for slot, call in zip(returns, calls):
                 args = _parse_args(call.args)
                 name = call.tool_name
-                yield ToolStart(call.tool_call_id, name, args)
 
                 # write_todos mutates agent-held state rather than the filesystem,
                 # so it is handled here instead of in the stateless execute_tool.
+                # It reports itself as TodosUpdate alone — no ToolStart/ToolEnd —
+                # which is also the shape replay_events produces for it, so no
+                # renderer has to special-case the name.
                 if name == "write_todos":
                     self.todos = args.get("todos") or []
                     result = tools.render_todos(self.todos)
                     slot.content = result
                     self._replace_message(record_id, tool_request)
                     yield TodosUpdate(list(self.todos))
-                    yield ToolEnd(call.tool_call_id, name, result)
                     continue
 
+                yield ToolStart(call.tool_call_id, name, args)
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode, self.confirm)
 
                 slot.content = result

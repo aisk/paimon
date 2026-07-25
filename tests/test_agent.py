@@ -133,6 +133,26 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((cwd / "a.txt").read_text(), "hi")
 
 
+class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_write_todos_yields_only_a_todos_update(self) -> None:
+        """No ToolStart/ToolEnd for write_todos, matching what replay produces —
+        renderers can then treat every ToolStart/ToolEnd the same way."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+
+            with patch("paimon.agent.build_model", return_value=stub_model("write_todos", arguments)):
+                agent = Agent(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go")]
+
+            self.assertFalse([e for e in events if isinstance(e, (ToolStart, ToolEnd))])
+            todos = next(e for e in events if isinstance(e, TodosUpdate))
+            self.assertEqual(todos.todos, [{"content": "x", "status": "pending"}])
+            self.assertEqual(agent.todos, todos.todos)
+
+
 class ReplayEventsTest(unittest.TestCase):
     """History replays as the same event sequence a live run would yield."""
 

@@ -128,17 +128,14 @@ class _EventRenderer:
         elif isinstance(ev, ToolStart):
             # start fresh assistant/reasoning blocks after a tool runs
             await self.close()
-            # write_todos renders its own panel via TodosUpdate
-            if ev.name != "write_todos":
-                self._app._add_tool_start(ev.name, ev.args)
+            self._app._add_tool_start(ev.name, ev.args)
 
         elif isinstance(ev, TodosUpdate):
             await self.close()
             self._app._show_todos(ev.todos)
 
         elif isinstance(ev, ToolEnd):
-            if ev.name != "write_todos":
-                self._app._add_tool_result(ev.result, denied=ev.denied)
+            self._app._add_tool_result(ev.result, denied=ev.denied)
 
         elif isinstance(ev, ContextCompacted):
             self._app._add(
@@ -603,9 +600,9 @@ class PaimonApp(App):
                 if isinstance(ev, TurnEnd):
                     set_state(None)
                     self._update_statusbar_tokens()
-                elif isinstance(ev, (ToolStart, TodosUpdate)):
+                elif isinstance(ev, ToolStart):
                     set_state("tool")
-                elif isinstance(ev, (ToolEnd, ContextCompacted, ContextCompactionFailed)):
+                elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted, ContextCompactionFailed)):
                     # the model is about to react to what just happened
                     set_state("waiting")
                 elif isinstance(ev, ReasoningDelta):

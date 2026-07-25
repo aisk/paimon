@@ -146,8 +146,6 @@ class TextRenderer:
                 _write(self._err, f"{_DIM}{ev.text}{_RESET}" if self._color else ev.text)
 
         elif isinstance(ev, ToolStart):
-            if ev.name == "write_todos":  # rendered by TodosUpdate instead
-                return
             self._end_call()
             detail = tools.summarize_call(ev.name, ev.args, limit=DETAIL_WIDTH)
             line = f"· {ev.name}  {detail}".rstrip()
@@ -155,8 +153,6 @@ class TextRenderer:
             self._call_open = True
 
         elif isinstance(ev, ToolEnd):
-            if ev.name == "write_todos":
-                return
             if ev.denied:
                 self._denied += 1
                 _write(self._err, "  → denied\n" if self._call_open else "· denied\n")
