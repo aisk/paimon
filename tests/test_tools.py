@@ -1,9 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
-from paimon.tools import MODES, _glob, _inside, gate, run_tool
+from paimon.tools import MODES, _bash, _glob, _inside, gate, run_tool
 
 
 class GateTest(unittest.TestCase):
@@ -71,6 +71,16 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         confirm.assert_not_awaited()
         self.assertFalse(denied)
         self.assertIn("hi", result)
+
+    async def test_bash_timeout_terminates_and_reaps_process_tree(self) -> None:
+        with (
+            patch("paimon.tools._COMMAND_TIMEOUT", 0.05),
+            patch("paimon.tools._KILL_GRACE", 0.05),
+            patch("paimon.tools._KILL_TIMEOUT", 0.5),
+        ):
+            result = await _bash({"command": "trap '' TERM; sleep 30"}, self.cwd)
+
+        self.assertEqual(result, "Error: command timed out after 0.05s.")
 
 
 class InsideTest(unittest.TestCase):

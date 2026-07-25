@@ -161,7 +161,9 @@ def _glob(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     return "\n".join(str(p) for p in matches)
 
 
+_COMMAND_TIMEOUT = 120.0
 _KILL_GRACE = 2.0  # seconds to wait after SIGTERM before forcing SIGKILL
+_KILL_TIMEOUT = 2.0  # maximum wait to reap the process after SIGKILL
 
 
 def _signal_group(pgid: int, sig: int, proc: asyncio.subprocess.Process) -> None:
@@ -175,10 +177,8 @@ def _signal_group(pgid: int, sig: int, proc: asyncio.subprocess.Process) -> None
             pass
 
 
-def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Terminate the command and any children (its process group), escalating
-    SIGTERM -> SIGKILL. The SIGKILL backstop is scheduled on the event loop so it
-    still fires even though the turn that called this is being cancelled."""
+async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Terminate and reap a command tree without allowing cleanup to hang."""
     if proc.returncode is not None:
         return
     try:
@@ -186,7 +186,17 @@ def _kill_tree(proc: asyncio.subprocess.Process) -> None:
     except ProcessLookupError:
         return
     _signal_group(pgid, signal.SIGTERM, proc)
-    asyncio.get_running_loop().call_later(_KILL_GRACE, _signal_group, pgid, signal.SIGKILL, proc)
+    try:
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=_KILL_GRACE)
+        return
+    except asyncio.TimeoutError:
+        _signal_group(pgid, signal.SIGKILL, proc)
+    try:
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=_KILL_TIMEOUT)
+    except asyncio.TimeoutError:
+        # The OS should eventually reap it; most importantly, cleanup cannot
+        # block the agent indefinitely.
+        pass
 
 
 async def _bash(args: dict, cwd: Path) -> str:
@@ -200,12 +210,12 @@ async def _bash(args: dict, cwd: Path) -> str:
         start_new_session=True,
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_COMMAND_TIMEOUT)
     except asyncio.TimeoutError:
-        _kill_tree(proc)
-        return "Error: command timed out after 120s."
+        await _kill_tree(proc)
+        return f"Error: command timed out after {_COMMAND_TIMEOUT:g}s."
     except asyncio.CancelledError:
-        _kill_tree(proc)
+        await _kill_tree(proc)
         raise
     out = stdout.decode(errors="replace")
     status = f"(exit code {proc.returncode})"
