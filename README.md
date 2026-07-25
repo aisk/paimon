@@ -35,7 +35,8 @@ provider" in the command palette (Ctrl+P).
   everything else to stderr.
 - Sessions are JSONL files under `~/.local/share/paimon/sessions/`, split by
   working directory (`PAIMON_DATA_HOME` overrides). A session can only be
-  active in one process at a time.
+  active in one process at a time. Both the UI and `-p` print the command that
+  resumes it on the way out.
 - Near the context limit old history is summarized in place, once a window is
   set in `config.json`:
 

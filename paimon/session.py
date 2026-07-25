@@ -64,6 +64,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def resume_hint(session_id: str) -> str:
+    """The command that resumes a session, to print when one ends.
+
+    An id prefix is enough for ``--resume`` to find it, and is what the
+    session file itself is named after.
+    """
+    return f"paimon -r {session_id[:8]}"
+
+
 class Session:
     """A session backed by an append-only JSONL event log."""
 

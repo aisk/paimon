@@ -45,7 +45,7 @@ from .agent import (
 )
 from .config import Config
 from .mentions import expand_mentions
-from .session import Session
+from .session import Session, resume_hint
 
 # Piped stdin beyond this is truncated rather than pushed into the context
 # window (a stray `cat huge.log |` should not blow up the request).
@@ -191,7 +191,7 @@ class TextRenderer:
         if subtype == "interrupted":
             self._note("· interrupted")
         if self._session_id:
-            self._note(f"· session {self._session_id[:8]}")
+            self._note(f"· resume: {resume_hint(self._session_id)}")
 
 
 class JsonRenderer:

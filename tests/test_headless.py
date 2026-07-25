@@ -95,12 +95,12 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pondering", self.err.getvalue())
         self.assertEqual(self.out.getvalue(), "")
 
-    async def test_session_id_is_reported_on_stderr(self) -> None:
+    async def test_resume_command_is_reported_on_stderr(self) -> None:
         renderer = self._renderer()
         renderer.begin("3f2a8b1c-0000-0000-0000-000000000000", "test:stub", "read", Path("/tmp"))
         await _feed(renderer)
         renderer.finish()
-        self.assertIn("session 3f2a8b1c", self.err.getvalue())
+        self.assertIn("paimon -r 3f2a8b1c", self.err.getvalue())
         self.assertEqual(self.out.getvalue(), "")
 
     async def test_broken_stdout_does_not_raise(self) -> None:

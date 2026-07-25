@@ -109,6 +109,45 @@ class WebForwardingTest(CliTestCase):
         self.assertIn("--tui", self._serve_command("--web"))
 
 
+class TuiExitTest(CliTestCase):
+    """The UI also has to tell the user how to get the conversation back."""
+
+    def _run_tui(self, *argv: str, history: list | None = None, crash: bool = False) -> str:
+        session = SimpleNamespace(id="9c1e40aa-0000-0000-0000-000000000000")
+        agent = SimpleNamespace(session=session, history=[1] if history is None else history)
+
+        class FakeApp:
+            def __init__(self, **kwargs) -> None:
+                self.agent = agent
+
+            def run(self) -> None:
+                if crash:
+                    raise RuntimeError("boom")
+
+        stderr = io.StringIO()
+        with patch("sys.argv", ["paimon", *argv]), patch("paimon.cli.PaimonApp", FakeApp), \
+                contextlib.redirect_stderr(stderr):
+            if crash:
+                with self.assertRaises(RuntimeError):
+                    cli.main()
+            else:
+                cli.main()
+        return stderr.getvalue()
+
+    def test_resume_command_is_printed_on_exit(self) -> None:
+        self.assertIn("paimon -r 9c1e40aa", self._run_tui())
+
+    def test_untouched_session_prints_nothing(self) -> None:
+        self.assertEqual(self._run_tui(history=[]), "")
+
+    def test_resume_command_survives_a_crash(self) -> None:
+        self.assertIn("paimon -r 9c1e40aa", self._run_tui(crash=True))
+
+    def test_nothing_is_printed_under_tui_flag(self) -> None:
+        # --tui means textual-serve owns these streams.
+        self.assertEqual(self._run_tui("--tui"), "")
+
+
 class HeadlessArgumentTest(CliTestCase):
     def test_web_and_print_conflict(self) -> None:
         code, stderr = self._main_exit("--web", "-p", "hi")
@@ -150,7 +189,7 @@ class HeadlessRunTest(CliTestCase):
         self.assertEqual(out, "done\n")
         sessions = Session.list(self.cwd)
         self.assertEqual(len(sessions), 1)
-        self.assertIn(f"session {sessions[0].id[:8]}", err)
+        self.assertIn(f"paimon -r {sessions[0].id[:8]}", err)
 
     def test_json_output_is_one_object_per_line(self) -> None:
         code, out, err = self._main_output("-p", "hi", "--output-format", "json")
