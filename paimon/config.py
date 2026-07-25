@@ -41,7 +41,7 @@ class Config:
     api_key: Optional[str] = None
     theme: Optional[str] = None
     # Display-only: reasoning is still generated, persisted and sent back.
-    show_reasoning: bool = True
+    show_reasoning: bool = False
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
