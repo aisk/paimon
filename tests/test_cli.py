@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from paimon import cli
 from paimon.config import Config
-from paimon.session import FORMAT_VERSION, Session, _project_dir
+from paimon.session import Session, _project_dir
 
 
 class CliTestCase(unittest.TestCase):
@@ -40,7 +40,7 @@ class CliTestCase(unittest.TestCase):
         directory = _project_dir(self.cwd)
         directory.mkdir(parents=True, exist_ok=True)
         session = Session(directory / f"{session_id[:8]}.jsonl", session_id, self.cwd)
-        session.append({"type": "session", "version": FORMAT_VERSION, "id": session_id,
+        session.append({"type": "session", "id": session_id,
                         "cwd": str(self.cwd), "created_at": "2026-07-24T00:00:00+00:00"})
         session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
         return session

@@ -1,9 +1,4 @@
-"""Append-only JSONL session persistence.
-
-Format version 2 stores pydantic-ai ``ModelMessage`` JSON in message records.
-Version-1 (litellm dict) sessions are not converted; they are skipped when
-listing sessions to resume.
-"""
+"""Append-only JSONL session persistence."""
 
 # Deferred annotations: the ``list`` classmethod shadows the builtin in the
 # class body, which would otherwise break ``list[dict]`` annotations below it.
@@ -20,8 +15,6 @@ from uuid import uuid4
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest, UserPromptPart
 
 from . import lockfile
-
-FORMAT_VERSION = 2
 
 # A compaction checkpoint is a synthetic user message. Its shape belongs here
 # rather than to whatever decides *when* to compact: replaying a log has to
@@ -130,7 +123,7 @@ class Session:
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         session = cls(directory / f"{timestamp}-{session_id[:8]}.jsonl", session_id, cwd)
-        session.append({"type": "session", "version": FORMAT_VERSION, "id": session_id,
+        session.append({"type": "session", "id": session_id,
                         "cwd": str(session.cwd), "created_at": _now()})
         return session
 
@@ -145,7 +138,7 @@ class Session:
                 for path in paths
                 if (records := cls._read_records(path))
                 and records[0].get("type") == "session"
-                and records[0].get("version") == FORMAT_VERSION]
+                and isinstance(records[0].get("id"), str)]
 
     @classmethod
     def list(cls, cwd: Path) -> list["Session"]:
@@ -229,7 +222,6 @@ class Session:
         """Persist the system prompt generated when the session is first loaded."""
         self.append({
             "type": "system_prompt",
-            "version": 1,
             "timestamp": _now(),
             "content": content,
         })

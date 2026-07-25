@@ -42,8 +42,8 @@ class ListTest(SessionScanTestCase):
     def test_invalid_files_are_skipped(self) -> None:
         session = self._session_with_message("hi", mtime=1_000)
         (_project_dir(self.cwd) / "garbage.jsonl").write_text("not json\n")
-        (_project_dir(self.cwd) / "wrong-version.jsonl").write_text(
-            '{"type": "session", "version": 999, "id": "x"}\n'
+        (_project_dir(self.cwd) / "missing-id.jsonl").write_text(
+            '{"type": "session"}\n'
         )
 
         self.assertEqual([s.id for s in Session.list(self.cwd)], [session.id])
