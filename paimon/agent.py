@@ -34,7 +34,7 @@ from .config import Config
 from .llm import build_model
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
-from .session import Session
+from .session import Session, is_summary_message
 
 
 # ---- Events yielded by Agent.run -------------------------------------------
@@ -129,7 +129,7 @@ def replay_events(messages: list[ModelMessage]) -> list[object]:
     """
     events: list[object] = []
     for message in messages:
-        if compaction.is_summary_message(message):
+        if is_summary_message(message):
             events.append(CompactionNotice())
             continue
         if isinstance(message, ModelRequest):
@@ -255,7 +255,7 @@ class Agent:
         # Mirrors how Session.messages() replays a compaction record, so the
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
-        self.history = [compaction.summary_message(result.summary), *result.kept_messages]
+        self.history = result.messages
         result.tokens_after = compaction.count_tokens(self.history, tools.TOOLS)
         return result
 

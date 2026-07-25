@@ -27,6 +27,7 @@ from paimon.agent import (
     replay_events,
 )
 from paimon.config import Config
+from paimon.session import is_summary_message, summary_message
 
 
 def _config() -> Config:
@@ -184,7 +185,7 @@ class ReplayEventsTest(unittest.TestCase):
 
     def test_compaction_summary_becomes_notice(self) -> None:
         events = replay_events([
-            compaction.summary_message("checkpoint"),
+            summary_message("checkpoint"),
             ModelRequest(parts=[UserPromptPart(content="hi")]),
         ])
         self.assertEqual([type(event) for event in events], [CompactionNotice, UserInput])
@@ -217,7 +218,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIs(returned, result)
             compact.assert_awaited_once()
-            self.assertTrue(compaction.is_summary_message(agent.history[0]))
+            self.assertTrue(is_summary_message(agent.history[0]))
             self.assertEqual(agent.history[1:], [recent])
             # the checkpoint is persisted, so a resume replays the same context
             replayed = session.messages()

@@ -23,8 +23,9 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
+from .session import summary_message
 
-SUMMARY_PREFIX = "The conversation before this point was compacted into this checkpoint:\n\n"
+
 _TOOL_RESULT_LIMIT = 2_000
 
 
@@ -35,22 +36,10 @@ class CompactionResult:
     tokens_before: int
     tokens_after: int
 
-
-def summary_message(summary: str) -> ModelRequest:
-    """Return the synthetic user message placed at the start of compacted context."""
-    return ModelRequest(parts=[UserPromptPart(content=SUMMARY_PREFIX + summary)])
-
-
-def is_summary_message(message: ModelMessage) -> bool:
-    return (
-        isinstance(message, ModelRequest)
-        and any(
-            isinstance(part, UserPromptPart)
-            and isinstance(part.content, str)
-            and part.content.startswith(SUMMARY_PREFIX)
-            for part in message.parts
-        )
-    )
+    @property
+    def messages(self) -> list[ModelMessage]:
+        """The context that replaces the old one: checkpoint plus recent tail."""
+        return [summary_message(self.summary), *self.kept_messages]
 
 
 def context_window(override: Optional[int] = None) -> Optional[int]:
@@ -158,7 +147,6 @@ Use these sections:
     summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))
     if not summary.strip():
         raise RuntimeError("Context compaction returned an empty summary")
-    summary = summary.strip()
-    compacted_messages = [summary_message(summary), *kept_messages]
-    tokens_after = count_tokens(compacted_messages, tool_schemas)
-    return CompactionResult(summary, kept_messages, tokens_before, tokens_after)
+    result = CompactionResult(summary.strip(), kept_messages, tokens_before, tokens_after=0)
+    result.tokens_after = count_tokens(result.messages, tool_schemas)
+    return result

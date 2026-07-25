@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
 )
 
 from paimon import compaction
-from paimon.session import Session
+from paimon.session import Session, is_summary_message
 
 
 def _user(content: str) -> ModelRequest:
@@ -81,7 +81,7 @@ class SessionCompactionTest(unittest.TestCase):
 
             replayed = session.messages()
             self.assertEqual(len(replayed), 3)
-            self.assertTrue(compaction.is_summary_message(replayed[0]))
+            self.assertTrue(is_summary_message(replayed[0]))
             self.assertIn("checkpoint", replayed[0].parts[0].content)
             self.assertEqual(replayed[1], recent)
             self.assertEqual(replayed[2], after)

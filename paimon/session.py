@@ -17,16 +17,37 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest, UserPromptPart
 
 from . import lockfile
-from .compaction import SUMMARY_PREFIX, summary_message
 
 FORMAT_VERSION = 2
+
+# A compaction checkpoint is a synthetic user message. Its shape belongs here
+# rather than to whatever decides *when* to compact: replaying a log has to
+# rebuild it, and previews have to recognize it as not-a-user-message.
+SUMMARY_PREFIX = "The conversation before this point was compacted into this checkpoint:\n\n"
 
 
 class SessionBusyError(RuntimeError):
     """The session is already active in another process."""
+
+
+def summary_message(summary: str) -> ModelRequest:
+    """The synthetic user message placed at the start of compacted context."""
+    return ModelRequest(parts=[UserPromptPart(content=SUMMARY_PREFIX + summary)])
+
+
+def is_summary_message(message: ModelMessage) -> bool:
+    return (
+        isinstance(message, ModelRequest)
+        and any(
+            isinstance(part, UserPromptPart)
+            and isinstance(part.content, str)
+            and part.content.startswith(SUMMARY_PREFIX)
+            for part in message.parts
+        )
+    )
 
 
 def dump_message(message: ModelMessage) -> dict:
