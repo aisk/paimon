@@ -83,31 +83,8 @@ class MentionAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
                           for message in session.messages() if isinstance(message, ModelRequest)
                           for part in message.parts if isinstance(part, UserPromptPart)]
             self.assertEqual(len(user_texts), 1)
-            self.assertIn('<mentioned_file data-paimon-mention="1"', user_texts[0])
+            self.assertIn('<mentioned_file path=', user_texts[0])
             self.assertIn("hello", user_texts[0])
-
-    async def test_compaction_forgets_mentions_removed_from_effective_context(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
-            (cwd / "hello.txt").write_text("hello")
-            session = make_session(cwd)
-            session.append_system_prompt("snapshot")
-            agent = Agent(cwd=cwd, session=session, config=_config())
-            agent._append_message(ModelRequest(parts=[UserPromptPart(content=agent.mentions.expand("@hello.txt"))]))
-
-            self.assertIn('status="previously_mentioned"', agent.mentions.expand("@hello.txt"))
-            result = compaction.CompactionResult("checkpoint", [], 100, 0)
-            with (
-                patch("paimon.agent.build_model", return_value=stub_model()),
-                patch("paimon.agent.compaction.context_window", return_value=100),
-                patch("paimon.agent.compaction.count_tokens", side_effect=[100, 10]),
-                patch("paimon.agent.compaction.compact", new=AsyncMock(return_value=result)),
-            ):
-                await agent._maybe_compact()
-
-            expanded = agent.mentions.expand("@hello.txt")
-            self.assertIn("hello", expanded)
-            self.assertNotIn('status="previously_mentioned"', expanded)
 
 
 class PermissionModeTest(unittest.IsolatedAsyncioTestCase):

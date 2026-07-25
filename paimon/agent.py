@@ -39,7 +39,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 from . import compaction, tools
 from .config import Config
 from .llm import build_model
-from .mentions import MentionExpander
+from .mentions import expand_mentions
 from .session import Session
 
 
@@ -168,14 +168,6 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
             )
         sanitized.append(message)
     return sanitized
-
-
-def _user_texts(history: list[ModelMessage]) -> list[str]:
-    """All plain-text user prompt contents, for mention-version restoration."""
-    return [part.content
-            for message in history if isinstance(message, ModelRequest)
-            for part in message.parts
-            if isinstance(part, UserPromptPart) and isinstance(part.content, str)]
 
 
 # Re-exported so UI code can keep importing it from here.
@@ -346,11 +338,9 @@ Guidelines:
   (grep), git, and running tests.
 - For tasks with several steps, call write_todos first to lay out a plan, then keep
   it updated as you go (one task in_progress at a time). Skip it for simple tasks.
-- User @path mentions are expanded into <mentioned_file> tags. A tag with
-  exposure="full" contains the complete file version. exposure="preview" contains
-  only its beginning; use read_file for omitted or exact content. A tag with
-  status="previously_mentioned" repeats no content but identifies a version already
-  present in this active context. A tag with another status is an attachment error.
+- User @path mentions are expanded into <mentioned_file> tags. A tag with a body
+  contains the complete file; a self-closing tag gives only the path, so call
+  read_file when you need its contents.
 - Be direct. When the task is done, briefly state what you did. Don't narrate every step."""
 
     context_files = _load_context_files(cwd)
@@ -391,7 +381,6 @@ class Agent:
                 raise RuntimeError("Session does not contain a persisted system prompt")
         self.system_prompt = system_prompt
         self.history: list[ModelMessage] = self.session.messages()
-        self.mentions = MentionExpander(self.cwd, _user_texts(self.history))
         self._cached_model: Optional[tuple[tuple, Model]] = None
 
     def _model(self) -> Model:
@@ -438,15 +427,12 @@ class Agent:
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.history = [compaction.summary_message(result.summary), *result.kept_messages]
-        # Mentions may only reference file bodies that remain in the effective
-        # prompt. A compacted prefix is no longer available to the model.
-        self.mentions = MentionExpander(self.cwd, _user_texts(self.history))
         result.tokens_after = compaction.count_tokens(self.history, tools.TOOLS)
         return result
 
     async def run(self, user_input: str) -> AsyncIterator[object]:
         """Run one user turn to completion, yielding events along the way."""
-        self._append_message(ModelRequest(parts=[UserPromptPart(content=self.mentions.expand(user_input))]))
+        self._append_message(ModelRequest(parts=[UserPromptPart(content=expand_mentions(user_input, self.cwd))]))
         compaction_failed = False
 
         while True:

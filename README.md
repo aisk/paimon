@@ -19,7 +19,8 @@ provider" in the command palette (Ctrl+P).
 
 ## Notes
 
-- `@path` in a prompt attaches that file.
+- `@path` in a prompt attaches that file: small files inline, larger ones are
+  referenced by path for the model to read on demand.
 - Shift+Tab cycles the permission mode: read (writes, commands and access
   outside the working directory ask for confirmation), edit (edits inside the
   working directory run without asking) and yolo (nothing asks). File changes
