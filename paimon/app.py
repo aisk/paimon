@@ -1,7 +1,6 @@
 """Textual TUI for the Paimon agent."""
 
 import asyncio
-import json
 import random
 import time
 from datetime import datetime
@@ -419,7 +418,7 @@ class PaimonApp(App):
             status.query_one(".status-label", Static).update(label)
 
     def _add_tool_start(self, name: str, args: dict) -> Static:
-        detail = args.get("command") or args.get("path") or json.dumps(args)
+        detail = tools.summarize_call(name, args)
         return self._add(
             Content.from_markup(
                 "[$text-accent b]$name[/]  [$text-muted]$detail[/]",

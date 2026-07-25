@@ -7,6 +7,7 @@ permission gating. Adding a tool means adding one registry entry.
 
 import asyncio
 import inspect
+import json
 import os
 import signal
 from dataclasses import dataclass
@@ -49,6 +50,19 @@ def render_todos(todos: list[dict]) -> str:
     if not todos:
         return "(todo list cleared)"
     return "\n".join(f"{_TODO_MARKERS.get(t.get('status'), '[ ]')} {t.get('content', '')}" for t in todos)
+
+
+def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
+    """One-line detail for a tool call, shared by the TUI and headless output.
+
+    With a limit the detail is collapsed onto a single line and truncated,
+    for outputs that cannot reflow (a terminal stream) unlike a TUI widget.
+    """
+    detail = str(args.get("command") or args.get("path") or json.dumps(args, ensure_ascii=False))
+    if limit is None:
+        return detail
+    detail = " ".join(detail.split())
+    return detail if len(detail) <= limit else detail[: limit - 1] + "…"
 
 
 def _resolve(path: str, cwd: Path) -> Path:

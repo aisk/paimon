@@ -430,9 +430,15 @@ class Agent:
         result.tokens_after = compaction.count_tokens(self.history, tools.TOOLS)
         return result
 
-    async def run(self, user_input: str) -> AsyncIterator[object]:
-        """Run one user turn to completion, yielding events along the way."""
-        self._append_message(ModelRequest(parts=[UserPromptPart(content=expand_mentions(user_input, self.cwd))]))
+    async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[object]:
+        """Run one user turn to completion, yielding events along the way.
+
+        ``expand=False`` skips @path expansion, for callers that assembled the
+        prompt themselves and must not have unrelated text rewritten (piped
+        stdin, where a line like ``@foo.py`` is data rather than a mention).
+        """
+        prompt = expand_mentions(user_input, self.cwd) if expand else user_input
+        self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
         compaction_failed = False
 
         while True:
