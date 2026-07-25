@@ -29,8 +29,16 @@ FORMAT_VERSION = 2
 SUMMARY_PREFIX = "The conversation before this point was compacted into this checkpoint:\n\n"
 
 
-class SessionBusyError(RuntimeError):
+class SessionError(RuntimeError):
+    """A session cannot be opened. Callers catch this to report and move on."""
+
+
+class SessionBusyError(SessionError):
     """The session is already active in another process."""
+
+
+class SessionIncompleteError(SessionError):
+    """The session log is missing the system prompt snapshot it needs to resume."""
 
 
 def summary_message(summary: str) -> ModelRequest:

@@ -55,7 +55,7 @@ class AgentRetryTest(unittest.IsolatedAsyncioTestCase):
     def _agent(cwd: Path) -> Agent:
         session = make_session(cwd)
         session.append_system_prompt("snapshot")
-        return Agent(cwd=cwd, session=session, config=Config(model="test:stub"))
+        return Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
 
     async def _run(self, model) -> list[object]:
         """Run one turn, recording the backoff sleeps even when the turn fails."""
@@ -128,7 +128,7 @@ class RetryPersistenceTest(unittest.IsolatedAsyncioTestCase):
 
             with patch("paimon.agent.build_model", return_value=model), \
                     patch("paimon.agent.asyncio.sleep"):
-                agent = Agent(cwd=cwd, session=session, config=Config(model="test:stub"))
+                agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
                 _events = [event async for event in agent.run("go")]
 
             self.assertEqual(len(session.messages()), 2)  # the prompt and one response
@@ -142,6 +142,6 @@ class StubModelSanityTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             with patch("paimon.agent.build_model", return_value=stub_model()):
-                agent = Agent(cwd=cwd, session=session, config=Config(model="test:stub"))
+                agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
                 events = [event async for event in agent.run("go")]
         self.assertFalse([e for e in events if isinstance(e, ModelRetry)])

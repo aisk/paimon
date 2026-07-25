@@ -31,9 +31,8 @@ from .agent import (
     replay_events,
 )
 from . import compaction, tools
-from .config import Config
 from .login import LoginScreen, PickerScreen
-from .session import Session
+from .session import Session, SessionError
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
 _TODO_STYLE = {
@@ -271,15 +270,14 @@ class PaimonApp(App):
                           self.action_resume_session),
         ]
 
-    def __init__(self, mode: str = "read", session: Session | None = None,
-                 pick_session: bool = False, config: Config | None = None) -> None:
+    def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False) -> None:
         self._persist_theme_changes = False
         super().__init__()
-        self.mode = mode
-        self.config = config or Config.load()
-        cwd = Path.cwd()
-        self.agent = Agent(cwd=cwd, confirm=self._confirm, session=session, mode=mode, config=self.config)
-        self._resumed = session is not None
+        self.agent = agent
+        self.agent.confirm = self._confirm
+        self.mode = agent.mode
+        self.config = agent.config
+        self._resumed = resumed
         self._pick_session = pick_session
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
@@ -334,8 +332,9 @@ class PaimonApp(App):
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
+        agent = Agent.open(confirm=self._confirm, mode=self.mode, config=self.config)
         self.agent.session.unlock()
-        self.agent = Agent(cwd=Path.cwd(), confirm=self._confirm, mode=self.mode, config=self.config)
+        self.agent = agent
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
@@ -356,9 +355,9 @@ class PaimonApp(App):
             self.query_one(PromptInput).focus()
             return
         try:
-            agent = Agent(cwd=Path.cwd(), confirm=self._confirm, session=labels[choice],
-                          mode=self.mode, config=self.config)
-        except RuntimeError as exc:  # busy in another process, or no persisted system prompt
+            agent = Agent.open(session=labels[choice], confirm=self._confirm,
+                               mode=self.mode, config=self.config)
+        except SessionError as exc:  # busy in another process, or no persisted system prompt
             self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return
         self.agent.session.unlock()

@@ -44,14 +44,14 @@ class AgentSystemPromptTest(unittest.TestCase):
                 patch("paimon.agent.Session.create", return_value=session),
                 patch("paimon.agent.build_system_prompt", return_value="snapshot") as generate,
             ):
-                first = Agent(cwd=cwd, config=_config())
+                first = Agent.open(cwd=cwd, config=_config())
 
             self.assertEqual(first.system_prompt, "snapshot")
             self.assertEqual(session.system_prompt(), "snapshot")
             generate.assert_called_once_with(cwd)
 
             with patch("paimon.agent.build_system_prompt") as generate:
-                resumed = Agent(cwd=cwd, session=session, config=_config())
+                resumed = Agent.open(cwd=cwd, session=session, config=_config())
 
             self.assertEqual(resumed.system_prompt, "snapshot")
             generate.assert_not_called()
@@ -63,7 +63,7 @@ class AgentSystemPromptTest(unittest.TestCase):
 
             with patch("paimon.agent.build_system_prompt") as generate:
                 with self.assertRaisesRegex(RuntimeError, "persisted system prompt"):
-                    Agent(cwd=cwd, session=session, config=_config())
+                    Agent.open(cwd=cwd, session=session, config=_config())
 
             generate.assert_not_called()
 
@@ -77,7 +77,7 @@ class MentionAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             session.append_system_prompt("snapshot")
 
             with patch("paimon.agent.build_model", return_value=stub_model()):
-                agent = Agent(cwd=cwd, session=session, config=_config())
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
                 _events = [event async for event in agent.run("review @hello.txt")]
 
             user_texts = [part.content
@@ -96,7 +96,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
     def _agent(cwd: Path, **kwargs) -> Agent:
         session = make_session(cwd)
         session.append_system_prompt("snapshot")
-        return Agent(cwd=cwd, session=session, config=_config(), **kwargs)
+        return Agent.open(cwd=cwd, session=session, config=_config(), **kwargs)
 
     async def _run_tool_turn(self, agent: Agent, name: str, arguments: str) -> ToolEnd:
         agent._cached_model = None  # the agent caches per config; each turn gets a fresh stub
@@ -145,7 +145,7 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
 
             with patch("paimon.agent.build_model", return_value=stub_model("write_todos", arguments)):
-                agent = Agent(cwd=cwd, session=session, config=_config())
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
                 events = [event async for event in agent.run("go")]
 
             self.assertFalse([e for e in events if isinstance(e, (ToolStart, ToolEnd))])
@@ -202,7 +202,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             ):
                 # A tiny history under a disabled auto-compaction config: the
                 # automatic path would decline on both counts.
-                agent = Agent(cwd=cwd, config=Config(model="test:stub", compaction_enabled=False))
+                agent = Agent.open(cwd=cwd, config=Config(model="test:stub", compaction_enabled=False))
             old = ModelRequest(parts=[UserPromptPart(content="old")])
             recent = ModelResponse(parts=[TextPart(content="recent")])
             agent._append_message(old)

@@ -47,7 +47,7 @@ from .agent import (
 )
 from .config import Config
 from .mentions import expand_mentions
-from .session import Session, resume_hint
+from .session import Session, SessionError, resume_hint
 
 # Piped stdin beyond this is truncated rather than pushed into the context
 # window (a stray `cat huge.log |` should not blow up the request).
@@ -368,8 +368,8 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
 
     text = build_prompt(prompt, piped, cwd)
     try:
-        agent = Agent(cwd=cwd, confirm=None, session=session, mode=mode, config=config)
-    except RuntimeError as exc:  # session busy, or resumed without a system prompt
+        agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config)
+    except SessionError as exc:  # busy in another process, or no persisted system prompt
         renderer.begin()
         renderer.finish(subtype="error", error=str(exc))
         return 1

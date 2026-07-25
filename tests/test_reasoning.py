@@ -64,7 +64,7 @@ class ReasoningRoundTripTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
-            agent = Agent(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
+            agent = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
 
             with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 events = [event async for event in agent.run("plan it")]
@@ -92,14 +92,14 @@ class ReasoningRoundTripTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
-            first = Agent(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
+            first = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
             first._append_message(ModelResponse(
                 parts=[ThinkingPart(content="earlier thoughts", id="reasoning_content", provider_name="zai"),
                        TextPart(content="earlier answer")],
                 model_name="glm-5.2", provider_name="zai",
             ))
 
-            resumed = Agent(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
+            resumed = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
             with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 _ = [event async for event in resumed.run("continue")]
 
@@ -120,7 +120,7 @@ class StripForeignThinkingTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
-            agent = Agent(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
+            agent = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
             agent._append_message(ModelResponse(
                 parts=[ThinkingPart(content="deepseek thoughts", id="reasoning_content",
                                     provider_name="deepseek"),

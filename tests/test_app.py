@@ -18,7 +18,7 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 from textual.worker import WorkerState
 
-from paimon.agent import ReasoningDelta
+from paimon.agent import Agent, ReasoningDelta
 from paimon.app import PaimonApp, _EventRenderer, _session_label
 from paimon.config import Config
 from paimon.login import PickerScreen
@@ -37,9 +37,10 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def make_app(self, **kwargs) -> PaimonApp:
-        kwargs.setdefault("config", Config(model="test-model"))
-        return PaimonApp(**kwargs)
+    def make_app(self, *, session: Session | None = None, mode: str = "read",
+                 config: Config | None = None, pick_session: bool = False) -> PaimonApp:
+        agent = Agent.open(session=session, mode=mode, config=config or Config(model="test-model"))
+        return PaimonApp(agent, resumed=session is not None, pick_session=pick_session)
 
 
 class ConfirmPanelTest(AppTestCase):

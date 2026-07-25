@@ -6,8 +6,9 @@ import sys
 from pathlib import Path
 
 from . import headless as headless_mode
+from .agent import Agent
 from .app import PaimonApp
-from .session import Session, SessionBusyError, resume_hint
+from .session import Session, SessionError, resume_hint
 
 
 class CliError(Exception):
@@ -90,10 +91,11 @@ def main() -> None:
         ))
 
     try:
-        app = PaimonApp(mode=args.mode, session=resume_session, pick_session=args.resume == "")
-    except SessionBusyError as exc:
+        agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode)
+    except SessionError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)
+    app = PaimonApp(agent, resumed=resume_session is not None, pick_session=args.resume == "")
     try:
         app.run()
     finally:

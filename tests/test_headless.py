@@ -277,7 +277,7 @@ class DriveTest(unittest.IsolatedAsyncioTestCase):
         patcher = patch("paimon.agent.build_model", return_value=model)
         patcher.start()
         self.addCleanup(patcher.stop)
-        return Agent(cwd=self.cwd, session=self.session, config=_config())
+        return Agent.open(cwd=self.cwd, session=self.session, config=_config())
 
     def _renderer(self) -> headless.TextRenderer:
         return headless.TextRenderer(self.out, self.err, _config())

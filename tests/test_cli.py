@@ -117,8 +117,8 @@ class TuiExitTest(CliTestCase):
         agent = SimpleNamespace(session=session, history=[1] if history is None else history)
 
         class FakeApp:
-            def __init__(self, **kwargs) -> None:
-                self.agent = agent
+            def __init__(self, opened, **kwargs) -> None:
+                self.agent = opened
 
             def run(self) -> None:
                 if crash:
@@ -126,6 +126,7 @@ class TuiExitTest(CliTestCase):
 
         stderr = io.StringIO()
         with patch("sys.argv", ["paimon", *argv]), patch("paimon.cli.PaimonApp", FakeApp), \
+                patch("paimon.cli.Agent.open", return_value=agent), \
                 contextlib.redirect_stderr(stderr):
             if crash:
                 with self.assertRaises(RuntimeError):

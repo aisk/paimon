@@ -34,7 +34,7 @@ from .config import Config
 from .llm import build_model
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
-from .session import Session, is_summary_message
+from .session import Session, SessionIncompleteError, is_summary_message
 
 
 # ---- Events yielded by Agent.run -------------------------------------------
@@ -179,29 +179,49 @@ ConfirmFn = tools.ConfirmFn
 
 
 class Agent:
-    def __init__(self, cwd: Optional[Path] = None, confirm: Optional[ConfirmFn] = None,
-                 session: Optional[Session] = None, mode: str = "read",
+    """One conversation against one session.
+
+    Built through :meth:`open`, which is where the session file is created or
+    resumed and its lock taken; the constructor itself only wires up state a
+    caller already holds, so it can neither fail nor leave a lock behind.
+    """
+
+    def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
+                 confirm: Optional[ConfirmFn] = None, mode: str = "read",
                  config: Optional[Config] = None):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
         self.mode = mode
         self.config = config or Config.load()
         self.todos: list[dict] = []
-        if session is None:
-            self.session = Session.create(self.cwd)
-            self.session.lock()
-            system_prompt = build_system_prompt(self.cwd)
-            self.session.append_system_prompt(system_prompt)
-        else:
-            self.session = session
-            self.session.lock()  # raises SessionBusyError if another process has it
-            system_prompt = self.session.system_prompt()
-            if system_prompt is None:
-                self.session.unlock()
-                raise RuntimeError("Session does not contain a persisted system prompt")
+        self.session = session
         self.system_prompt = system_prompt
-        self.history: list[ModelMessage] = self.session.messages()
+        self.history: list[ModelMessage] = session.messages()
         self._cached_model: Optional[tuple[tuple, Model]] = None
+
+    @classmethod
+    def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
+             confirm: Optional[ConfirmFn] = None, mode: str = "read",
+             config: Optional[Config] = None) -> "Agent":
+        """Start a new session, or resume ``session``, and take its lock.
+
+        Raises ``SessionBusyError`` when another process holds the session and
+        ``SessionIncompleteError`` when a resumed log has no system prompt
+        snapshot — both ``SessionError``, and neither leaves a lock held.
+        """
+        cwd = Path(cwd or Path.cwd())
+        if session is None:
+            session = Session.create(cwd)
+            session.lock()
+            system_prompt = build_system_prompt(cwd)
+            session.append_system_prompt(system_prompt)
+        else:
+            session.lock()
+            system_prompt = session.system_prompt()
+            if system_prompt is None:
+                session.unlock()
+                raise SessionIncompleteError("Session does not contain a persisted system prompt")
+        return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode, config=config)
 
     def _model(self) -> Model:
         """The configured model, rebuilt when login changes the config."""
