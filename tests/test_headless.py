@@ -1,5 +1,4 @@
 import asyncio
-import dataclasses
 import io
 import json
 import tempfile
@@ -8,10 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from helpers import make_session, stub_model
+from helpers import SILENT_EVENTS, agent_events, make_session, stub_model
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from paimon import agent as agent_module
 from paimon import headless
 from paimon.agent import (
     Agent,
@@ -178,43 +176,30 @@ class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
     """Every agent event must be renderable by both headless renderers.
 
     Adding an event to paimon.agent without teaching the renderers about it
-    should fail here rather than crash a run.
+    should fail here rather than crash a run. The TUI renderer is held to the
+    same list in test_app.
     """
 
-    _SAMPLES = {
-        "TextDelta": ("hi",),
-        "ReasoningDelta": ("hm",),
-        "ToolStart": ("call-1", "bash", {"command": "ls"}),
-        "ToolEnd": ("call-1", "bash", "out"),
-        "TodosUpdate": ([{"content": "a", "status": "pending"}],),
-        "TurnEnd": (),
-        "ContextCompacted": (10, 5),
-        "ContextCompactionFailed": ("boom",),
-        "ModelRetry": (1, 4, 2.0, "HTTP 429"),
-        "UserInput": ("hi",),
-        "CompactionNotice": (),
-    }
-
-    def _events(self) -> list[object]:
-        found = []
-        for name in dir(agent_module):
-            attribute = getattr(agent_module, name)
-            if not (isinstance(attribute, type) and dataclasses.is_dataclass(attribute)):
-                continue
-            if attribute.__module__ != agent_module.__name__:
-                continue
-            self.assertIn(name, self._SAMPLES, f"add a sample for the new event {name}")
-            found.append(attribute(*self._SAMPLES[name]))
-        return found
-
     async def test_every_event_renders(self) -> None:
-        events = self._events()
-        self.assertEqual(len(events), len(self._SAMPLES))
+        events = agent_events()
         for renderer in (headless.TextRenderer(io.StringIO(), io.StringIO(), _config()),
                          headless.JsonRenderer(io.StringIO(), _config())):
             renderer.begin("sid")
             await _feed(renderer, *events)
             renderer.finish()
+
+    async def test_json_emits_a_line_for_every_visible_event(self) -> None:
+        """A machine consumer should not silently lose an event type."""
+        out = io.StringIO()
+        renderer = headless.JsonRenderer(out, _config())
+        renderer.begin("sid")
+        for event in agent_events():
+            if type(event).__name__ in SILENT_EVENTS | {"UserInput", "CompactionNotice"}:
+                continue  # replay-only: never reaches a headless run
+            before = out.getvalue()
+            await renderer.handle(event)
+            self.assertNotEqual(out.getvalue(), before,
+                                f"JsonRenderer emitted nothing for {type(event).__name__}")
 
 
 class PromptBuildingTest(unittest.TestCase):

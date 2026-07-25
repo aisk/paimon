@@ -14,10 +14,11 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from textual.containers import Horizontal
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 from textual.worker import WorkerState
 
+from helpers import SILENT_EVENTS, agent_events
 from paimon.agent import Agent, ReasoningDelta
 from paimon.app import PaimonApp, _EventRenderer, _session_label
 from paimon.config import Config
@@ -218,6 +219,29 @@ class StatusLineTest(AppTestCase):
             app._set_status(False)
             await pilot.pause()
             self.assertFalse(status.display)
+
+
+class EventCoverageTest(AppTestCase):
+    """The TUI renderer is held to the same event list as the headless ones.
+
+    An event the renderer has no branch for would silently vanish from the
+    conversation log, so each one has to put something in it.
+    """
+
+    async def test_every_event_puts_something_in_the_log(self) -> None:
+        app = self.make_app(config=Config(model="test-model", show_reasoning=True))
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app)
+            log = app.query_one("#log", VerticalScroll)
+            for event in agent_events():
+                name = type(event).__name__
+                before = len(log.children)
+                await renderer.handle(event)
+                await pilot.pause()
+                if name in SILENT_EVENTS:
+                    continue
+                self.assertGreater(len(log.children), before, f"{name} rendered nothing")
+            await renderer.close()
 
 
 class ReasoningDisplayTest(AppTestCase):
