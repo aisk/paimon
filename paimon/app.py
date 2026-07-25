@@ -35,10 +35,13 @@ from .login import LoginScreen, PickerScreen
 from .session import Session, SessionError
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
+# All three markers are East Asian Width "narrow", so the labels stay aligned on
+# terminals that render ambiguous-width glyphs double-wide. Finished work is
+# struck through and dimmed to keep the accent on whatever is in progress.
 _TODO_STYLE = {
-    "completed": ("✔", "$text-success"),
-    "in_progress": ("▶", "$text-accent b"),
-    "pending": ("○", "$text-muted"),
+    "completed": ("✓", "$text-disabled strike"),
+    "in_progress": ("▸", "$text-accent b"),
+    "pending": ("◦", "$text-muted"),
 }
 
 # One is picked whenever the spinner enters a new state, Genshin style.
@@ -410,15 +413,26 @@ class PaimonApp(App):
         return widget
 
     def _show_todos(self, todos: list[dict]) -> None:
-        """Keep a single todos panel, moving it to the end of the log on updates."""
-        if self._todo_panel is not None:
-            self._todo_panel.remove()
-        self._todo_panel = self._add(self._render_todos(todos))
+        """Update the panel in place while it is still the tail of the log, so a
+        burst of revisions collapses into one; once anything is logged under it
+        the panel stays put as a snapshot of the plan at that point and the next
+        revision starts a new one."""
+        log = self.query_one("#log", VerticalScroll)
+        if not todos:
+            if self._todo_panel is not None:
+                self._todo_panel.remove()
+                self._todo_panel = None
+            return
+        body = self._render_todos(todos)
+        if self._todo_panel is not None and log.children[-1:] == [self._todo_panel]:
+            self._todo_panel.update(body)
+        else:
+            self._todo_panel = self._add(body, classes="todos")
 
     def _render_todos(self, todos: list[dict]) -> Content:
-        if not todos:
-            return Content.from_markup("[$text-muted]Todos cleared[/]")
-        lines, kwargs = [], {}
+        done = sum(1 for t in todos if t.get("status") == "completed")
+        lines = [f"[$text-muted b]Plan[/][$text-muted]  {done}/{len(todos)}[/]"]
+        kwargs = {}
         for i, t in enumerate(todos):
             marker, style = _TODO_STYLE.get(t.get("status"), _TODO_STYLE["pending"])
             kwargs[f"c{i}"] = t.get("content", "")

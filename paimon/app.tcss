@@ -20,6 +20,7 @@ Screen { background: $background; }
 .assistant { padding: 0 1; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-muted; }
+.todos { padding: 0 1; border-left: solid $primary 45%; }
 .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
 .user-message {
     width: 100%;

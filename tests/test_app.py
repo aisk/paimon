@@ -221,6 +221,41 @@ class StatusLineTest(AppTestCase):
             self.assertFalse(status.display)
 
 
+class TodoPanelTest(AppTestCase):
+    @staticmethod
+    def _plan(*statuses: str) -> list[dict]:
+        return [{"content": f"step {i}", "status": s} for i, s in enumerate(statuses)]
+
+    async def test_burst_collapses_but_a_panel_with_output_under_it_stays(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            log = app.query_one("#log", VerticalScroll)
+            app._show_todos(self._plan("in_progress", "pending"))
+            app._show_todos(self._plan("completed", "in_progress"))
+            await pilot.pause()
+            panels = app.query(".todos")
+            self.assertEqual(len(panels), 1, "consecutive revisions share one panel")
+            self.assertIn("1/2", str(panels.first().render()))
+
+            app._add_tool_result("output")
+            app._show_todos(self._plan("completed", "completed"))
+            await pilot.pause()
+            panels = app.query(".todos")
+            self.assertEqual(len(panels), 2, "the earlier plan is left as a snapshot")
+            self.assertIn("1/2", str(panels.first().render()))
+            self.assertIn("2/2", str(panels.last().render()))
+            self.assertIs(log.children[-1], panels.last())
+
+    async def test_clearing_removes_the_panel(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app._show_todos(self._plan("pending"))
+            app._show_todos([])
+            await pilot.pause()
+            self.assertEqual(len(app.query(".todos")), 0)
+            self.assertIsNone(app._todo_panel)
+
+
 class EventCoverageTest(AppTestCase):
     """The TUI renderer is held to the same event list as the headless ones.
 
