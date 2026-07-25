@@ -29,7 +29,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import compaction, tools
+from . import compaction, retry, tools
 from .config import Config
 from .llm import build_model
 from .mentions import expand_mentions
@@ -83,6 +83,16 @@ class ContextCompacted:
 
 @dataclass
 class ContextCompactionFailed:
+    error: str
+
+
+@dataclass
+class ModelRetry:
+    """A transient model failure is about to be retried after ``delay`` seconds."""
+
+    attempt: int
+    max_attempts: int
+    delay: float
     error: str
 
 
@@ -285,37 +295,52 @@ class Agent:
             )
 
             content = ""  # accumulated text, kept if the stream is interrupted
+            attempt = 0
 
-            try:
-                async with model_request_stream(
-                    model, request_messages, model_request_parameters=parameters
-                ) as stream:
-                    async for event in stream:
-                        if isinstance(event, PartStartEvent):
-                            part = event.part
-                            if isinstance(part, ThinkingPart) and part.content:
-                                yield ReasoningDelta(part.content)
-                            elif isinstance(part, TextPart) and part.content:
-                                content += part.content
-                                yield TextDelta(part.content)
-                        elif isinstance(event, PartDeltaEvent):
-                            delta = event.delta
-                            if isinstance(delta, ThinkingPartDelta) and delta.content_delta:
-                                yield ReasoningDelta(delta.content_delta)
-                            elif isinstance(delta, TextPartDelta) and delta.content_delta:
-                                content += delta.content_delta
-                                yield TextDelta(delta.content_delta)
-                    response = stream.get()
-            except asyncio.CancelledError:
-                # Interrupted mid-stream: keep partial text but drop incomplete
-                # tool calls and thinking (Z.ai-style preserved thinking must be
-                # replayed complete or not at all) so the history stays valid.
-                self._append_message(ModelResponse(
-                    parts=[TextPart(content=content or "(interrupted)")],
-                    model_name=model.model_name,
-                    provider_name=model.system,
-                ))
-                raise
+            while True:
+                started = False  # this attempt has yielded something to the caller
+                try:
+                    async with model_request_stream(
+                        model, request_messages, model_request_parameters=parameters
+                    ) as stream:
+                        async for event in stream:
+                            if isinstance(event, PartStartEvent):
+                                part = event.part
+                                if isinstance(part, ThinkingPart) and part.content:
+                                    started = True
+                                    yield ReasoningDelta(part.content)
+                                elif isinstance(part, TextPart) and part.content:
+                                    started = True
+                                    content += part.content
+                                    yield TextDelta(part.content)
+                            elif isinstance(event, PartDeltaEvent):
+                                delta = event.delta
+                                if isinstance(delta, ThinkingPartDelta) and delta.content_delta:
+                                    started = True
+                                    yield ReasoningDelta(delta.content_delta)
+                                elif isinstance(delta, TextPartDelta) and delta.content_delta:
+                                    started = True
+                                    content += delta.content_delta
+                                    yield TextDelta(delta.content_delta)
+                        response = stream.get()
+                    break
+                except asyncio.CancelledError:
+                    # Interrupted mid-stream: keep partial text but drop incomplete
+                    # tool calls and thinking (Z.ai-style preserved thinking must be
+                    # replayed complete or not at all) so the history stays valid.
+                    self._append_message(ModelResponse(
+                        parts=[TextPart(content=content or "(interrupted)")],
+                        model_name=model.model_name,
+                        provider_name=model.system,
+                    ))
+                    raise
+                except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
+                    attempt += 1
+                    if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
+                        raise
+                    delay = retry.backoff(attempt)
+                    yield ModelRetry(attempt, retry.MAX_ATTEMPTS, delay, retry.describe(exc))
+                    await asyncio.sleep(delay)
 
             self._append_message(response)
 

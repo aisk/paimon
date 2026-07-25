@@ -13,6 +13,7 @@ captures just the answer.
     {"type": "todos", "todos": array}
     {"type": "compacted", "tokens_before": int, "tokens_after": int}
     {"type": "compaction_failed", "error": str}
+    {"type": "retry", "attempt": int, "max_attempts": int, "delay": float, "error": str}
     {"type": "result", "subtype": "success"|"error"|"interrupted", "is_error": bool,
      "session_id": str|null, "text": str, "denied": int, "error": str|null}
 
@@ -37,6 +38,7 @@ from .agent import (
     Agent,
     ContextCompacted,
     ContextCompactionFailed,
+    ModelRetry,
     ReasoningDelta,
     TextDelta,
     TodosUpdate,
@@ -172,6 +174,10 @@ class TextRenderer:
         elif isinstance(ev, ContextCompactionFailed):
             self._note(f"paimon: context compaction failed, continuing without it: {ev.error}")
 
+        elif isinstance(ev, ModelRetry):
+            self._note(f"paimon: {ev.error}, retrying in {ev.delay:g}s "
+                       f"({ev.attempt}/{ev.max_attempts - 1})")
+
     async def close(self) -> None:
         # No await anywhere in here: close() runs from a finally block while
         # the turn may be cancelling, and any real suspension point would
@@ -201,6 +207,7 @@ class JsonRenderer:
         TodosUpdate: "todos",
         ContextCompacted: "compacted",
         ContextCompactionFailed: "compaction_failed",
+        ModelRetry: "retry",
     }
 
     def __init__(self, out=None, config: Optional[Config] = None) -> None:
@@ -246,6 +253,9 @@ class JsonRenderer:
                         "tokens_after": ev.tokens_after})
         elif isinstance(ev, ContextCompactionFailed):
             self._emit({"type": name, "error": ev.error})
+        elif isinstance(ev, ModelRetry):
+            self._emit({"type": name, "attempt": ev.attempt,
+                        "max_attempts": ev.max_attempts, "delay": ev.delay, "error": ev.error})
 
     def _flush_block(self) -> None:
         if self._current:

@@ -20,6 +20,7 @@ from .agent import (
     CompactionNotice,
     ContextCompactionFailed,
     ContextCompacted,
+    ModelRetry,
     ReasoningDelta,
     TextDelta,
     TodosUpdate,
@@ -151,6 +152,17 @@ class _EventRenderer:
                 Content.from_markup(
                     "[$text-warning]Context compaction failed; continuing without it: $error[/]",
                     error=ev.error,
+                )
+            )
+
+        elif isinstance(ev, ModelRetry):
+            self._app._add(
+                Content.from_markup(
+                    "[$text-warning]$error — retrying in $delay s ($attempt/$total)[/]",
+                    error=ev.error,
+                    delay=f"{ev.delay:g}",
+                    attempt=str(ev.attempt),
+                    total=str(ev.max_attempts - 1),
                 )
             )
 
@@ -602,7 +614,8 @@ class PaimonApp(App):
                     self._update_statusbar_tokens()
                 elif isinstance(ev, ToolStart):
                     set_state("tool")
-                elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted, ContextCompactionFailed)):
+                elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted,
+                                     ContextCompactionFailed, ModelRetry)):
                     # the model is about to react to what just happened
                     set_state("waiting")
                 elif isinstance(ev, ReasoningDelta):

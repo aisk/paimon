@@ -190,6 +190,7 @@ class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
         "TurnEnd": (),
         "ContextCompacted": (10, 5),
         "ContextCompactionFailed": ("boom",),
+        "ModelRetry": (1, 4, 2.0, "HTTP 429"),
         "UserInput": ("hi",),
         "CompactionNotice": (),
     }
