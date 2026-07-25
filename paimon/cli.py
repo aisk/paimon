@@ -5,8 +5,13 @@ import shlex
 import sys
 from pathlib import Path
 
+from . import headless as headless_mode
 from .app import PaimonApp
 from .session import Session, SessionBusyError
+
+
+class CliError(Exception):
+    """A message to report as ``paimon: ...`` before exiting with status 1."""
 
 
 def _resolve_session(prefix: str) -> Session:
@@ -14,10 +19,8 @@ def _resolve_session(prefix: str) -> Session:
     if len(matches) == 1:
         return matches[0]
     if not matches:
-        print(f"paimon: no session matching '{prefix}' in this directory", file=sys.stderr)
-    else:
-        print(f"paimon: ambiguous session id '{prefix}' ({len(matches)} matches)", file=sys.stderr)
-    sys.exit(1)
+        raise CliError(f"no session matching '{prefix}' in this directory")
+    raise CliError(f"ambiguous session id '{prefix}' ({len(matches)} matches)")
 
 
 def main() -> None:
@@ -25,6 +28,12 @@ def main() -> None:
     parser.add_argument("-r", "--resume", nargs="?", const="", default=None, metavar="ID",
                         help="resume a session: with a session id prefix resume it directly, "
                              "without a value open a session picker")
+    parser.add_argument("-p", "--print", nargs="?", const="", default=None, metavar="PROMPT",
+                        dest="prompt",
+                        help="run one turn without the UI and exit; with no value the prompt "
+                             "is read from stdin")
+    parser.add_argument("--output-format", choices=("text", "json"), default="text",
+                        help="output for --print: text (default) or one JSON event per line")
     parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="read",
                         help="permission mode: read (confirm writes, commands and reads outside cwd), "
                              "edit (auto-approve edits in cwd), yolo (no confirmation)")
@@ -32,15 +41,22 @@ def main() -> None:
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
                         help="port for --web (default: 8000)")
+    # Set when the UI is launched with a stdin that is not a terminal, which
+    # would otherwise be read as "run headless" (textual-serve pipes stdin).
+    parser.add_argument("--tui", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ehe", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.ehe:
         print("エヘッてなんだよ！！")
         return
+
+    # Decided before touching stdin so serving the UI never consumes a pipe.
     if args.web:
+        if args.prompt is not None:
+            parser.error("--web and --print cannot be combined")
         from textual_serve.server import Server
 
-        flags = []
+        flags = ["--tui"]
         if args.resume is not None:
             flags += ["--resume"] if args.resume == "" else ["--resume", args.resume]
         if args.mode != "read":
@@ -48,7 +64,31 @@ def main() -> None:
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
         Server(command, port=args.port).serve()
         return
-    resume_session = _resolve_session(args.resume) if args.resume else None
+
+    piped_stdin = not args.tui and not sys.stdin.isatty()
+    headless = args.prompt is not None or piped_stdin
+    if args.output_format != "text" and not headless:
+        parser.error("--output-format only applies to --print")
+    if headless and args.resume == "":
+        parser.error("--resume needs a session id with --print (the picker needs a terminal)")
+
+    try:
+        resume_session = _resolve_session(args.resume) if args.resume else None
+    except CliError as exc:
+        if headless:
+            sys.exit(headless_mode.fail(str(exc), args.output_format))
+        print(f"paimon: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if headless:
+        piped = headless_mode.read_stdin() if piped_stdin else ""
+        if not (args.prompt or "").strip() and not piped.strip():
+            parser.error("nothing to do: pass a prompt to --print or pipe one on stdin")
+        sys.exit(headless_mode.run(
+            prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
+            session=resume_session, output_format=args.output_format,
+        ))
+
     try:
         app = PaimonApp(mode=args.mode, session=resume_session, pick_session=args.resume == "")
     except SessionBusyError as exc:

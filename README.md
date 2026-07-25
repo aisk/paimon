@@ -11,6 +11,8 @@ uv run paimon              # or: python -m paimon
 uv run paimon -r [ID]      # pick a session to resume, or resume one by id prefix
 uv run paimon --mode yolo  # permission mode: read (default), edit or yolo
 uv run paimon --web        # serve the UI in a browser (--port, default 8000)
+uv run paimon -p "..."     # one turn, no UI (--output-format json for JSONL)
+cat log.txt | uv run paimon -p "summarize this"
 ```
 
 First launch asks for a provider, model, API base and key, saved to
@@ -27,6 +29,10 @@ provider" in the command palette (Ctrl+P).
   are shown as a side-by-side diff (nicer if
   [delta](https://github.com/dandavison/delta) is installed).
 - Prompts typed while the agent is busy are queued and sent when it finishes.
+- `-p` never asks for confirmation: whatever the permission mode would prompt
+  for is denied instead, so pass `--mode edit` or `--mode yolo` when the run
+  needs to write files or run commands. The answer goes to stdout and
+  everything else to stderr.
 - Sessions are JSONL files under `~/.local/share/paimon/sessions/`, split by
   working directory (`PAIMON_DATA_HOME` overrides). A session can only be
   active in one process at a time.
