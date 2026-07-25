@@ -2,51 +2,65 @@
 
 ![Paimon](https://automaton-media.com/wp-content/uploads/2020/10/20201019-140524-header.jpg)
 
-A minimal terminal code agent built on pydantic-ai and textual.
+Paimon is a coding agent that lives in your terminal. It reads and edits files in the current directory and runs commands, asking before it touches anything.
 
-## Run
+## Install
 
 ```bash
-uv run paimon              # or: python -m paimon
-uv run paimon -r [ID]      # pick a session to resume, or resume one by id prefix
-uv run paimon --mode yolo  # permission mode: read (default), edit or yolo
-uv run paimon --web        # serve the UI in a browser (--port, default 8000)
-uv run paimon -p "..."     # one turn, no UI (--output-format json for JSONL)
-cat log.txt | uv run paimon -p "summarize this"
+uv tool install paimon   # or: pip install paimon
 ```
 
-First launch asks for a provider, model, API base and key, saved to
-`~/.config/paimon/config.json`. Change them later with "Login / switch
-provider" in the command palette (Ctrl+P).
+## Getting started
 
-## Notes
+```bash
+paimon
+```
 
-- `@path` in a prompt attaches that file: small files inline, larger ones are
-  referenced by path for the model to read on demand.
-- Shift+Tab cycles the permission mode: read (writes, commands and access
-  outside the working directory ask for confirmation), edit (edits inside the
-  working directory run without asking) and yolo (nothing asks). File changes
-  are shown as a side-by-side diff (nicer if
-  [delta](https://github.com/dandavison/delta) is installed).
-- Prompts typed while the agent is busy are queued and sent when it finishes.
-- `-p` never asks for confirmation: whatever the permission mode would prompt
-  for is denied instead, so pass `--mode edit` or `--mode yolo` when the run
-  needs to write files or run commands. The answer goes to stdout and
-  everything else to stderr.
-- Sessions are JSONL files under `~/.local/share/paimon/sessions/`, split by
-  working directory (`PAIMON_DATA_HOME` overrides). A session can only be
-  active in one process at a time. Both the UI and `-p` print the command that
-  resumes it on the way out.
-- Near the context limit old history is summarized in place, once a window is
-  set in `config.json`:
+Or run it without installing anything:
 
-  ```json
-  {
-    "compaction": {
-      "enabled": true,
-      "context_window": 128000,
-      "reserve_tokens": 16384,
-      "keep_recent_tokens": 20000
-    }
+```bash
+uvx paimon
+```
+
+The first launch asks for a provider, model, API base and key, and saves them to `~/.config/paimon/config.json`. Then just type what you want done.
+
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider, new or resume session, show the model's thinking), `Ctrl+C` quits.
+
+Write `@path/to/file` in a prompt to hand a file to the agent.
+
+## Sessions
+
+Every conversation is saved. Paimon prints the command that brings one back when you leave:
+
+```bash
+paimon -r            # choose a session started in this directory
+paimon -r a1b2c3     # resume one by id
+```
+
+## Other ways to run it
+
+```bash
+paimon --mode edit                  # start in a less cautious permission mode
+paimon --web                        # the same UI in a browser (--port, default 8000)
+paimon -p "what does cli.py do?"    # one answer on stdout, no UI
+cat log.txt | paimon -p "summarize this"
+```
+
+`-p` never stops to ask, so anything the current mode would prompt for is refused instead; pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format json` for one JSON event per line.
+
+## Configuration
+
+`~/.config/paimon/config.json` holds the model settings. Long conversations can be summarized in place near the context limit by adding:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "context_window": 128000,
+    "reserve_tokens": 16384,
+    "keep_recent_tokens": 20000
   }
-  ```
+}
+```
+
+Sessions live in `~/.local/share/paimon/sessions/` (`PAIMON_DATA_HOME` overrides). File changes render nicer if [delta](https://github.com/dandavison/delta) is installed.
