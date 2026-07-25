@@ -3,6 +3,10 @@
 Provider and model lists come from pydantic-ai's static ``KnownModelName``
 catalog; no network calls are made. The picker accepts free-typed entries, so
 unlisted providers or brand-new model names still work.
+
+The provider doubles as the wire dialect, so the catalog is narrowed to the
+ones whose SDK ships with Paimon — offering the rest would only produce an
+import error later.
 """
 
 from __future__ import annotations
@@ -19,13 +23,16 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from paimon.llm import is_provider_available
+
 
 def _known_models() -> list[str]:
     return sorted(typing.get_args(KnownModelName.__value__))
 
 
 def _providers() -> list[str]:
-    return sorted({name.split(":", 1)[0] for name in _known_models() if ":" in name})
+    names = {name.split(":", 1)[0] for name in _known_models() if ":" in name}
+    return sorted(name for name in names if is_provider_available(name))
 
 
 def _models(provider: str) -> list[str]:

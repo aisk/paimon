@@ -1,8 +1,14 @@
 """Build a pydantic-ai Model from the configured model string.
 
 The config keeps litellm-style strings ("zai/glm-5.2") as well as pydantic-ai
-style ones ("zai:glm-5.2"). The provider is constructed explicitly so the
-configured api_key/api_base take precedence over environment variables.
+style ones ("zai:glm-5.2"). The provider prefix picks the wire dialect
+(OpenAI chat completions, OpenAI responses, Anthropic messages, ...) while
+api_base picks the endpoint; the two are independent. The provider is
+constructed explicitly so the configured api_key/api_base take precedence over
+environment variables.
+
+Only the dialects whose SDK is installed can be built — pydantic-ai imports
+those lazily and raises ImportError for the rest.
 """
 
 import inspect
@@ -10,6 +16,25 @@ from typing import Optional
 
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.providers import infer_provider_class
+
+
+def provider_class(provider_name: str):
+    """Look up a provider class, turning a missing SDK into a readable error."""
+    try:
+        return infer_provider_class(provider_name)
+    except ImportError as exc:
+        raise ValueError(
+            f"Provider {provider_name!r} needs a dependency Paimon does not ship: {exc}"
+        ) from exc
+
+
+def is_provider_available(provider_name: str) -> bool:
+    """Whether this provider can be constructed with the installed dependencies."""
+    try:
+        infer_provider_class(provider_name)
+    except (ImportError, ValueError):
+        return False
+    return True
 
 
 def split_model_string(model: str) -> tuple[str, str]:
@@ -27,7 +52,7 @@ def split_model_string(model: str) -> tuple[str, str]:
 
 def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None) -> Model:
     provider_name, model_name = split_model_string(model)
-    provider_cls = infer_provider_class(provider_name)
+    provider_cls = provider_class(provider_name)
     parameters = inspect.signature(provider_cls.__init__).parameters
 
     kwargs: dict = {}
