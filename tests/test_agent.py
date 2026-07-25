@@ -170,5 +170,40 @@ class ReplayEventsTest(unittest.TestCase):
         self.assertEqual([type(event) for event in events], [CompactionNotice, UserInput])
 
 
+class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_now_ignores_the_toggle_and_the_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            with (
+                patch("paimon.agent.Session.create", return_value=session),
+                patch("paimon.agent._system_prompt", return_value="snapshot"),
+            ):
+                # A tiny history under a disabled auto-compaction config: the
+                # automatic path would decline on both counts.
+                agent = Agent(cwd=cwd, config=Config(model="test:stub", compaction_enabled=False))
+            old = ModelRequest(parts=[UserPromptPart(content="old")])
+            recent = ModelResponse(parts=[TextPart(content="recent")])
+            agent._append_message(old)
+            agent._append_message(recent)
+
+            result = compaction.CompactionResult("checkpoint", [recent], 100, 0)
+            with (
+                patch("paimon.agent.Agent._model", return_value=object()),
+                patch("paimon.compaction.compact", new=AsyncMock(return_value=result)) as compact,
+            ):
+                self.assertIsNone(await agent._maybe_compact())
+                returned = await agent.compact_now()
+
+            self.assertIs(returned, result)
+            compact.assert_awaited_once()
+            self.assertTrue(compaction.is_summary_message(agent.history[0]))
+            self.assertEqual(agent.history[1:], [recent])
+            # the checkpoint is persisted, so a resume replays the same context
+            replayed = session.messages()
+            self.assertEqual(len(replayed), 2)
+            self.assertIn("checkpoint", replayed[0].parts[0].content)
+
+
 if __name__ == "__main__":
     unittest.main()

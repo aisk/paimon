@@ -404,14 +404,23 @@ class Agent:
         """Persist the final version of a message already present in ``self.history``."""
         self.session.append_message(message, replaces=record_id)
 
-    async def _maybe_compact(self) -> Optional[compaction.CompactionResult]:
-        if not self.config.compaction_enabled:
-            return None
+    async def _maybe_compact(self, *, force: bool = False) -> Optional[compaction.CompactionResult]:
+        """Compact the context if it is close to full.
 
-        window = compaction.context_window(self.config.compaction_context_window)
-        tokens_before = compaction.count_tokens(self.history, tools.TOOLS)
-        if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
-            return None
+        ``force`` is the manual path: the user asked for it, so neither the
+        auto-compaction toggle nor the token threshold applies.  It still keeps
+        the recent window, and so returns None on a history short enough that
+        there is nothing to summarize.
+        """
+        if not force:
+            if not self.config.compaction_enabled:
+                return None
+            window = compaction.context_window(self.config.compaction_context_window)
+            tokens_before = compaction.count_tokens(self.history, tools.TOOLS)
+            if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
+                return None
+        else:
+            tokens_before = compaction.count_tokens(self.history, tools.TOOLS)
 
         result = await compaction.compact(
             self.history,
@@ -429,6 +438,10 @@ class Agent:
         self.history = [compaction.summary_message(result.summary), *result.kept_messages]
         result.tokens_after = compaction.count_tokens(self.history, tools.TOOLS)
         return result
+
+    async def compact_now(self) -> Optional[compaction.CompactionResult]:
+        """Compact on demand; None when the history is too short to be worth it."""
+        return await self._maybe_compact(force=True)
 
     async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[object]:
         """Run one user turn to completion, yielding events along the way.

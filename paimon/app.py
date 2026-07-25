@@ -252,6 +252,11 @@ class PaimonApp(App):
                 "Show or hide the model's reasoning stream (it is generated either way)",
                 self.action_toggle_reasoning,
             ),
+            SystemCommand(
+                "Compact context",
+                "Summarize the earlier conversation now instead of waiting for the context to fill",
+                self.action_compact,
+            ),
             SystemCommand("New session", "Start a new empty session", self.action_new_session),
             SystemCommand("Resume session", "Pick an earlier session in this directory to resume",
                           self.action_resume_session),
@@ -356,6 +361,32 @@ class PaimonApp(App):
         await self._show_resumed()
         self._refresh_statusbar()
         self.query_one(PromptInput).focus()
+
+    @work(exclusive=True, group="compact")
+    async def action_compact(self) -> None:
+        if self._turn is not None and self._turn.is_running:
+            self._add(Content.from_markup("[$text-muted]Busy — compact the context after this turn[/]"))
+            return
+        self._set_status(True, " Compacting context")
+        try:
+            result = await self.agent.compact_now()
+        except Exception as exc:  # noqa: BLE001 — the session is still usable
+            self._add(Content.from_markup("[$text-error b]Compaction failed:[/] $body", body=str(exc)))
+            return
+        finally:
+            self._set_status(False)
+            self.query_one(PromptInput).focus()
+        if result is None:
+            self._add(Content.from_markup("[$text-muted]Nothing to compact yet — the context is still short[/]"))
+            return
+        self._add(
+            Content.from_markup(
+                "[$text-muted]Context compacted: $before → ~$after tokens[/]",
+                before=f"{result.tokens_before:,}",
+                after=f"{result.tokens_after:,}",
+            )
+        )
+        self._update_statusbar_tokens()
 
     # ---- permission mode ----------------------------------------------------
 
