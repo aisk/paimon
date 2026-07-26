@@ -7,6 +7,7 @@ paimon.llm; provider environment variables are the fallback when unset.
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,19 @@ from typing import Optional
 def config_dir() -> Path:
     override = os.environ.get("PAIMON_CONFIG_HOME")
     return Path(override) if override else Path.home() / ".config" / "paimon"
+
+
+def activate_profile(name: str) -> None:
+    """Point this process at a named profile for the rest of its lifetime.
+
+    A profile is a fully independent config directory under profiles/ — model,
+    key, theme, everything. Routing through PAIMON_CONFIG_HOME means every
+    later config_dir() call and any spawned child (--web serves the UI from a
+    subprocess) sees the same choice without threading a parameter around.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        raise ValueError(f"invalid profile name {name!r}")
+    os.environ["PAIMON_CONFIG_HOME"] = str(config_dir() / "profiles" / name)
 
 
 def config_path() -> Path:

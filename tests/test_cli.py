@@ -191,6 +191,11 @@ class HeadlessArgumentTest(CliTestCase):
         self.assertEqual(code, 2)
         self.assertIn("provider:model", stderr)
 
+    def test_invalid_profile_name_is_a_usage_error(self) -> None:
+        code, stderr = self._main_exit("--profile", "../evil")
+        self.assertEqual(code, 2)
+        self.assertIn("invalid profile name", stderr)
+
 
 class HeadlessRunTest(CliTestCase):
     def test_missing_model_exits_1_without_creating_a_session(self) -> None:
@@ -258,6 +263,25 @@ class HeadlessRunTest(CliTestCase):
         code, out, err = self._main_output("-p", "hi", "-c")
         self.assertEqual(code, 1)
         self.assertIn("no session to continue", err)
+
+    def test_profile_config_is_read_by_a_headless_run(self) -> None:
+        config_home = self.cwd / "cfghome"
+        profile_config = config_home / "profiles" / "work" / "config.json"
+        profile_config.parent.mkdir(parents=True)
+        profile_config.write_text(json.dumps({"model": "test:profile"}), encoding="utf-8")
+
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["paimon", "-p", "hi", "--profile", "work", "--output-format", "json"]
+        with patch.dict("os.environ", {"PAIMON_CONFIG_HOME": str(config_home)}), \
+                patch("sys.argv", argv), \
+                patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.agent.build_system_prompt", return_value="sys"), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main()
+        self.assertEqual(ctx.exception.code, 0)
+        init = json.loads(out.getvalue().splitlines()[0])
+        self.assertEqual(init["model"], "test:profile")
 
     def test_busy_session_exits_1(self) -> None:
         session = self._session("abc11111-0000-0000-0000-000000000000")

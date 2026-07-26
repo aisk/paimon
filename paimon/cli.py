@@ -9,7 +9,7 @@ from . import commands
 from . import headless as headless_mode
 from .agent import Agent
 from .app import PaimonApp
-from .config import Config
+from .config import Config, activate_profile
 from .llm import split_model_string
 from .session import Session, SessionError, resume_hint
 
@@ -53,6 +53,10 @@ def main() -> None:
                         help="resume the most recent session in this directory")
     parser.add_argument("--model", default=None, metavar="PROVIDER:NAME",
                         help="model for this run only; the configured one is untouched")
+    parser.add_argument("--profile", default=None, metavar="NAME",
+                        help="use this named profile's configuration "
+                             "(an independent config dir; log in with "
+                             "'paimon login --profile NAME ...')")
     parser.add_argument("-p", "--print", nargs="?", const="", default=None, metavar="PROMPT",
                         dest="prompt",
                         help="run one turn without the UI and exit; with no value the prompt "
@@ -77,6 +81,13 @@ def main() -> None:
 
     if args.continue_latest and args.resume is not None:
         parser.error("--continue and --resume cannot be combined")
+    if args.profile is not None:
+        # Routed through the environment, so the --web child inherits it
+        # without flag forwarding.
+        try:
+            activate_profile(args.profile)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.model is not None:
         try:
             split_model_string(args.model)

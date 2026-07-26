@@ -17,9 +17,22 @@ from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
-from .config import Config, config_path
+from .config import Config, activate_profile, config_path
 from .llm import is_provider_available, split_model_string
 from .session import Session
+
+
+def _profile_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profile", default=None, metavar="NAME",
+                        help="use this named profile's configuration")
+
+
+def _apply_profile(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.profile is not None:
+        try:
+            activate_profile(args.profile)
+        except ValueError as exc:
+            parser.error(str(exc))
 
 
 def version() -> str:
@@ -37,7 +50,9 @@ def status(argv: list) -> int:
                     "is configured, 1 when login is still needed.",
     )
     parser.add_argument("--json", action="store_true", help="one JSON object on stdout")
+    _profile_option(parser)
     args = parser.parse_args(argv)
+    _apply_profile(parser, args)
 
     config = Config.load()
     logged_in = bool(config.model)
@@ -107,7 +122,9 @@ def login(argv: list) -> int:
                             help="read the API key from this environment variable")
     key_source.add_argument("--api-key-stdin", action="store_true",
                             help="read the API key from stdin")
+    _profile_option(parser)
     args = parser.parse_args(argv)
+    _apply_profile(parser, args)
 
     try:
         provider, _ = split_model_string(args.model)
