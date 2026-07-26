@@ -5,6 +5,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from . import commands
 from . import headless as headless_mode
 from .agent import Agent
 from .app import PaimonApp
@@ -25,7 +26,17 @@ def _resolve_session(prefix: str) -> Session:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Paimon terminal code agent")
+    # Subcommands are dispatched before the flag parser: they have their own
+    # argument sets and none of the launch-mode logic below applies to them.
+    argv = sys.argv[1:]
+    if argv and argv[0] in commands.REGISTRY:
+        sys.exit(commands.REGISTRY[argv[0]](argv[1:]))
+
+    parser = argparse.ArgumentParser(
+        description="Paimon terminal code agent",
+        epilog="commands: status (login state and configuration), "
+               "login (log in without the UI)",
+    )
     parser.add_argument("-r", "--resume", nargs="?", const="", default=None, metavar="ID",
                         help="resume a session: with a session id prefix resume it directly, "
                              "without a value open a session picker")
