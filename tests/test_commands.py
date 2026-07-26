@@ -125,6 +125,33 @@ class LoginTest(CommandTestCase):
         self.assertEqual(data["theme"], "dark")
 
 
+class ProfileTest(CommandTestCase):
+    def test_login_and_status_share_a_profile(self) -> None:
+        with patch.dict("os.environ", {"WORK_KEY": "sk-work"}):
+            code, out, err = self._run("login", "--profile", "work", "--model",
+                                       "openai:gpt-5", "--api-key-env", "WORK_KEY")
+        self.assertEqual(code, 0)
+        profile_config = self.home / "config" / "profiles" / "work" / "config.json"
+        self.assertEqual(json.loads(profile_config.read_text())["api_key"], "sk-work")
+
+        code, out, err = self._run("status", "--profile", "work", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["model"], "openai:gpt-5")
+
+    def test_default_profile_is_untouched(self) -> None:
+        with patch.dict("os.environ", {"WORK_KEY": "sk-work"}):
+            self._run("login", "--profile", "work", "--model", "openai:gpt-5",
+                      "--api-key-env", "WORK_KEY")
+        code, out, err = self._run("status", "--json")
+        self.assertEqual(code, 1)
+        self.assertFalse(json.loads(out)["logged_in"])
+
+    def test_traversal_in_profile_name_is_rejected(self) -> None:
+        code, out, err = self._run("status", "--profile", "../evil")
+        self.assertEqual(code, 2)
+        self.assertIn("invalid profile name", err)
+
+
 class SessionsTest(CommandTestCase):
     def _make_session(self, text: str) -> Session:
         session = Session.create(Path.cwd())
