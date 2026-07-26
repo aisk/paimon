@@ -35,6 +35,8 @@ Every conversation is saved. Paimon prints the command that brings one back when
 ```bash
 paimon -r            # choose a session started in this directory
 paimon -r a1b2c3     # resume one by id
+paimon -c            # resume the most recent one
+paimon sessions      # list them (--json for machines)
 ```
 
 ## Other ways to run it
@@ -44,9 +46,15 @@ paimon --mode edit                  # start in a less cautious permission mode
 paimon --web                        # the same UI in a browser (--port, default 8000)
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"
+paimon --model zai:glm-4.7          # this model for this run only
+paimon --profile work               # a separately configured account
 ```
 
-`-p` never stops to ask, so anything the current mode would prompt for is refused instead; pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format json` for one JSON event per line.
+`-p` never stops to ask, so anything the current mode would prompt for is refused instead; pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format json` for one JSON event per line, and `--timeout`/`--max-tool-calls` to bound an unattended run.
+
+## Calling Paimon from another agent
+
+Everything above works without a terminal, so a code agent (Claude Code, Codex, a script) can drive Paimon as a subprocess: check `paimon status --json`, log in with `paimon login --model provider:name --api-key-env VAR` if needed, run `paimon -p ... --output-format json`, and resume the session id from the final `result` line later. `paimon install-skill` (`--target claude|codex`, or `--dest DIR`) installs a skill file that teaches the calling agent this workflow.
 
 ## Configuration
 

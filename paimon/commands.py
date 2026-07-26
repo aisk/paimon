@@ -172,10 +172,44 @@ def sessions(argv: list) -> int:
     return 0
 
 
+# Where each calling agent discovers user-level skills.
+SKILL_DIRS = {
+    "claude": Path(".claude") / "skills" / "paimon",
+    "codex": Path(".codex") / "skills" / "paimon",
+}
+
+
+def install_skill(argv: list) -> int:
+    """Copy the bundled SKILL.md to where a calling agent will find it.
+
+    A copy rather than a symlink: uv/pipx tool upgrades replace the package
+    directory, and a skill that dangles until the next install-skill run is
+    worse than one that lags a version behind.
+    """
+    parser = argparse.ArgumentParser(
+        prog="paimon install-skill",
+        description="Teach a calling code agent how to drive Paimon.",
+    )
+    parser.add_argument("--target", choices=sorted(SKILL_DIRS), default="claude",
+                        help="which agent's skill directory to install into (default: claude)")
+    parser.add_argument("--dest", metavar="DIR", default=None,
+                        help="install into this directory instead of the --target default")
+    args = parser.parse_args(argv)
+
+    source = Path(__file__).parent / "skill" / "SKILL.md"
+    directory = Path(args.dest).expanduser() if args.dest else Path.home() / SKILL_DIRS[args.target]
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / "SKILL.md"
+    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"installed: {destination}")
+    return 0
+
+
 # Dispatched by cli.main before its own parser runs; each entry takes the
 # remaining argv and returns the process exit code.
 REGISTRY = {
     "status": status,
     "login": login,
     "sessions": sessions,
+    "install-skill": install_skill,
 }
