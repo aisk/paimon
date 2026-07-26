@@ -63,6 +63,10 @@ def main() -> None:
                              "is read from stdin")
     parser.add_argument("--output-format", choices=("text", "json"), default="text",
                         help="output for --print: text (default) or one JSON event per line")
+    parser.add_argument("--timeout", type=float, default=None, metavar="SECS",
+                        help="with --print: give up after this many seconds (exit 124)")
+    parser.add_argument("--max-tool-calls", type=int, default=None, metavar="N",
+                        help="with --print: stop before the N+1th tool call (exit 4)")
     parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="read",
                         help="permission mode: read (confirm writes, commands and reads outside cwd), "
                              "edit (auto-approve edits in cwd), yolo (no confirmation)")
@@ -117,6 +121,12 @@ def main() -> None:
     headless = args.prompt is not None or piped_stdin
     if args.output_format != "text" and not headless:
         parser.error("--output-format only applies to --print")
+    for flag, value in (("--timeout", args.timeout), ("--max-tool-calls", args.max_tool_calls)):
+        if value is not None:
+            if not headless:
+                parser.error(f"{flag} only applies to --print")
+            if value < 0 or (flag == "--timeout" and value == 0):
+                parser.error(f"{flag} must be positive")
     if headless and args.resume == "":
         parser.error("--resume needs a session id with --print (the picker needs a terminal)")
 
@@ -138,6 +148,7 @@ def main() -> None:
         sys.exit(headless_mode.run(
             prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
             session=resume_session, output_format=args.output_format, model=args.model,
+            timeout=args.timeout, max_tool_calls=args.max_tool_calls,
         ))
 
     config = None

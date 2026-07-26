@@ -14,14 +14,18 @@ captures just the answer.
     {"type": "compacted", "tokens_before": int, "tokens_after": int}
     {"type": "compaction_failed", "error": str}
     {"type": "retry", "attempt": int, "max_attempts": int, "delay": float, "error": str}
-    {"type": "result", "subtype": "success"|"error"|"interrupted", "is_error": bool,
-     "session_id": str|null, "text": str, "denied": int, "error": str|null}
+    {"type": "result", "subtype": "success"|"error"|"interrupted"|"timeout"|"max_tool_calls",
+     "is_error": bool, "session_id": str|null, "text": str, "denied": int, "error": str|null}
 
 The first line is always ``init`` and the last is always ``result`` — including
 when the run fails before the model is reached. Consumers must ignore unknown
 event types and unknown fields; existing fields are only added to, never
 removed or redefined. A new output shape would be a new ``--output-format``
 value rather than a change to this one.
+
+Exit codes: 0 success, 1 error, 2 usage, 4 tool budget exhausted (``result``
+subtype ``max_tool_calls``), 124 timed out (``timeout``), 130 interrupted.
+Either way the session is persisted and resumable via the reported id.
 """
 
 import asyncio
@@ -310,22 +314,44 @@ def _install_interrupt(task: "asyncio.Task") -> None:
             signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(cancel))
 
 
-async def _run_turn(agent: Agent, renderer, text: str) -> None:
+class _ToolBudgetExceeded(Exception):
+    """The turn asked for more tool calls than --max-tool-calls allows."""
+
+
+async def _run_turn(agent: Agent, renderer, text: str,
+                    max_tool_calls: Optional[int] = None) -> None:
+    calls = 0
     try:
         async for ev in agent.run(text, expand=False):
             await renderer.handle(ev)
+            if isinstance(ev, ToolStart):
+                calls += 1
+                if max_tool_calls is not None and calls > max_tool_calls:
+                    # Abandoning the generator at this yield point means the
+                    # over-budget tool never executes; its pre-seeded
+                    # placeholder result keeps the session resumable.
+                    raise _ToolBudgetExceeded
     finally:
         await renderer.close()
 
 
-async def _drive(agent: Agent, renderer, text: str) -> int:
-    turn = asyncio.ensure_future(_run_turn(agent, renderer, text))
+async def _drive(agent: Agent, renderer, text: str, *,
+                 timeout: Optional[float] = None,
+                 max_tool_calls: Optional[int] = None) -> int:
+    turn = asyncio.ensure_future(_run_turn(agent, renderer, text, max_tool_calls))
     _install_interrupt(turn)
     try:
-        await turn
+        await asyncio.wait_for(turn, timeout)
     except asyncio.CancelledError:
         renderer.finish(subtype="interrupted")
         return 130
+    except asyncio.TimeoutError:
+        renderer.finish(subtype="timeout", error=f"timed out after --timeout {timeout:g}s")
+        return 124
+    except _ToolBudgetExceeded:
+        renderer.finish(subtype="max_tool_calls",
+                        error=f"stopped after reaching --max-tool-calls {max_tool_calls}")
+        return 4
     except Exception as exc:  # noqa: BLE001 — report any failure and exit non-zero
         renderer.finish(subtype="error", error=f"{type(exc).__name__}: {exc}")
         return 1
@@ -354,11 +380,14 @@ def _relax_encoding() -> None:
 
 def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Session],
         output_format: str = "text", config: Optional[Config] = None,
-        model: Optional[str] = None) -> int:
+        model: Optional[str] = None, timeout: Optional[float] = None,
+        max_tool_calls: Optional[int] = None) -> int:
     """Run one turn and return the process exit code.
 
     ``model`` overrides the configured model for this run only; nothing is
-    written back to the config file.
+    written back to the config file. ``timeout`` and ``max_tool_calls`` bound
+    an unattended run; on either limit the partial turn is persisted and the
+    result names the limit that was hit.
     """
     _relax_encoding()
     config = config or Config.load()
@@ -383,7 +412,8 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
 
     renderer.begin(agent.session.id, config.model, mode, cwd)
     try:
-        return asyncio.run(_drive(agent, renderer, text))
+        return asyncio.run(_drive(agent, renderer, text,
+                                  timeout=timeout, max_tool_calls=max_tool_calls))
     except KeyboardInterrupt:  # before the handler was installed, or a second Ctrl-C
         renderer.finish(subtype="interrupted")
         return 130

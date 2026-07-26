@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import io
 import json
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from helpers import stub_model
 from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.models.function import FunctionModel
 
 from paimon import cli
 from paimon.config import Config
@@ -53,12 +55,12 @@ class CliTestCase(unittest.TestCase):
         return ctx.exception.code, stderr.getvalue()
 
     def _main_output(self, *argv: str, model: str | None = "test:stub",
-                     tool: str | None = None) -> tuple[int, str, str]:
+                     tool: str | None = None, stub=None) -> tuple[int, str, str]:
         """Run main() headless against a stubbed model, capturing both streams."""
         out, err = io.StringIO(), io.StringIO()
         with patch("sys.argv", ["paimon", *argv]), \
                 patch("paimon.headless.Config.load", return_value=Config(model=model)), \
-                patch("paimon.agent.build_model", return_value=stub_model(tool)), \
+                patch("paimon.agent.build_model", return_value=stub or stub_model(tool)), \
                 patch("paimon.agent.build_system_prompt", return_value="sys"), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as ctx:
@@ -195,6 +197,57 @@ class HeadlessArgumentTest(CliTestCase):
         code, stderr = self._main_exit("--profile", "../evil")
         self.assertEqual(code, 2)
         self.assertIn("invalid profile name", stderr)
+
+
+def _slow_model() -> FunctionModel:
+    async def stream(messages, info):
+        await asyncio.sleep(30)
+        yield "late"
+
+    return FunctionModel(stream_function=stream)
+
+
+class GuardRailTest(CliTestCase):
+    def test_timeout_exits_124(self) -> None:
+        code, out, err = self._main_output("-p", "hi", "--output-format", "json",
+                                           "--timeout", "0.2", stub=_slow_model())
+        self.assertEqual(code, 124)
+        result = json.loads(out.splitlines()[-1])
+        self.assertEqual(result["subtype"], "timeout")
+        self.assertTrue(result["is_error"])
+        self.assertTrue(result["session_id"])
+
+    def test_tool_budget_exits_4_before_the_tool_runs(self) -> None:
+        code, out, err = self._main_output("-p", "run it", "--output-format", "json",
+                                           "--max-tool-calls", "0", tool="bash")
+        self.assertEqual(code, 4)
+        lines = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual(lines[-1]["subtype"], "max_tool_calls")
+        types = [line["type"] for line in lines]
+        self.assertIn("tool_use", types)  # the caller sees which call blew the budget
+        self.assertNotIn("tool_result", types)  # ... and that it never executed
+
+    def test_session_is_resumable_after_a_budget_stop(self) -> None:
+        self._main_output("-p", "run it", "--max-tool-calls", "0", tool="bash")
+        session = Session.list(self.cwd)[0]
+        code, out, err = self._main_output("-p", "again", "-c")
+        self.assertEqual(code, 0)
+        self.assertEqual([s.id for s in Session.list(self.cwd)], [session.id])
+
+    def test_timeout_without_print_is_rejected(self) -> None:
+        code, stderr = self._main_exit("--timeout", "5")
+        self.assertEqual(code, 2)
+        self.assertIn("only applies to --print", stderr)
+
+    def test_negative_tool_budget_is_rejected(self) -> None:
+        code, stderr = self._main_exit("-p", "hi", "--max-tool-calls", "-1")
+        self.assertEqual(code, 2)
+        self.assertIn("must be positive", stderr)
+
+    def test_zero_timeout_is_rejected(self) -> None:
+        code, stderr = self._main_exit("-p", "hi", "--timeout", "0")
+        self.assertEqual(code, 2)
+        self.assertIn("must be positive", stderr)
 
 
 class HeadlessRunTest(CliTestCase):
