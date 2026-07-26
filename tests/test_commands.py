@@ -1,14 +1,18 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic_ai.messages import ModelRequest, UserPromptPart
+
 from paimon import cli, commands
 from paimon.config import config_path
+from paimon.session import Session
 
 
 class CommandTestCase(unittest.TestCase):
@@ -119,6 +123,45 @@ class LoginTest(CommandTestCase):
         self.assertEqual(data["model"], "openai:gpt-5")
         self.assertEqual(data["api_key"], "sk-old")
         self.assertEqual(data["theme"], "dark")
+
+
+class SessionsTest(CommandTestCase):
+    def _make_session(self, text: str) -> Session:
+        session = Session.create(Path.cwd())
+        session.append_message(ModelRequest(parts=[UserPromptPart(content=text)]))
+        return session
+
+    def test_empty_json_is_an_empty_array(self) -> None:
+        code, out, err = self._run("sessions", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), [])
+
+    def test_empty_text_keeps_stdout_clean(self) -> None:
+        code, out, err = self._run("sessions")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("no sessions", err)
+
+    def test_json_lists_newest_first_with_preview(self) -> None:
+        older = self._make_session("first   question\nwith a newline")
+        newer = self._make_session("second question")
+        past = older.path.stat().st_mtime - 60
+        os.utime(older.path, (past, past))
+
+        code, out, err = self._run("sessions", "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual([entry["id"] for entry in payload], [newer.id, older.id])
+        self.assertEqual(payload[1]["preview"], "first question with a newline")
+        self.assertTrue(payload[0]["created_at"])
+        self.assertTrue(payload[0]["path"].endswith(".jsonl"))
+
+    def test_text_lists_short_ids(self) -> None:
+        session = self._make_session("hi")
+        code, out, err = self._run("sessions")
+        self.assertEqual(code, 0)
+        self.assertIn(session.id[:8], out)
+        self.assertIn("hi", out)
 
 
 class VersionTest(unittest.TestCase):

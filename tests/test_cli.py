@@ -108,6 +108,12 @@ class WebForwardingTest(CliTestCase):
         # be read as "run headless" and exit immediately.
         self.assertIn("--tui", self._serve_command("--web"))
 
+    def test_forwards_model_override(self) -> None:
+        self.assertIn("--model test:stub", self._serve_command("--web", "--model", "test:stub"))
+
+    def test_forwards_continue(self) -> None:
+        self.assertIn("--continue", self._serve_command("--web", "-c"))
+
 
 class TuiExitTest(CliTestCase):
     """The UI also has to tell the user how to get the conversation back."""
@@ -175,6 +181,16 @@ class HeadlessArgumentTest(CliTestCase):
         self.assertEqual(code, 1)
         self.assertIn("no session matching", stderr)
 
+    def test_continue_and_resume_conflict(self) -> None:
+        code, stderr = self._main_exit("-c", "-r", "abcd")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be combined", stderr)
+
+    def test_unqualified_model_is_a_usage_error(self) -> None:
+        code, stderr = self._main_exit("--model", "gpt-5")
+        self.assertEqual(code, 2)
+        self.assertIn("provider:model", stderr)
+
 
 class HeadlessRunTest(CliTestCase):
     def test_missing_model_exits_1_without_creating_a_session(self) -> None:
@@ -220,6 +236,28 @@ class HeadlessRunTest(CliTestCase):
         self.assertEqual(code, 0)
         self.assertEqual([s.id for s in Session.list(self.cwd)], [session.id])
         self.assertGreater(len(Session.list(self.cwd)[0].messages()), before)
+
+    def test_model_override_reaches_the_run_without_saving(self) -> None:
+        code, out, err = self._main_output("-p", "hi", "--output-format", "json",
+                                           "--model", "test:other")
+        self.assertEqual(code, 0)
+        init = json.loads(out.splitlines()[0])
+        self.assertEqual(init["model"], "test:other")
+
+    def test_continue_resumes_the_latest_session(self) -> None:
+        self._main_output("-p", "hi")
+        session = Session.list(self.cwd)[0]
+        before = len(session.messages())
+
+        code, out, err = self._main_output("-p", "again", "-c")
+        self.assertEqual(code, 0)
+        self.assertEqual([s.id for s in Session.list(self.cwd)], [session.id])
+        self.assertGreater(len(Session.list(self.cwd)[0].messages()), before)
+
+    def test_continue_without_sessions_exits_1(self) -> None:
+        code, out, err = self._main_output("-p", "hi", "-c")
+        self.assertEqual(code, 1)
+        self.assertIn("no session to continue", err)
 
     def test_busy_session_exits_1(self) -> None:
         session = self._session("abc11111-0000-0000-0000-000000000000")

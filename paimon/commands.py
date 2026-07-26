@@ -123,9 +123,42 @@ def login(argv: list) -> int:
     return 0
 
 
+def _preview(text: Optional[str], limit: int = 60) -> str:
+    line = " ".join((text or "").split())
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def sessions(argv: list) -> int:
+    """List the sessions of the current directory, newest first."""
+    parser = argparse.ArgumentParser(
+        prog="paimon sessions",
+        description="List resumable sessions in this directory, newest first.",
+    )
+    parser.add_argument("--json", action="store_true", help="one JSON array on stdout")
+    args = parser.parse_args(argv)
+
+    found = Session.list(Path.cwd())
+    if args.json:
+        print(json.dumps([{
+            "id": session.id,
+            "created_at": session.created_at(),
+            "preview": _preview(session.first_user_text()),
+            "path": str(session.path),
+        } for session in found], ensure_ascii=False))
+        return 0
+    if not found:
+        print("no sessions in this directory", file=sys.stderr)
+        return 0
+    for session in found:
+        created = session.created_at() or ""
+        print(f"{session.id[:8]}  {created:25}  {_preview(session.first_user_text())}".rstrip())
+    return 0
+
+
 # Dispatched by cli.main before its own parser runs; each entry takes the
 # remaining argv and returns the process exit code.
 REGISTRY = {
     "status": status,
     "login": login,
+    "sessions": sessions,
 }

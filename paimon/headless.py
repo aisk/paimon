@@ -353,10 +353,17 @@ def _relax_encoding() -> None:
 
 
 def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Session],
-        output_format: str = "text", config: Optional[Config] = None) -> int:
-    """Run one turn and return the process exit code."""
+        output_format: str = "text", config: Optional[Config] = None,
+        model: Optional[str] = None) -> int:
+    """Run one turn and return the process exit code.
+
+    ``model`` overrides the configured model for this run only; nothing is
+    written back to the config file.
+    """
     _relax_encoding()
     config = config or Config.load()
+    if model:
+        config.model = model
     renderer = _make_renderer(output_format, config)
 
     # Checked before constructing the Agent, which would otherwise create a
