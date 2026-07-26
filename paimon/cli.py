@@ -9,6 +9,8 @@ from . import commands
 from . import headless as headless_mode
 from .agent import Agent
 from .app import PaimonApp
+from .config import Config
+from .llm import split_model_string
 from .session import Session, SessionError, resume_hint
 
 
@@ -25,6 +27,13 @@ def _resolve_session(prefix: str) -> Session:
     raise CliError(f"ambiguous session id '{prefix}' ({len(matches)} matches)")
 
 
+def _latest_session() -> Session:
+    sessions = Session.list(Path.cwd())
+    if not sessions:
+        raise CliError("no session to continue in this directory")
+    return sessions[0]
+
+
 def main() -> None:
     # Subcommands are dispatched before the flag parser: they have their own
     # argument sets and none of the launch-mode logic below applies to them.
@@ -35,11 +44,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Paimon terminal code agent",
         epilog="commands: status (login state and configuration), "
-               "login (log in without the UI)",
+               "login (log in without the UI), sessions (list resumable sessions)",
     )
     parser.add_argument("-r", "--resume", nargs="?", const="", default=None, metavar="ID",
                         help="resume a session: with a session id prefix resume it directly, "
                              "without a value open a session picker")
+    parser.add_argument("-c", "--continue", dest="continue_latest", action="store_true",
+                        help="resume the most recent session in this directory")
+    parser.add_argument("--model", default=None, metavar="PROVIDER:NAME",
+                        help="model for this run only; the configured one is untouched")
     parser.add_argument("-p", "--print", nargs="?", const="", default=None, metavar="PROMPT",
                         dest="prompt",
                         help="run one turn without the UI and exit; with no value the prompt "
@@ -62,6 +75,14 @@ def main() -> None:
         print("エヘッてなんだよ！！")
         return
 
+    if args.continue_latest and args.resume is not None:
+        parser.error("--continue and --resume cannot be combined")
+    if args.model is not None:
+        try:
+            split_model_string(args.model)
+        except ValueError as exc:
+            parser.error(str(exc))
+
     # Decided before touching stdin so serving the UI never consumes a pipe.
     if args.web:
         if args.prompt is not None:
@@ -71,8 +92,12 @@ def main() -> None:
         flags = ["--tui"]
         if args.resume is not None:
             flags += ["--resume"] if args.resume == "" else ["--resume", args.resume]
+        if args.continue_latest:
+            flags += ["--continue"]
         if args.mode != "read":
             flags += ["--mode", args.mode]
+        if args.model:
+            flags += ["--model", args.model]
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
         Server(command, port=args.port).serve()
         return
@@ -85,7 +110,10 @@ def main() -> None:
         parser.error("--resume needs a session id with --print (the picker needs a terminal)")
 
     try:
-        resume_session = _resolve_session(args.resume) if args.resume else None
+        if args.continue_latest:
+            resume_session = _latest_session()
+        else:
+            resume_session = _resolve_session(args.resume) if args.resume else None
     except CliError as exc:
         if headless:
             sys.exit(headless_mode.fail(str(exc), args.output_format))
@@ -98,11 +126,15 @@ def main() -> None:
             parser.error("nothing to do: pass a prompt to --print or pipe one on stdin")
         sys.exit(headless_mode.run(
             prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
-            session=resume_session, output_format=args.output_format,
+            session=resume_session, output_format=args.output_format, model=args.model,
         ))
 
+    config = None
+    if args.model:
+        config = Config.load()
+        config.model = args.model
     try:
-        agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode)
+        agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config)
     except SessionError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)
