@@ -191,6 +191,28 @@ class SessionsTest(CommandTestCase):
         self.assertIn("hi", out)
 
 
+class InstallSkillTest(CommandTestCase):
+    def test_dest_overrides_the_target_directory(self) -> None:
+        dest = self.home / "anywhere"
+        code, out, err = self._run("install-skill", "--dest", str(dest))
+        self.assertEqual(code, 0)
+        content = (dest / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("name: paimon", content)
+        self.assertIn(str(dest / "SKILL.md"), out)
+
+    def test_default_target_is_claude(self) -> None:
+        with patch("paimon.commands.Path.home", return_value=self.home):
+            code, out, err = self._run("install-skill")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.home / ".claude" / "skills" / "paimon" / "SKILL.md").is_file())
+
+    def test_codex_target(self) -> None:
+        with patch("paimon.commands.Path.home", return_value=self.home):
+            code, out, err = self._run("install-skill", "--target", "codex")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.home / ".codex" / "skills" / "paimon" / "SKILL.md").is_file())
+
+
 class VersionTest(unittest.TestCase):
     def test_version_is_a_string(self) -> None:
         self.assertIsInstance(commands.version(), str)

@@ -21,9 +21,10 @@ build-backend = "setuptools.build_meta"
 packages = ["paimon"]
 
 [tool.setuptools.package-data]
-# The TUI stylesheet is loaded at runtime via PaimonApp.CSS_PATH, so the
-# wheel has to carry it alongside the modules.
-paimon = ["*.tcss"]
+# The TUI stylesheet is loaded at runtime via PaimonApp.CSS_PATH, and the
+# skill file is copied out by `paimon install-skill`, so the wheel has to
+# carry both alongside the modules.
+paimon = ["*.tcss", "skill/SKILL.md"]
 
 [tool.uv]
 package = true
