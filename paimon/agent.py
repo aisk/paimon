@@ -202,18 +202,27 @@ class Agent:
     @classmethod
     def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
              confirm: Optional[ConfirmFn] = None, mode: str = "read",
-             config: Optional[Config] = None) -> "Agent":
+             config: Optional[Config] = None,
+             append_system_prompt: Optional[str] = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
+
+        ``append_system_prompt`` is added to the end of a new session's system
+        prompt and persisted with it, so a resumed session keeps it. Resuming
+        with it set raises ``ValueError``: the persisted prompt is immutable.
 
         Raises ``SessionBusyError`` when another process holds the session and
         ``SessionIncompleteError`` when a resumed log has no system prompt
         snapshot — both ``SessionError``, and neither leaves a lock held.
         """
         cwd = Path(cwd or Path.cwd())
+        if session is not None and append_system_prompt:
+            raise ValueError("append_system_prompt only applies to a new session")
         if session is None:
             session = Session.create(cwd)
             session.lock()
             system_prompt = build_system_prompt(cwd)
+            if append_system_prompt:
+                system_prompt += f"\n\n{append_system_prompt.strip()}"
             session.append_system_prompt(system_prompt)
         else:
             session.lock()

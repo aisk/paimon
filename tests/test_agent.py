@@ -56,6 +56,32 @@ class AgentSystemPromptTest(unittest.TestCase):
             self.assertEqual(resumed.system_prompt, "snapshot")
             generate.assert_not_called()
 
+    def test_append_system_prompt_extends_a_new_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+
+            with (
+                patch("paimon.agent.Session.create", return_value=session),
+                patch("paimon.agent.build_system_prompt", return_value="base"),
+            ):
+                agent = Agent.open(cwd=cwd, config=_config(),
+                                   append_system_prompt="  You are a reviewer.  ")
+
+            self.assertEqual(agent.system_prompt, "base\n\nYou are a reviewer.")
+            self.assertEqual(session.system_prompt(), "base\n\nYou are a reviewer.")
+
+    def test_append_system_prompt_on_resume_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+
+            with self.assertRaisesRegex(ValueError, "new session"):
+                Agent.open(cwd=cwd, session=session, config=_config(),
+                           append_system_prompt="role")
+            self.assertEqual(session.system_prompt(), "snapshot")
+
     def test_session_without_snapshot_does_not_regenerate_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)

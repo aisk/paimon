@@ -39,6 +39,10 @@ paimon -p "fix the failing test in tests/test_foo.py" \
   permissive mode.
 - `--model provider:name` overrides the model for this run;
   `--profile NAME` switches to a separately configured account.
+- `--append-system-prompt "You are a code reviewer. Only report findings."`
+  adds a role definition on top of the base system prompt. New sessions only —
+  it is persisted with the session (resuming keeps the role), so combining it
+  with `-c`/`-r` is a usage error.
 - Pipe data in on stdin (`git diff | paimon -p "review this"`) and reference
   files as `@path/to/file` inside the prompt.
 

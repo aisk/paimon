@@ -68,6 +68,10 @@ def main() -> None:
                         help="with --print: give up after this many seconds (exit 124)")
     parser.add_argument("--max-tool-calls", type=int, default=None, metavar="N",
                         help="with --print: stop before the N+1th tool call (exit 4)")
+    parser.add_argument("--append-system-prompt", default=None, metavar="TEXT",
+                        help="with --print: add TEXT (e.g. a role definition) to the end of "
+                             "the new session's system prompt; persisted with the session, "
+                             "so not combinable with --continue/--resume")
     parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="read",
                         help="permission mode: read (confirm writes, commands and reads outside cwd), "
                              "edit (auto-approve edits in cwd), yolo (no confirmation)")
@@ -128,6 +132,14 @@ def main() -> None:
                 parser.error(f"{flag} only applies to --print")
             if value < 0 or (flag == "--timeout" and value == 0):
                 parser.error(f"{flag} must be positive")
+    if args.append_system_prompt is not None:
+        if not headless:
+            parser.error("--append-system-prompt only applies to --print")
+        if args.continue_latest or args.resume is not None:
+            parser.error("--append-system-prompt cannot be combined with --continue/--resume: "
+                         "the system prompt is persisted when the session is created")
+        if not args.append_system_prompt.strip():
+            parser.error("--append-system-prompt needs a non-empty value")
     if headless and args.resume == "":
         parser.error("--resume needs a session id with --print (the picker needs a terminal)")
 
@@ -150,6 +162,7 @@ def main() -> None:
             prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
             session=resume_session, output_format=args.output_format, model=args.model,
             timeout=args.timeout, max_tool_calls=args.max_tool_calls,
+            append_system_prompt=args.append_system_prompt,
         ))
 
     config = None

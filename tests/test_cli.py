@@ -198,6 +198,26 @@ class HeadlessArgumentTest(CliTestCase):
         self.assertEqual(code, 2)
         self.assertIn("invalid profile name", stderr)
 
+    def test_append_system_prompt_without_print_is_rejected(self) -> None:
+        code, stderr = self._main_exit("--append-system-prompt", "role")
+        self.assertEqual(code, 2)
+        self.assertIn("only applies to --print", stderr)
+
+    def test_append_system_prompt_with_continue_is_rejected(self) -> None:
+        code, stderr = self._main_exit("-p", "hi", "-c", "--append-system-prompt", "role")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be combined", stderr)
+
+    def test_append_system_prompt_with_resume_is_rejected(self) -> None:
+        code, stderr = self._main_exit("-p", "hi", "-r", "abcd", "--append-system-prompt", "role")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be combined", stderr)
+
+    def test_blank_append_system_prompt_is_rejected(self) -> None:
+        code, stderr = self._main_exit("-p", "hi", "--append-system-prompt", "   ")
+        self.assertEqual(code, 2)
+        self.assertIn("non-empty", stderr)
+
 
 def _slow_model() -> FunctionModel:
     async def stream(messages, info):
@@ -345,6 +365,17 @@ class HeadlessRunTest(CliTestCase):
             code, out, err = self._main_output("-p", "hi", "-r", "abc11111")
         self.assertEqual(code, 1)
         self.assertIn("already active", err)
+
+    def test_append_system_prompt_is_persisted_with_the_session(self) -> None:
+        code, out, err = self._main_output("-p", "hi", "--append-system-prompt", "Be a reviewer.")
+        self.assertEqual(code, 0)
+        session = Session.list(self.cwd)[0]
+        self.assertEqual(session.system_prompt(), "sys\n\nBe a reviewer.")
+
+        # A resume without the flag keeps the appended role.
+        code, out, err = self._main_output("-p", "again", "-c")
+        self.assertEqual(code, 0)
+        self.assertEqual(Session.list(self.cwd)[0].system_prompt(), "sys\n\nBe a reviewer.")
 
     def test_piped_stdin_without_print_becomes_the_prompt(self) -> None:
         self._set_stdin(tty=False, data="日志内容".encode())

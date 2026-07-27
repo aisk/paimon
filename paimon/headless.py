@@ -381,13 +381,15 @@ def _relax_encoding() -> None:
 def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Session],
         output_format: str = "text", config: Optional[Config] = None,
         model: Optional[str] = None, timeout: Optional[float] = None,
-        max_tool_calls: Optional[int] = None) -> int:
+        max_tool_calls: Optional[int] = None,
+        append_system_prompt: Optional[str] = None) -> int:
     """Run one turn and return the process exit code.
 
     ``model`` overrides the configured model for this run only; nothing is
     written back to the config file. ``timeout`` and ``max_tool_calls`` bound
     an unattended run; on either limit the partial turn is persisted and the
-    result names the limit that was hit.
+    result names the limit that was hit. ``append_system_prompt`` extends a new
+    session's system prompt (the CLI rejects it together with resume).
     """
     _relax_encoding()
     config = config or Config.load()
@@ -404,7 +406,8 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
 
     text = build_prompt(prompt, piped, cwd)
     try:
-        agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config)
+        agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
+                           append_system_prompt=append_system_prompt)
     except SessionError as exc:  # busy in another process, or no persisted system prompt
         renderer.begin()
         renderer.finish(subtype="error", error=str(exc))
