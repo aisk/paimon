@@ -11,7 +11,7 @@ from unittest.mock import patch
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from paimon import cli, commands
-from paimon.config import config_path
+from paimon.config import activate_profile, config_path
 from paimon.session import Session
 
 
@@ -26,6 +26,7 @@ class CommandTestCase(unittest.TestCase):
         })
         env.start()
         self.addCleanup(env.stop)
+        self.addCleanup(activate_profile, None)
 
     def _write_config(self, **data) -> None:
         path = config_path()
@@ -131,7 +132,7 @@ class ProfileTest(CommandTestCase):
             code, out, err = self._run("login", "--profile", "work", "--model",
                                        "openai:gpt-5", "--api-key-env", "WORK_KEY")
         self.assertEqual(code, 0)
-        profile_config = self.home / "config" / "profiles" / "work" / "config.json"
+        profile_config = self.home / "config" / "work" / "config.json"
         self.assertEqual(json.loads(profile_config.read_text())["api_key"], "sk-work")
 
         code, out, err = self._run("status", "--profile", "work", "--json")
@@ -150,6 +151,13 @@ class ProfileTest(CommandTestCase):
         code, out, err = self._run("status", "--profile", "../evil")
         self.assertEqual(code, 2)
         self.assertIn("invalid profile name", err)
+
+    def test_default_profile_lives_in_its_own_directory(self) -> None:
+        with patch.dict("os.environ", {"KEY": "sk-x"}):
+            code, out, err = self._run("login", "--model", "openai:gpt-5", "--api-key-env", "KEY")
+        self.assertEqual(code, 0)
+        path = self.home / "config" / "default" / "config.json"
+        self.assertEqual(json.loads(path.read_text())["model"], "openai:gpt-5")
 
 
 class SessionsTest(CommandTestCase):

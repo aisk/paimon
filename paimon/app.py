@@ -31,7 +31,8 @@ from .agent import (
     replay_events,
 )
 from . import compaction, tools
-from .login import LoginScreen, PickerScreen
+from .config import DEFAULT_PROFILE, Config, activate_profile, active_profile, list_profiles
+from .login import LoginScreen, PickerScreen, PromptScreen
 from .session import Session, SessionError
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
@@ -194,6 +195,11 @@ class PaimonApp(App):
                 "Login / switch provider",
                 "Reconfigure model, API base and API key",
                 self.action_login,
+            ),
+            SystemCommand(
+                "Switch profile",
+                "Use another profile's account and model, or create a new one",
+                self.action_switch_profile,
             ),
             SystemCommand(
                 "Toggle thinking display",
@@ -371,6 +377,52 @@ class PaimonApp(App):
 
         self.push_screen(LoginScreen(), _done)
 
+    # ---- profiles -----------------------------------------------------------
+
+    _NEW_PROFILE = "New profile…"
+
+    @work
+    async def action_switch_profile(self) -> None:
+        if self._turn is not None and self._turn.is_running:
+            self._add(Content.from_markup("[$text-muted]Busy — switch profiles after this turn[/]"))
+            return
+        current = active_profile()
+        labels = {f"{name} (current)" if name == current else name: name
+                  for name in list_profiles()}
+        choice = await self.push_screen_wait(
+            PickerScreen("Switch profile", [*labels, self._NEW_PROFILE]))
+        if choice == self._NEW_PROFILE:
+            choice = await self.push_screen_wait(PromptScreen("New profile name"))
+        # An unlisted typed name is accepted too: switching to a profile that
+        # does not exist yet is how one gets created.
+        name = labels.get(choice, choice) if choice else None
+        if name is None or name == current:
+            self.query_one(PromptInput).focus()
+            return
+        try:
+            activate_profile(name)
+        except ValueError as exc:
+            self._add(Content.from_markup("[$text-error b]Cannot switch:[/] $body", body=str(exc)))
+            self.query_one(PromptInput).focus()
+            return
+        previous_config = self.config
+        self.config = self.agent.config = Config.load()
+        if not self.config.model:
+            completed = await self.push_screen_wait(LoginScreen())
+            if not completed:
+                activate_profile(current)
+                self.config = self.agent.config = previous_config
+                self._add(Content.from_markup("[$text-muted]Profile switch cancelled[/]"))
+                self.query_one(PromptInput).focus()
+                return
+        if self.config.theme in self.available_themes:
+            self.theme = self.config.theme
+        self._add(Content.from_markup(
+            "[$text-success b]Profile:[/] $name  [$text-muted]$model[/]",
+            name=name, model=self.config.model or ""))
+        self._refresh_statusbar()
+        self.query_one(PromptInput).focus()
+
     # ---- rendering helpers --------------------------------------------------
 
     # The #log container is anchored once in on_mount: the compositor keeps an
@@ -443,6 +495,8 @@ class PaimonApp(App):
 
     def _refresh_statusbar(self, tokens: int | None = None) -> None:
         parts = [f"{self.mode} mode", self.config.model or "no model", f"session {self.agent.session.id[:8]}"]
+        if active_profile() != DEFAULT_PROFILE:
+            parts.insert(1, f"profile {active_profile()}")
         if tokens is not None:
             window = compaction.context_window(self.config.compaction_context_window)
             if window:

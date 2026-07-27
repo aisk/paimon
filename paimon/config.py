@@ -1,8 +1,10 @@
 """Model settings loaded from a JSON config file.
 
-File location: $PAIMON_CONFIG_HOME/config.json (default ~/.config/paimon/).
-The stored model/api_base/api_key are turned into a pydantic-ai model by
-paimon.llm; provider environment variables are the fallback when unset.
+$PAIMON_CONFIG_HOME (default ~/.config/paimon/) holds one directory per
+profile, each fully independent — model, key, theme, everything. The profile
+named "default" is used unless another one is activated. The stored
+model/api_base/api_key are turned into a pydantic-ai model by paimon.llm;
+provider environment variables are the fallback when unset.
 """
 
 import json
@@ -12,23 +14,51 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+DEFAULT_PROFILE = "default"
 
-def config_dir() -> Path:
+_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+
+# Module state rather than an environment variable so activation is
+# re-callable (the TUI switches profiles mid-run) and each cli entry point
+# can normalize it without a previous in-process run leaking through.
+_active_profile = DEFAULT_PROFILE
+
+
+def config_root() -> Path:
+    """The directory holding all profiles — not itself a profile."""
     override = os.environ.get("PAIMON_CONFIG_HOME")
     return Path(override) if override else Path.home() / ".config" / "paimon"
 
 
-def activate_profile(name: str) -> None:
-    """Point this process at a named profile for the rest of its lifetime.
+def active_profile() -> str:
+    return _active_profile
 
-    A profile is a fully independent config directory under profiles/ — model,
-    key, theme, everything. Routing through PAIMON_CONFIG_HOME means every
-    later config_dir() call and any spawned child (--web serves the UI from a
-    subprocess) sees the same choice without threading a parameter around.
+
+def activate_profile(name: Optional[str]) -> None:
+    """Select the profile that later Config.load()/save() calls use.
+
+    None means the default profile, so entry points can pass their --profile
+    value through unconditionally.
     """
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+    global _active_profile
+    name = name or DEFAULT_PROFILE
+    if not re.fullmatch(_NAME_PATTERN, name):
         raise ValueError(f"invalid profile name {name!r}")
-    os.environ["PAIMON_CONFIG_HOME"] = str(config_dir() / "profiles" / name)
+    _active_profile = name
+
+
+def list_profiles() -> list[str]:
+    """Profile names present on disk, always including the default."""
+    names = {DEFAULT_PROFILE}
+    root = config_root()
+    if root.is_dir():
+        names.update(entry.name for entry in root.iterdir()
+                     if entry.is_dir() and re.fullmatch(_NAME_PATTERN, entry.name))
+    return sorted(names)
+
+
+def config_dir() -> Path:
+    return config_root() / _active_profile
 
 
 def config_path() -> Path:

@@ -28,11 +28,12 @@ def _profile_option(parser: argparse.ArgumentParser) -> None:
 
 
 def _apply_profile(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.profile is not None:
-        try:
-            activate_profile(args.profile)
-        except ValueError as exc:
-            parser.error(str(exc))
+    # Called even when the flag is absent, so repeated in-process invocations
+    # never inherit a previous run's profile.
+    try:
+        activate_profile(args.profile)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def version() -> str:

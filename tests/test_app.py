@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -21,7 +23,7 @@ from textual.worker import WorkerState
 from helpers import SILENT_EVENTS, agent_events
 from paimon.agent import Agent, ReasoningDelta
 from paimon.app import PaimonApp, _EventRenderer, _session_label
-from paimon.config import Config
+from paimon.config import Config, activate_profile, active_profile
 from paimon.login import PickerScreen
 from paimon.session import Session
 from paimon.ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
@@ -37,6 +39,7 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
                                         "PAIMON_CONFIG_HOME": tmp.name})
         env.start()
         self.addCleanup(env.stop)
+        self.addCleanup(activate_profile, None)
 
     def make_app(self, *, session: Session | None = None, mode: str = "read",
                  config: Config | None = None, pick_session: bool = False) -> PaimonApp:
@@ -342,6 +345,53 @@ class QueueTest(AppTestCase):
             self.assertEqual(prompt.text, "queued later\nhalf-typed draft")
             self.assertFalse(app._queue)
             self.assertEqual(started, ["first message\n\nsecond message"], "cancel must not auto-submit")
+
+
+class ProfileSwitchTest(AppTestCase):
+    @staticmethod
+    def _write_profile(name: str, **data) -> None:
+        directory = Path(os.environ["PAIMON_CONFIG_HOME"]) / name
+        directory.mkdir(parents=True)
+        (directory / "config.json").write_text(json.dumps(data), encoding="utf-8")
+
+    async def test_switch_reloads_config_and_statusbar(self) -> None:
+        self._write_profile("work", model="test:work")
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.action_switch_profile()
+            await pilot.pause()
+            self.assertIsInstance(app.screen, PickerScreen)
+            app.screen.dismiss("work")
+            await pilot.pause()
+            self.assertEqual(active_profile(), "work")
+            self.assertEqual(app.config.model, "test:work")
+            self.assertIs(app.agent.config, app.config)
+            self.assertIn("profile work", str(app.query_one("#statusbar", Static).render()))
+
+    async def test_unconfigured_profile_opens_login_and_cancel_reverts(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.action_switch_profile()
+            await pilot.pause()
+            # An unlisted typed name switches to a not-yet-existing profile,
+            # which has no model, so the login flow opens. Cancel it.
+            app.screen.dismiss("fresh")
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(active_profile(), "default")
+            self.assertEqual(app.config.model, "test-model")
+            self.assertIs(app.agent.config, app.config)
+
+    async def test_noop_while_turn_is_running(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app._turn = SimpleNamespace(is_running=True)
+            app.action_switch_profile()
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, PickerScreen)
+            self.assertEqual(active_profile(), "default")
 
 
 if __name__ == "__main__":

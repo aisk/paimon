@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import cli
-from paimon.config import Config
+from paimon.config import Config, activate_profile
 from paimon.session import Session, _project_dir
 
 
@@ -24,6 +24,7 @@ class CliTestCase(unittest.TestCase):
         env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name})
         env.start()
         self.addCleanup(env.stop)
+        self.addCleanup(activate_profile, None)
         self.cwd = Path(tmp.name) / "project"
         self.cwd.mkdir()
         cwd = patch("paimon.cli.Path.cwd", return_value=self.cwd)
@@ -339,7 +340,7 @@ class HeadlessRunTest(CliTestCase):
 
     def test_profile_config_is_read_by_a_headless_run(self) -> None:
         config_home = self.cwd / "cfghome"
-        profile_config = config_home / "profiles" / "work" / "config.json"
+        profile_config = config_home / "work" / "config.json"
         profile_config.parent.mkdir(parents=True)
         profile_config.write_text(json.dumps({"model": "test:profile"}), encoding="utf-8")
 

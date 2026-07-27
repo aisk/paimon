@@ -90,13 +90,12 @@ def main() -> None:
 
     if args.continue_latest and args.resume is not None:
         parser.error("--continue and --resume cannot be combined")
-    if args.profile is not None:
-        # Routed through the environment, so the --web child inherits it
-        # without flag forwarding.
-        try:
-            activate_profile(args.profile)
-        except ValueError as exc:
-            parser.error(str(exc))
+    # Applied even without the flag, so repeated in-process invocations never
+    # inherit a previous run's profile.
+    try:
+        activate_profile(args.profile)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.model is not None:
         try:
             split_model_string(args.model)
@@ -118,6 +117,8 @@ def main() -> None:
             flags += ["--mode", args.mode]
         if args.model:
             flags += ["--model", args.model]
+        if args.profile:
+            flags += ["--profile", args.profile]
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
         Server(command, port=args.port).serve()
         return

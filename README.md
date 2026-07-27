@@ -22,9 +22,9 @@ Or run it without installing anything:
 uvx paimon
 ```
 
-The first launch asks for a provider, model, API base and key, and saves them to `~/.config/paimon/config.json`. Then just type what you want done.
+The first launch asks for a provider, model, API base and key, and saves them to `~/.config/paimon/default/config.json`. Then just type what you want done.
 
-While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider, new or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider or profile, new or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
 
 Write `@path/to/file` in a prompt to hand a file to the agent.
 
@@ -58,7 +58,7 @@ Everything above works without a terminal, so a code agent (Claude Code, Codex, 
 
 ## Configuration
 
-`~/.config/paimon/config.json` holds the model settings. Long conversations can be summarized in place near the context limit by adding:
+`~/.config/paimon/<name>/config.json` holds each profile's model settings (`default` unless `--profile` says otherwise). Long conversations can be summarized in place near the context limit by adding:
 
 ```json
 {
