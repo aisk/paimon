@@ -34,7 +34,8 @@ class Tool:
     one; it is None for tools the agent loop handles itself (write_todos).
     ``access`` drives gate(): "read" runs freely inside cwd, "write" is
     auto-approved inside cwd in edit mode, "execute" always needs
-    confirmation outside yolo, "none" is never gated.
+    confirmation outside yolo, "none" is never gated, "always" needs
+    confirmation even in yolo mode.
     """
 
     schema: dict
@@ -81,6 +82,8 @@ def _inside(path: Path, cwd: Path) -> bool:
 def gate(name: str, args: dict, mode: str, cwd: Path) -> str:
     """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm")."""
     tool = REGISTRY.get(name)
+    if tool is not None and tool.access == "always":
+        return "confirm"
     if mode == "yolo" or tool is None or tool.access == "none":
         return "allow"
     # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
@@ -382,6 +385,37 @@ REGISTRY: dict[str, Tool] = {
                         },
                     },
                     "required": ["todos"],
+                },
+            },
+        },
+    ),
+    # Stateful: ends the session, so the agent loop handles it.
+    "start_new_session": Tool(
+        run=None,
+        access="always",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "start_new_session",
+                "description": (
+                    "Hand off to a fresh session: end this one and start a new empty session "
+                    "whose first user message is your prompt. Use when most of the conversation "
+                    "so far is irrelevant to the next phase of work — a focused handoff prompt "
+                    "beats carrying a long history forward. The prompt must be self-contained: "
+                    "state the goal, key file paths, decisions already made, and current status; "
+                    "the new session has no memory of this one. Requires explicit user "
+                    "confirmation and only works in the interactive UI (always denied in "
+                    "non-interactive runs)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The first user message for the new session; must be self-contained.",
+                        },
+                    },
+                    "required": ["prompt"],
                 },
             },
         },

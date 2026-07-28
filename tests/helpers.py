@@ -17,6 +17,7 @@ EVENT_SAMPLES = {
     "ToolStart": ("call-1", "bash", {"command": "ls"}),
     "ToolEnd": ("call-1", "bash", "out"),
     "TodosUpdate": ([{"content": "a", "status": "pending"}],),
+    "SessionHandoff": ("do the next thing",),
     "TurnEnd": (),
     "ContextCompacted": (10, 5),
     "ContextCompactionFailed": ("boom",),
@@ -26,7 +27,7 @@ EVENT_SAMPLES = {
 }
 
 # Events a renderer may legitimately draw nothing for.
-SILENT_EVENTS = {"TurnEnd"}
+SILENT_EVENTS = {"TurnEnd", "SessionHandoff"}
 
 
 def agent_events() -> list[object]:

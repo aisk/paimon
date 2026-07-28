@@ -22,6 +22,7 @@ from .agent import (
     ContextCompacted,
     ModelRetry,
     ReasoningDelta,
+    SessionHandoff,
     TextDelta,
     TodosUpdate,
     ToolEnd,
@@ -33,7 +34,7 @@ from .agent import (
 from . import compaction, tools
 from .config import DEFAULT_PROFILE, Config, activate_profile, active_profile, list_profiles
 from .login import LoginScreen, PickerScreen, PromptScreen
-from .session import Session, SessionError
+from .session import Session, SessionError, resume_hint
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
 # All three markers are East Asian Width "narrow", so the labels stay aligned on
@@ -228,6 +229,7 @@ class PaimonApp(App):
         self._turn: Worker | None = None
         self._todo_panel: Static | None = None
         self._queue: list[str] = []
+        self._pending_handoff: str | None = None
         if self.config.theme in self.available_themes:
             self.theme = self.config.theme
         self._persist_theme_changes = True
@@ -562,7 +564,14 @@ class PaimonApp(App):
         just stopped.
         """
         done = (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED)
-        if event.worker is not self._turn or event.state not in done or not self._queue:
+        if event.worker is not self._turn or event.state not in done:
+            return
+        if self._pending_handoff is not None:
+            prompt, self._pending_handoff = self._pending_handoff, None
+            if event.state == WorkerState.SUCCESS:
+                self._complete_handoff(prompt)
+                return
+        if not self._queue:
             return
         text = "\n\n".join(self._queue)
         self._queue.clear()
@@ -574,6 +583,26 @@ class PaimonApp(App):
             prompt.move_cursor(prompt.document.end)
         else:
             self._start_turn(text)
+
+    def _complete_handoff(self, prompt: str) -> None:
+        """Switch to a fresh session and submit the approved handoff prompt.
+
+        Queued messages were typed against the old context, so they go back
+        to the input instead of being fired at the new session.
+        """
+        if self._queue:
+            text = "\n\n".join(self._queue)
+            self._queue.clear()
+            self._refresh_queued()
+            prompt_input = self.query_one(PromptInput)
+            draft = prompt_input.text
+            prompt_input.load_text(f"{text}\n{draft}" if draft else text)
+            prompt_input.move_cursor(prompt_input.document.end)
+        hint = resume_hint(self.agent.session.id)
+        self.action_new_session()
+        self._add(Content.from_markup(
+            "[$text-muted]Handed off — previous session: $hint[/]", hint=hint))
+        self._start_turn(prompt)
 
     def action_interrupt(self) -> None:
         if self._turn is not None and self._turn.is_running:
@@ -625,6 +654,11 @@ class PaimonApp(App):
                 elif isinstance(ev, ReasoningDelta):
                     # hidden reasoning has no visible stream, so the spinner stands in
                     set_state(None if self.config.show_reasoning else "thinking")
+                elif isinstance(ev, SessionHandoff):
+                    # the switch happens after this worker finishes, in
+                    # on_worker_state_changed, since action_new_session
+                    # refuses to run while a turn is in flight
+                    self._pending_handoff = ev.prompt
                 else:
                     set_state(None)
         except asyncio.CancelledError:

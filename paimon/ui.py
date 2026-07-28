@@ -265,4 +265,11 @@ class ConfirmPanel(Vertical, can_focus=True):
                 pattern=str(args.get("pattern") or ""),
                 path=str(args.get("path") or ""),
             )
+        if self.tool_name == "start_new_session":
+            # reviewing the full handoff prompt is the point of this confirmation,
+            # so clip far later than usual; the detail container scrolls
+            return Content.from_markup(
+                "[$text-muted]Ends this session and starts a fresh one with this first message:[/]\n\n$prompt",
+                prompt=self._clip(str(args.get("prompt") or ""), 5_000),
+            )
         return Content(self._clip(json.dumps(args, ensure_ascii=False)))

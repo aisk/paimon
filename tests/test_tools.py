@@ -41,6 +41,10 @@ class GateTest(unittest.TestCase):
             self.assertEqual(gate("write_todos", {"todos": []}, mode, self.cwd), "allow")
         self.assertEqual(gate("read_file", {}, "read", self.cwd), "allow")
 
+    def test_start_new_session_always_confirms(self) -> None:
+        for mode in MODES:
+            self.assertEqual(gate("start_new_session", {"prompt": "x"}, mode, self.cwd), "confirm")
+
 
 class RunToolTest(unittest.IsolatedAsyncioTestCase):
     """run_tool is the enforcement point: gating cannot be bypassed by omitting the hook."""

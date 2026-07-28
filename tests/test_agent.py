@@ -19,10 +19,12 @@ from paimon.agent import (
     Agent,
     CompactionNotice,
     ReasoningDelta,
+    SessionHandoff,
     TextDelta,
     TodosUpdate,
     ToolEnd,
     ToolStart,
+    TurnEnd,
     UserInput,
     replay_events,
 )
@@ -178,6 +180,83 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             todos = next(e for e in events if isinstance(e, TodosUpdate))
             self.assertEqual(todos.todos, [{"content": "x", "status": "pending"}])
             self.assertEqual(agent.todos, todos.todos)
+
+
+class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
+    """start_new_session ends the turn on approval without another model
+    request; without a confirm hook it is denied even in yolo mode."""
+
+    @staticmethod
+    def _agent(cwd: Path, **kwargs) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        return Agent.open(cwd=cwd, session=session, config=_config(), **kwargs)
+
+    @staticmethod
+    async def _run(agent: Agent, arguments: str = '{"prompt": "next phase"}') -> list:
+        with patch("paimon.agent.build_model",
+                   return_value=stub_model("start_new_session", arguments)):
+            return [event async for event in agent.run("go")]
+
+    async def test_approval_ends_the_turn_with_a_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            confirm = AsyncMock(return_value=True)
+            agent = self._agent(cwd, confirm=confirm, mode="yolo")
+
+            events = await self._run(agent)
+
+            confirm.assert_awaited_once()
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertFalse(end.denied)
+            self.assertIsInstance(events[-1], SessionHandoff)
+            self.assertEqual(events[-1].prompt, "next phase")
+            self.assertFalse([e for e in events if isinstance(e, (TurnEnd, TextDelta))],
+                             "no second model request after the handoff")
+            returns = [part for message in agent.session.messages()
+                       if isinstance(message, ModelRequest)
+                       for part in message.parts if isinstance(part, ToolReturnPart)]
+            self.assertIn("Handoff accepted", returns[-1].content)
+
+    async def test_denial_continues_the_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            confirm = AsyncMock(return_value=False)
+            agent = self._agent(cwd, confirm=confirm, mode="read")
+
+            events = await self._run(agent)
+
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertTrue(end.denied)
+            self.assertFalse([e for e in events if isinstance(e, SessionHandoff)])
+            self.assertTrue([e for e in events if isinstance(e, TextDelta)])
+            self.assertIsInstance(events[-1], TurnEnd)
+
+    async def test_without_confirm_hook_denied_even_in_yolo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            agent = self._agent(cwd, mode="yolo")
+
+            events = await self._run(agent)
+
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertTrue(end.denied)
+            self.assertFalse([e for e in events if isinstance(e, SessionHandoff)])
+            self.assertIsInstance(events[-1], TurnEnd)
+
+    async def test_empty_prompt_is_an_error_without_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            confirm = AsyncMock(return_value=True)
+            agent = self._agent(cwd, confirm=confirm, mode="read")
+
+            events = await self._run(agent, '{"prompt": "  "}')
+
+            confirm.assert_not_awaited()
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertIn("prompt is required", end.result)
+            self.assertFalse([e for e in events if isinstance(e, SessionHandoff)])
+            self.assertIsInstance(events[-1], TurnEnd)
 
 
 class ReplayEventsTest(unittest.TestCase):

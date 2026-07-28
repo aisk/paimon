@@ -71,6 +71,16 @@ class TodosUpdate:
 
 
 @dataclass
+class SessionHandoff:
+    """The user approved start_new_session: the turn ends here and the UI
+    should open a fresh session whose first user message is ``prompt``.
+    Never fires without a confirm hook (headless), where the call is denied.
+    """
+
+    prompt: str
+
+
+@dataclass
 class TurnEnd:
     pass
 
@@ -406,6 +416,37 @@ class Agent:
                     self._replace_message(record_id, tool_request)
                     yield TodosUpdate(list(self.todos))
                     continue
+
+                # start_new_session ends this turn instead of running a tool,
+                # so it is handled here. On approval the generator returns
+                # without another model request: the whole point is to stop
+                # spending tokens on this history. The result is still written
+                # into its pre-seeded slot first, so the session stays valid
+                # and resumable. Any later calls in the same response keep
+                # their "Interrupted by user." placeholders.
+                if name == "start_new_session":
+                    yield ToolStart(call.tool_call_id, name, args)
+                    prompt_text = str(args.get("prompt") or "").strip()
+                    if not prompt_text:
+                        slot.content = "Error: prompt is required."
+                        self._replace_message(record_id, tool_request)
+                        yield ToolEnd(call.tool_call_id, name, slot.content)
+                        continue
+                    needs_confirm = tools.gate(name, args, self.mode, self.cwd) == "confirm"
+                    allowed = not needs_confirm or (
+                        await self.confirm(name, args) if self.confirm else False
+                    )
+                    if not allowed:
+                        slot.content = "User denied this operation."
+                        self._replace_message(record_id, tool_request)
+                        yield ToolEnd(call.tool_call_id, name, slot.content, denied=True)
+                        continue
+                    slot.content = ("Handoff accepted: this session ended here and a new "
+                                    "session continued with the provided prompt.")
+                    self._replace_message(record_id, tool_request)
+                    yield ToolEnd(call.tool_call_id, name, slot.content)
+                    yield SessionHandoff(prompt_text)
+                    return
 
                 yield ToolStart(call.tool_call_id, name, args)
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode, self.confirm)
