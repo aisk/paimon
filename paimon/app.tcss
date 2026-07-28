@@ -3,18 +3,21 @@
 Screen { background: $background; }
 #workspace { height: 1fr; margin: 1 2; }
 
-/* ---- conversation log ---- */
-
-#log {
-    height: 1fr;
-    padding: 0 1 1 1;
-    scrollbar-gutter: stable;
+* {
     scrollbar-size-vertical: 1;
     scrollbar-background: transparent;
     scrollbar-background-hover: transparent;
     scrollbar-color: $primary 55%;
     scrollbar-color-hover: $primary;
     scrollbar-color-active: $primary;
+}
+
+/* ---- conversation log ---- */
+
+#log {
+    height: 1fr;
+    padding: 0 1 1 1;
+    scrollbar-gutter: stable;
 }
 #log > * { margin-bottom: 1; }
 .assistant { padding: 0 1; }
