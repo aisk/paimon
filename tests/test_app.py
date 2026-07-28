@@ -23,7 +23,7 @@ from textual.worker import WorkerState
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon.agent import Agent, ReasoningDelta
 from paimon.app import PaimonApp, _EventRenderer, _session_label
-from paimon.config import Config, activate_profile, active_profile
+from paimon.config import Config
 from paimon.login import PickerScreen
 from paimon.session import Session
 from paimon.ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
@@ -39,7 +39,6 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
                                         "PAIMON_CONFIG_HOME": tmp.name})
         env.start()
         self.addCleanup(env.stop)
-        self.addCleanup(activate_profile, None)
 
     def make_app(self, *, session: Session | None = None, mode: str = "read",
                  config: Config | None = None, pick_session: bool = False) -> PaimonApp:
@@ -463,7 +462,7 @@ class ProfileSwitchTest(AppTestCase):
             self.assertIsInstance(app.screen, PickerScreen)
             app.screen.dismiss("work")
             await pilot.pause()
-            self.assertEqual(active_profile(), "work")
+            self.assertEqual(app.config.profile, "work")
             self.assertEqual(app.config.model, "test:work")
             self.assertIs(app.agent.config, app.config)
             self.assertIn("profile work", str(app.query_one("#statusbar", Static).render()))
@@ -480,7 +479,7 @@ class ProfileSwitchTest(AppTestCase):
             await pilot.pause()
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(active_profile(), "default")
+            self.assertEqual(app.config.profile, "default")
             self.assertEqual(app.config.model, "test-model")
             self.assertIs(app.agent.config, app.config)
 
@@ -491,7 +490,7 @@ class ProfileSwitchTest(AppTestCase):
             app.action_switch_profile()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
-            self.assertEqual(active_profile(), "default")
+            self.assertEqual(app.config.profile, "default")
 
 
 if __name__ == "__main__":

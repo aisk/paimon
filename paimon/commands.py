@@ -17,7 +17,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
-from .config import Config, activate_profile, config_path
+from .config import Config, config_path, validate_profile
 from .llm import is_provider_available, split_model_string
 from .session import Session
 
@@ -27,11 +27,9 @@ def _profile_option(parser: argparse.ArgumentParser) -> None:
                         help="use this named profile's configuration")
 
 
-def _apply_profile(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    # Called even when the flag is absent, so repeated in-process invocations
-    # never inherit a previous run's profile.
+def _resolve_profile(parser: argparse.ArgumentParser, args: argparse.Namespace) -> str:
     try:
-        activate_profile(args.profile)
+        return validate_profile(args.profile)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -53,9 +51,9 @@ def status(argv: list) -> int:
     parser.add_argument("--json", action="store_true", help="one JSON object on stdout")
     _profile_option(parser)
     args = parser.parse_args(argv)
-    _apply_profile(parser, args)
+    profile = _resolve_profile(parser, args)
 
-    config = Config.load()
+    config = Config.load(profile)
     logged_in = bool(config.model)
     if args.json:
         # The api_key itself is deliberately absent: status output is meant
@@ -66,7 +64,7 @@ def status(argv: list) -> int:
             "model": config.model,
             "api_base": config.api_base,
             "api_key_set": bool(config.api_key),
-            "config_path": str(config_path()),
+            "config_path": str(config_path(profile)),
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
     elif logged_in:
@@ -75,7 +73,7 @@ def status(argv: list) -> int:
         print(f"model: {config.model} ({key_note})")
         if config.api_base:
             print(f"api base: {config.api_base}")
-        print(f"config: {config_path()}")
+        print(f"config: {config_path(profile)}")
         print(f"sessions here: {len(Session.list(Path.cwd()))}")
     else:
         print(f"paimon {version()}")
@@ -125,7 +123,7 @@ def login(argv: list) -> int:
                             help="read the API key from stdin")
     _profile_option(parser)
     args = parser.parse_args(argv)
-    _apply_profile(parser, args)
+    profile = _resolve_profile(parser, args)
 
     try:
         provider, _ = split_model_string(args.model)
@@ -136,7 +134,7 @@ def login(argv: list) -> int:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
 
-    Config.load().save(model=args.model, api_base=args.api_base, api_key=api_key)
+    Config.load(profile).save(model=args.model, api_base=args.api_base, api_key=api_key)
     print(f"logged in: {args.model}")
     return 0
 

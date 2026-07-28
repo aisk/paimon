@@ -32,7 +32,7 @@ from .agent import (
     replay_events,
 )
 from . import compaction, tools
-from .config import DEFAULT_PROFILE, Config, activate_profile, active_profile, list_profiles
+from .config import DEFAULT_PROFILE, Config, list_profiles
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .session import Session, SessionError, resume_hint
 from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
@@ -388,7 +388,7 @@ class PaimonApp(App):
         if self._turn is not None and self._turn.is_running:
             self._add(Content.from_markup("[$text-muted]Busy — switch profiles after this turn[/]"))
             return
-        current = active_profile()
+        current = self.config.profile
         labels = {f"{name} (current)" if name == current else name: name
                   for name in list_profiles()}
         choice = await self.push_screen_wait(
@@ -402,17 +402,16 @@ class PaimonApp(App):
             self.query_one(PromptInput).focus()
             return
         try:
-            activate_profile(name)
+            switched = Config.load(name)
         except ValueError as exc:
             self._add(Content.from_markup("[$text-error b]Cannot switch:[/] $body", body=str(exc)))
             self.query_one(PromptInput).focus()
             return
         previous_config = self.config
-        self.config = self.agent.config = Config.load()
+        self.config = self.agent.config = switched
         if not self.config.model:
             completed = await self.push_screen_wait(LoginScreen())
             if not completed:
-                activate_profile(current)
                 self.config = self.agent.config = previous_config
                 self._add(Content.from_markup("[$text-muted]Profile switch cancelled[/]"))
                 self.query_one(PromptInput).focus()
@@ -497,8 +496,8 @@ class PaimonApp(App):
 
     def _refresh_statusbar(self, tokens: int | None = None) -> None:
         parts = [f"{self.mode} mode", self.config.model or "no model", f"session {self.agent.session.id[:8]}"]
-        if active_profile() != DEFAULT_PROFILE:
-            parts.insert(1, f"profile {active_profile()}")
+        if self.config.profile != DEFAULT_PROFILE:
+            parts.insert(1, f"profile {self.config.profile}")
         if tokens is not None:
             window = compaction.context_window(self.config.compaction_context_window)
             if window:
@@ -511,7 +510,7 @@ class PaimonApp(App):
     async def _update_statusbar_tokens(self) -> None:
         # Token counting walks the whole history; keep it off the UI loop.
         tokens = await asyncio.to_thread(
-            compaction.count_tokens, list(self.agent.history), tools.TOOLS
+            compaction.count_tokens, list(self.agent.history), self.agent.tool_schemas
         )
         self._refresh_statusbar(tokens)
 

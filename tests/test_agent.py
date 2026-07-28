@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from helpers import make_session, stub_model
+from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -14,7 +15,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from paimon import compaction
+from paimon import compaction, tools
 from paimon.agent import (
     Agent,
     CompactionNotice,
@@ -180,6 +181,40 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             todos = next(e for e in events if isinstance(e, TodosUpdate))
             self.assertEqual(todos.todos, [{"content": "x", "status": "pending"}])
             self.assertEqual(agent.todos, todos.todos)
+
+
+class AgentToolsetTest(unittest.IsolatedAsyncioTestCase):
+    """A per-agent toolset narrows both what the model sees and what may run."""
+
+    async def test_only_the_toolset_is_offered_and_runnable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config(), mode="yolo",
+                               toolset={"read_file": tools.REGISTRY["read_file"]})
+
+            offered: list[list[str]] = []
+            requests = 0
+
+            async def stream(messages, info):
+                nonlocal requests
+                requests += 1
+                offered.append([tool.name for tool in info.function_tools])
+                if requests == 1:
+                    yield {0: DeltaToolCall(name="bash", json_args='{"command": "echo hi"}',
+                                            tool_call_id="call-1")}
+                else:
+                    yield "done"
+
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                events = [event async for event in agent.run("go")]
+
+            self.assertEqual(offered[0], ["read_file"])
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertIn("unknown tool", end.result)
+            self.assertIsInstance(events[-1], TurnEnd)
 
 
 class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):

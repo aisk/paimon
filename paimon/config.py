@@ -18,11 +18,6 @@ DEFAULT_PROFILE = "default"
 
 _NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 
-# Module state rather than an environment variable so activation is
-# re-callable (the TUI switches profiles mid-run) and each cli entry point
-# can normalize it without a previous in-process run leaking through.
-_active_profile = DEFAULT_PROFILE
-
 
 def config_root() -> Path:
     """The directory holding all profiles — not itself a profile."""
@@ -30,21 +25,15 @@ def config_root() -> Path:
     return Path(override) if override else Path.home() / ".config" / "paimon"
 
 
-def active_profile() -> str:
-    return _active_profile
+def validate_profile(name: Optional[str]) -> str:
+    """Normalize a --profile value: None means the default profile.
 
-
-def activate_profile(name: Optional[str]) -> None:
-    """Select the profile that later Config.load()/save() calls use.
-
-    None means the default profile, so entry points can pass their --profile
-    value through unconditionally.
+    Raises ValueError on a name that could escape the config root.
     """
-    global _active_profile
     name = name or DEFAULT_PROFILE
     if not re.fullmatch(_NAME_PATTERN, name):
         raise ValueError(f"invalid profile name {name!r}")
-    _active_profile = name
+    return name
 
 
 def list_profiles() -> list[str]:
@@ -57,16 +46,15 @@ def list_profiles() -> list[str]:
     return sorted(names)
 
 
-def config_dir() -> Path:
-    return config_root() / _active_profile
+def config_dir(profile: str = DEFAULT_PROFILE) -> Path:
+    return config_root() / profile
 
 
-def config_path() -> Path:
-    return config_dir() / "config.json"
+def config_path(profile: str = DEFAULT_PROFILE) -> Path:
+    return config_dir(profile) / "config.json"
 
 
-def _load_file_config() -> dict:
-    path = config_path()
+def _load_file_config(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
@@ -78,8 +66,14 @@ def _load_file_config() -> dict:
 
 @dataclass
 class Config:
-    """Settings owned by whoever constructed them — no module-level state."""
+    """Settings owned by whoever constructed them — no module-level state.
 
+    ``profile`` names the config directory this instance was loaded from and
+    is where ``save()`` writes back, so concurrent Config instances bound to
+    different profiles never interfere.
+    """
+
+    profile: str = DEFAULT_PROFILE
     model: Optional[str] = None
     api_base: Optional[str] = None
     api_key: Optional[str] = None
@@ -93,10 +87,16 @@ class Config:
     compaction_context_window: Optional[int] = None
 
     @classmethod
-    def load(cls) -> "Config":
-        data = _load_file_config()
+    def load(cls, profile: Optional[str] = None) -> "Config":
+        """Load the named profile's settings (None means the default profile).
+
+        Raises ValueError on an invalid profile name.
+        """
+        profile = validate_profile(profile)
+        data = _load_file_config(config_path(profile))
         compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
         return cls(
+            profile=profile,
             model=data.get("model"),
             api_base=data.get("api_base"),
             api_key=data.get("api_key"),
@@ -120,14 +120,14 @@ class Config:
 
         Other fields already in the file are preserved.
         """
-        data = _load_file_config()
+        path = config_path(self.profile)
+        data = _load_file_config(path)
         for key, value in (("model", model), ("api_base", api_base),
                            ("api_key", api_key), ("theme", theme),
                            ("show_reasoning", show_reasoning)):
             if value is not None:
                 data[key] = value
 
-        path = config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(data, indent=2, ensure_ascii=False)
         # The file may hold an API key: create it private, repair old copies.

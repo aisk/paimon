@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import cli
-from paimon.config import Config, activate_profile
+from paimon.config import Config
 from paimon.session import Session, _project_dir
 
 
@@ -24,7 +24,6 @@ class CliTestCase(unittest.TestCase):
         env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name})
         env.start()
         self.addCleanup(env.stop)
-        self.addCleanup(activate_profile, None)
         self.cwd = Path(tmp.name) / "project"
         self.cwd.mkdir()
         cwd = patch("paimon.cli.Path.cwd", return_value=self.cwd)

@@ -198,7 +198,8 @@ class Agent:
 
     def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
                  confirm: Optional[ConfirmFn] = None, mode: str = "read",
-                 config: Optional[Config] = None):
+                 config: Optional[Config] = None,
+                 toolset: Optional[dict[str, tools.Tool]] = None):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
         self.mode = mode
@@ -207,13 +208,18 @@ class Agent:
         self.session = session
         self.system_prompt = system_prompt
         self.history: list[ModelMessage] = session.messages()
+        # This agent's tool set; None means everything in tools.REGISTRY.
+        self.toolset = dict(tools.REGISTRY if toolset is None else toolset)
+        self.tool_schemas = tools.schemas(self.toolset)
+        self._tool_definitions = tools.definitions(self.toolset)
         self._cached_model: Optional[tuple[tuple, Model]] = None
 
     @classmethod
     def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
              confirm: Optional[ConfirmFn] = None, mode: str = "read",
              config: Optional[Config] = None,
-             append_system_prompt: Optional[str] = None) -> "Agent":
+             append_system_prompt: Optional[str] = None,
+             toolset: Optional[dict[str, tools.Tool]] = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
 
         ``append_system_prompt`` is added to the end of a new session's system
@@ -240,7 +246,8 @@ class Agent:
             if system_prompt is None:
                 session.unlock()
                 raise SessionIncompleteError("Session does not contain a persisted system prompt")
-        return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode, config=config)
+        return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
+                   config=config, toolset=toolset)
 
     def _model(self) -> Model:
         """The configured model, rebuilt when login changes the config."""
@@ -275,18 +282,18 @@ class Agent:
             if not self.config.compaction_enabled:
                 return None
             window = compaction.context_window(self.config.compaction_context_window)
-            tokens_before = compaction.count_tokens(self.history, tools.TOOLS)
+            tokens_before = compaction.count_tokens(self.history, self.tool_schemas)
             if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
                 return None
         else:
-            tokens_before = compaction.count_tokens(self.history, tools.TOOLS)
+            tokens_before = compaction.count_tokens(self.history, self.tool_schemas)
 
         result = await compaction.compact(
             self.history,
             model=self._model(),
             keep_recent_tokens=self.config.compaction_keep_recent_tokens,
             tokens_before=tokens_before,
-            tool_schemas=tools.TOOLS,
+            tool_schemas=self.tool_schemas,
         )
         if result is None:
             return None
@@ -295,7 +302,7 @@ class Agent:
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.history = result.messages
-        result.tokens_after = compaction.count_tokens(self.history, tools.TOOLS)
+        result.tokens_after = compaction.count_tokens(self.history, self.tool_schemas)
         return result
 
     async def compact_now(self) -> Optional[compaction.CompactionResult]:
@@ -330,7 +337,7 @@ class Agent:
                 *_strip_foreign_thinking(self.history, model),
             ]
             parameters = ModelRequestParameters(
-                function_tools=tools.TOOL_DEFINITIONS, allow_text_output=True
+                function_tools=self._tool_definitions, allow_text_output=True
             )
 
             content = ""  # accumulated text, kept if the stream is interrupted
@@ -404,6 +411,16 @@ class Agent:
                 args = _parse_args(call.args)
                 name = call.tool_name
 
+                # A name outside this agent's tool set is rejected before the
+                # special-cased tools below, so excluding write_todos or
+                # start_new_session from a toolset actually disables them.
+                if name not in self.toolset:
+                    yield ToolStart(call.tool_call_id, name, args)
+                    slot.content = f"Error: unknown tool {name!r}"
+                    self._replace_message(record_id, tool_request)
+                    yield ToolEnd(call.tool_call_id, name, slot.content)
+                    continue
+
                 # write_todos mutates agent-held state rather than the filesystem,
                 # so it is handled here instead of in the stateless execute_tool.
                 # It reports itself as TodosUpdate alone — no ToolStart/ToolEnd —
@@ -432,7 +449,8 @@ class Agent:
                         self._replace_message(record_id, tool_request)
                         yield ToolEnd(call.tool_call_id, name, slot.content)
                         continue
-                    needs_confirm = tools.gate(name, args, self.mode, self.cwd) == "confirm"
+                    needs_confirm = tools.gate(name, args, self.mode, self.cwd,
+                                               self.toolset) == "confirm"
                     allowed = not needs_confirm or (
                         await self.confirm(name, args) if self.confirm else False
                     )
@@ -449,7 +467,8 @@ class Agent:
                     return
 
                 yield ToolStart(call.tool_call_id, name, args)
-                result, denied = await tools.run_tool(name, args, self.cwd, self.mode, self.confirm)
+                result, denied = await tools.run_tool(name, args, self.cwd, self.mode,
+                                                      self.confirm, self.toolset)
 
                 slot.content = result
                 self._replace_message(record_id, tool_request)

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from paimon import cli, commands
-from paimon.config import activate_profile, config_path
+from paimon.config import config_path
 from paimon.session import Session
 
 
@@ -26,7 +26,6 @@ class CommandTestCase(unittest.TestCase):
         })
         env.start()
         self.addCleanup(env.stop)
-        self.addCleanup(activate_profile, None)
 
     def _write_config(self, **data) -> None:
         path = config_path()

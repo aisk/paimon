@@ -79,9 +79,10 @@ def _inside(path: Path, cwd: Path) -> bool:
         return False
 
 
-def gate(name: str, args: dict, mode: str, cwd: Path) -> str:
+def gate(name: str, args: dict, mode: str, cwd: Path,
+         registry: Optional[dict[str, Tool]] = None) -> str:
     """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm")."""
-    tool = REGISTRY.get(name)
+    tool = (REGISTRY if registry is None else registry).get(name)
     if tool is not None and tool.access == "always":
         return "confirm"
     if mode == "yolo" or tool is None or tool.access == "none":
@@ -96,18 +97,20 @@ def gate(name: str, args: dict, mode: str, cwd: Path) -> str:
 
 
 async def run_tool(name: str, args: dict, cwd: Path, mode: str,
-                   confirm: Optional[ConfirmFn] = None) -> tuple[str, bool]:
+                   confirm: Optional[ConfirmFn] = None,
+                   registry: Optional[dict[str, Tool]] = None) -> tuple[str, bool]:
     """Gate, optionally confirm, then execute a tool call.
 
     Returns ``(result, denied)``. This is the enforcement point: a call that
     needs confirmation is denied when no confirm hook is available, so a
-    headless Agent cannot bypass the permission mode.
+    headless Agent cannot bypass the permission mode. ``registry`` narrows the
+    available tools (an agent's own set); None means the full REGISTRY.
     """
-    if gate(name, args, mode, cwd) == "confirm":
+    if gate(name, args, mode, cwd, registry) == "confirm":
         allowed = await confirm(name, args) if confirm else False
         if not allowed:
             return "User denied this operation.", True
-    return await execute_tool(name, args, cwd, mode=mode), False
+    return await execute_tool(name, args, cwd, mode=mode, registry=registry), False
 
 
 def _read_file(args: dict, cwd: Path) -> str:
@@ -239,9 +242,10 @@ async def _bash(args: dict, cwd: Path) -> str:
     return f"{out}\n{status}" if out.strip() else status
 
 
-async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo") -> str:
+async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
+                       registry: Optional[dict[str, Tool]] = None) -> str:
     """Run a registered tool. Always returns a string for the model."""
-    tool = REGISTRY.get(name)
+    tool = (REGISTRY if registry is None else registry).get(name)
     if tool is None or tool.run is None:
         return f"Error: unknown tool {name!r}"
     try:
@@ -422,15 +426,23 @@ REGISTRY: dict[str, Tool] = {
     ),
 }
 
-# The schema list sent with every model request, in registry order.
-TOOLS = [tool.schema for tool in REGISTRY.values()]
+def schemas(registry: dict[str, Tool]) -> list[dict]:
+    """The OpenAI-style schema list for a registry, in registry order."""
+    return [tool.schema for tool in registry.values()]
 
-# The same schemas as pydantic-ai tool definitions.
-TOOL_DEFINITIONS = [
-    ToolDefinition(
-        name=schema["function"]["name"],
-        description=schema["function"]["description"],
-        parameters_json_schema=schema["function"]["parameters"],
-    )
-    for schema in TOOLS
-]
+
+def definitions(registry: dict[str, Tool]) -> list[ToolDefinition]:
+    """The same schemas as pydantic-ai tool definitions."""
+    return [
+        ToolDefinition(
+            name=tool.schema["function"]["name"],
+            description=tool.schema["function"]["description"],
+            parameters_json_schema=tool.schema["function"]["parameters"],
+        )
+        for tool in registry.values()
+    ]
+
+
+# The full tool set, for callers that do not narrow it per agent.
+TOOLS = schemas(REGISTRY)
+TOOL_DEFINITIONS = definitions(REGISTRY)

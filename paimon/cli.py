@@ -9,7 +9,7 @@ from . import commands
 from . import headless as headless_mode
 from .agent import Agent
 from .app import PaimonApp
-from .config import Config, activate_profile
+from .config import Config
 from .llm import split_model_string
 from .session import Session, SessionError, resume_hint
 
@@ -90,10 +90,10 @@ def main() -> None:
 
     if args.continue_latest and args.resume is not None:
         parser.error("--continue and --resume cannot be combined")
-    # Applied even without the flag, so repeated in-process invocations never
-    # inherit a previous run's profile.
+    # Loaded here, once: the profile is a property of this Config instance,
+    # so everything downstream just carries the instance.
     try:
-        activate_profile(args.profile)
+        config = Config.load(args.profile)
     except ValueError as exc:
         parser.error(str(exc))
     if args.model is not None:
@@ -161,14 +161,12 @@ def main() -> None:
             parser.error("nothing to do: pass a prompt to --print or pipe one on stdin")
         sys.exit(headless_mode.run(
             prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
-            session=resume_session, output_format=args.output_format, model=args.model,
-            timeout=args.timeout, max_tool_calls=args.max_tool_calls,
+            session=resume_session, output_format=args.output_format, config=config,
+            model=args.model, timeout=args.timeout, max_tool_calls=args.max_tool_calls,
             append_system_prompt=args.append_system_prompt,
         ))
 
-    config = None
     if args.model:
-        config = Config.load()
         config.model = args.model
     try:
         agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config)
