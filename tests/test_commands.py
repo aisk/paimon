@@ -8,7 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 
 from paimon import cli, commands
 from paimon.config import config_path
@@ -196,6 +203,133 @@ class SessionsTest(CommandTestCase):
         self.assertEqual(code, 0)
         self.assertIn(session.id[:8], out)
         self.assertIn("hi", out)
+
+
+class LogTest(CommandTestCase):
+    """Seq numbers are physical line numbers; Session.create writes the header
+    record on line 1, so the first appended message lands at seq 2."""
+
+    def _make_turn(self, session: Session, prompt: str, answer: str) -> None:
+        session.append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
+        session.append_message(ModelResponse(parts=[
+            TextPart(content=answer),
+            ToolCallPart(tool_name="bash", args={"command": "ls -la"}, tool_call_id="c1"),
+        ]))
+        session.append_message(ModelRequest(parts=[
+            ToolReturnPart(tool_name="bash", content="file-a\nfile-b", tool_call_id="c1"),
+        ]))
+
+    def test_renders_seq_prefixed_compact_lines(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_turn(session, "list the files", "Listing.")
+        code, out, err = self._run("log")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertIn(f"[1] session {session.id[:8]}", lines[0])
+        self.assertIn("[2] user  list the files", out)
+        self.assertIn("[3] assistant  Listing.", out)
+        self.assertIn("[3] tool_call bash  ls -la", out)
+        self.assertIn("[4] tool_result bash", out)
+        self.assertIn("file-a file-b", out)  # collapsed onto one line
+
+    def test_corrupt_line_keeps_its_seq(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        with session.path.open("a", encoding="utf-8") as file:
+            file.write("not json\n")
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="again")]))
+
+        code, out, err = self._run("log")
+        self.assertEqual(code, 0)
+        self.assertIn("[3] <corrupt>", out)
+        self.assertIn("[4] user  again", out)
+
+        code, out, err = self._run("log", "--json")
+        payload = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual(payload[2], {"seq": 3, "corrupt": True})
+        self.assertEqual([entry["seq"] for entry in payload], [1, 2, 3, 4])
+
+    def test_after_returns_only_newer_records(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_turn(session, "first", "one")
+        self._make_turn(session, "second", "two")
+        code, out, err = self._run("log", "--after", "4")
+        self.assertEqual(code, 0)
+        self.assertNotIn("first", out)
+        self.assertIn("[5] user  second", out)
+
+    def test_turns_starts_at_the_last_user_prompt(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_turn(session, "first question", "one")
+        self._make_turn(session, "second question", "two")
+        code, out, err = self._run("log", "--turns", "1")
+        self.assertEqual(code, 0)
+        self.assertNotIn("first question", out)
+        self.assertIn("second question", out)
+        self.assertIn("tool_result", out)
+
+    def test_turns_larger_than_history_shows_everything(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_turn(session, "only turn", "done")
+        code, out, err = self._run("log", "--turns", "5")
+        self.assertEqual(code, 0)
+        self.assertIn("only turn", out)
+
+    def test_tail_returns_the_last_records(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_turn(session, "first", "one")
+        code, out, err = self._run("log", "--tail", "1")
+        self.assertEqual(code, 0)
+        self.assertNotIn("user", out)
+        self.assertIn("[4] tool_result bash", out)
+
+    def test_json_merges_seq_into_the_record(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        code, out, err = self._run("log", "--json", "--tail", "1")
+        self.assertEqual(code, 0)
+        record = json.loads(out)
+        self.assertEqual(record["seq"], 2)
+        self.assertEqual(record["type"], "message")
+
+    def test_id_prefix_selects_a_session_and_default_is_latest(self) -> None:
+        older = Session.create(Path.cwd())
+        older.append_message(ModelRequest(parts=[UserPromptPart(content="old prompt")]))
+        newer = Session.create(Path.cwd())
+        newer.append_message(ModelRequest(parts=[UserPromptPart(content="new prompt")]))
+        past = older.path.stat().st_mtime - 60
+        os.utime(older.path, (past, past))
+
+        code, out, err = self._run("log")
+        self.assertIn("new prompt", out)
+        code, out, err = self._run("log", older.id[:8])
+        self.assertIn("old prompt", out)
+
+    def test_no_session_exits_1(self) -> None:
+        code, out, err = self._run("log")
+        self.assertEqual(code, 1)
+        self.assertIn("no session", err)
+
+    def test_unknown_prefix_exits_1(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        code, out, err = self._run("log", "ffffffff")
+        self.assertEqual(code, 1)
+        self.assertIn("no session matching", err)
+
+    def test_window_flags_are_mutually_exclusive(self) -> None:
+        code, out, err = self._run("log", "--after", "1", "--tail", "2")
+        self.assertEqual(code, 2)
+
+    def test_full_expands_the_system_prompt(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_system_prompt("You are terse.\nAlways.")
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        code, out, err = self._run("log")
+        self.assertIn("[2] system_prompt (22 chars)", out)
+        self.assertNotIn("You are terse.", out)
+        code, out, err = self._run("log", "--full")
+        self.assertIn("You are terse.", out)
 
 
 class InstallSkillTest(CommandTestCase):

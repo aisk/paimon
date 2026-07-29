@@ -23,6 +23,14 @@ event types and unknown fields; existing fields are only added to, never
 removed or redefined. A new output shape would be a new ``--output-format``
 value rather than a change to this one.
 
+``--output-format result`` writes exactly one JSON object to stdout: the same
+``result`` line the json format ends with, and nothing else. This is the cheap
+format for a calling agent that only needs the outcome; the intermediate
+events are still persisted in the session and can be inspected afterwards with
+``paimon log``. The result carries ``log_end``, the session log's line count
+at the end of the run, so a later ``paimon log <id> --after <log_end>`` shows
+exactly what a follow-up run added. The same field-stability rule applies.
+
 Exit codes: 0 success, 1 error, 2 usage, 4 tool budget exhausted (``result``
 subtype ``max_tool_calls``), 124 timed out (``timeout``), 130 interrupted.
 Either way the session is persisted and resumable via the reported id.
@@ -137,7 +145,8 @@ class TextRenderer:
             self._call_open = False
 
     def begin(self, session_id: Optional[str] = None, model: Optional[str] = None,
-              mode: Optional[str] = None, cwd: Optional[Path] = None) -> None:
+              mode: Optional[str] = None, cwd: Optional[Path] = None,
+              log_path: Optional[Path] = None) -> None:
         self._session_id = session_id
 
     async def handle(self, ev: object) -> None:
@@ -220,14 +229,17 @@ class JsonRenderer:
         self._current = ""
         self._denied = 0
         self._session_id: Optional[str] = None
+        self._log_path: Optional[Path] = None
 
     def _emit(self, payload: dict) -> None:
         # default=str keeps malformed tool arguments from aborting the run.
         _write(self._out, json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
     def begin(self, session_id: Optional[str] = None, model: Optional[str] = None,
-              mode: Optional[str] = None, cwd: Optional[Path] = None) -> None:
+              mode: Optional[str] = None, cwd: Optional[Path] = None,
+              log_path: Optional[Path] = None) -> None:
         self._session_id = session_id
+        self._log_path = log_path
         self._emit({"type": "init", "session_id": session_id, "model": model,
                     "mode": mode, "cwd": str(cwd) if cwd else None})
 
@@ -269,11 +281,29 @@ class JsonRenderer:
     async def close(self) -> None:
         self._flush_block()  # no await here; see TextRenderer.close
 
+    def _log_end(self) -> Optional[int]:
+        """Line count of the session log, the cursor for ``paimon log --after``."""
+        if self._log_path is None:
+            return None
+        try:
+            with self._log_path.open("rb") as file:
+                return sum(1 for _ in file)
+        except OSError:
+            return None
+
     def finish(self, subtype: str = "success", error: Optional[str] = None) -> None:
         self._flush_block()
         self._emit({"type": "result", "subtype": subtype, "is_error": subtype != "success",
                     "session_id": self._session_id, "text": "\n\n".join(self._blocks),
-                    "denied": self._denied, "error": error})
+                    "denied": self._denied, "error": error, "log_end": self._log_end()})
+
+
+class ResultRenderer(JsonRenderer):
+    """Only the final ``result`` line; the format for callers that just want the outcome."""
+
+    def _emit(self, payload: dict) -> None:
+        if payload.get("type") == "result":
+            super()._emit(payload)
 
 
 def _use_color(stream) -> bool:
@@ -286,7 +316,11 @@ def _use_color(stream) -> bool:
 
 
 def _make_renderer(output_format: str, config: Config):
-    return JsonRenderer(config=config) if output_format == "json" else TextRenderer(config=config)
+    if output_format == "json":
+        return JsonRenderer(config=config)
+    if output_format == "result":
+        return ResultRenderer(config=config)
+    return TextRenderer(config=config)
 
 
 def _install_interrupt(task: "asyncio.Task") -> None:
@@ -413,7 +447,7 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         renderer.finish(subtype="error", error=str(exc))
         return 1
 
-    renderer.begin(agent.session.id, config.model, mode, cwd)
+    renderer.begin(agent.session.id, config.model, mode, cwd, log_path=agent.session.path)
     try:
         return asyncio.run(_drive(agent, renderer, text,
                                   timeout=timeout, max_tool_calls=max_tool_calls))

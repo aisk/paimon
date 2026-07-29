@@ -126,6 +126,7 @@ class JsonRendererTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[-1], {
             "type": "result", "subtype": "success", "is_error": False,
             "session_id": "sid", "text": "hi", "denied": 0, "error": None,
+            "log_end": None,
         })
 
     async def test_event_types_and_text_blocks(self) -> None:
@@ -172,6 +173,54 @@ class JsonRendererTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("log in", lines[-1]["error"])
 
 
+class ResultRendererTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.out = io.StringIO()
+
+    async def test_only_the_result_line_is_emitted(self) -> None:
+        renderer = headless.ResultRenderer(self.out)
+        renderer.begin("sid", "test:stub", "read", Path("/tmp"))
+        await _feed(
+            renderer,
+            ReasoningDelta("think"),
+            TextDelta("Looking."),
+            ToolStart("call-1", "bash", {"command": "ls"}),
+            ToolEnd("call-1", "bash", "denied", denied=True),
+            TextDelta("Done."),
+        )
+        renderer.finish()
+
+        lines = self.out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        result = json.loads(lines[0])
+        self.assertEqual(result["type"], "result")
+        self.assertEqual(result["session_id"], "sid")
+        self.assertEqual(result["text"], "Looking.\n\nDone.")
+        self.assertEqual(result["denied"], 1)
+
+    async def test_log_end_is_the_session_log_line_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "session.jsonl"
+            log_path.write_text('{"type":"session"}\n{"type":"message"}\n{"type":"message"}\n',
+                                encoding="utf-8")
+            renderer = headless.ResultRenderer(self.out)
+            renderer.begin("sid", log_path=log_path)
+            await _feed(renderer, TextDelta("hi"))
+            renderer.finish()
+        result = json.loads(self.out.getvalue())
+        self.assertEqual(result["log_end"], 3)
+
+    async def test_early_failure_yields_exactly_one_result_line(self) -> None:
+        with patch("sys.stdout", self.out):
+            code = headless.fail("no model configured; run 'paimon' once to log in", "result")
+        self.assertEqual(code, 1)
+        lines = self.out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        result = json.loads(lines[0])
+        self.assertEqual(result["subtype"], "error")
+        self.assertIsNone(result["log_end"])
+
+
 class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
     """Every agent event must be renderable by both headless renderers.
 
@@ -183,7 +232,8 @@ class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
     async def test_every_event_renders(self) -> None:
         events = agent_events()
         for renderer in (headless.TextRenderer(io.StringIO(), io.StringIO(), _config()),
-                         headless.JsonRenderer(io.StringIO(), _config())):
+                         headless.JsonRenderer(io.StringIO(), _config()),
+                         headless.ResultRenderer(io.StringIO(), _config())):
             renderer.begin("sid")
             await _feed(renderer, *events)
             renderer.finish()

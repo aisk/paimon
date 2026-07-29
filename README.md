@@ -36,10 +36,10 @@ Frontier models are good at planning and reviewing; the steps in between are oft
 
 ```bash
 paimon login --profile glm --model zai:glm-4.7 --api-key-env ZAI_API_KEY
-paimon --profile glm -p "apply the plan in PLAN.md" --mode edit --output-format json
+paimon --profile glm -p "apply the plan in PLAN.md" --mode edit --output-format result
 ```
 
-The bundled skill teaches the calling agent this workflow (check `paimon status --json`, run one-shot, parse the JSON output, resume the session id from the final `result` line):
+The bundled skill teaches the calling agent this workflow (check `paimon status --json`, run one-shot, read the single result object, resume its `session_id`, inspect what a run did with `paimon log`):
 
 ```bash
 paimon install-skill                  # into Claude Code (~/.claude/skills/paimon)
@@ -56,7 +56,10 @@ paimon -r            # choose a session started in this directory
 paimon -r a1b2c3     # resume one by id
 paimon -c            # resume the most recent one
 paimon sessions      # list them (--json for machines)
+paimon log a1b2c3    # what a session did, one line per event
 ```
+
+`paimon log` prefixes every line with a stable seq number; `--after SEQ`, `--turns N` and `--tail N` narrow the window, `--json` and `--full` give the raw records.
 
 ## Other ways to run it
 
@@ -69,7 +72,7 @@ paimon --model zai:glm-4.7          # this model for this run only
 paimon --profile work               # a separately configured account
 ```
 
-`-p` never stops to ask, so anything the current mode would prompt for is refused instead; pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format json` for one JSON event per line, and `--timeout`/`--max-tool-calls` to bound an unattended run.
+`-p` never stops to ask, so anything the current mode would prompt for is refused instead; pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format result` for a single JSON object with the outcome (or `json` for one event per line), and `--timeout`/`--max-tool-calls` to bound an unattended run.
 
 ## Configuration
 

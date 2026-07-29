@@ -297,6 +297,21 @@ class HeadlessRunTest(CliTestCase):
         self.assertEqual(lines[-1]["text"], "done")
         self.assertEqual(err, "")
 
+    def test_result_output_is_exactly_one_object_with_log_end(self) -> None:
+        code, out, err = self._main_output("-p", "hi", "--output-format", "result")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 1)
+        result = json.loads(lines[0])
+        self.assertEqual(result["type"], "result")
+        self.assertEqual(result["text"], "done")
+        sessions = Session.list(self.cwd)
+        self.assertEqual(result["session_id"], sessions[0].id)
+        # log_end is the session log's line count, the cursor for `paimon log --after`.
+        with sessions[0].path.open(encoding="utf-8") as file:
+            self.assertEqual(result["log_end"], sum(1 for _ in file))
+        self.assertEqual(err, "")
+
     def test_denied_tool_still_exits_0(self) -> None:
         code, out, err = self._main_output(
             "-p", "run it", tool="bash", model="test:stub",
@@ -335,7 +350,7 @@ class HeadlessRunTest(CliTestCase):
     def test_continue_without_sessions_exits_1(self) -> None:
         code, out, err = self._main_output("-p", "hi", "-c")
         self.assertEqual(code, 1)
-        self.assertIn("no session to continue", err)
+        self.assertIn("no session in this directory", err)
 
     def test_profile_config_is_read_by_a_headless_run(self) -> None:
         config_home = self.cwd / "cfghome"

@@ -4,7 +4,8 @@ description: >
   Delegate a coding task to Paimon, a terminal code agent, as a one-shot
   subprocess. Use when the user asks to run something through paimon, wants a
   task done by a different model or account, or wants to continue an earlier
-  paimon session. Covers preflight, invocation, output parsing and resume.
+  paimon session. Covers preflight, invocation, output parsing, resume and
+  inspecting a run's event log.
 ---
 
 # Driving Paimon
@@ -26,12 +27,15 @@ guessing credentials. If the user provided them:
 
 ```bash
 paimon -p "fix the failing test in tests/test_foo.py" \
-  --output-format json --mode edit --max-tool-calls 50 --timeout 600
+  --output-format result --mode edit --max-tool-calls 50 --timeout 600
 ```
 
-- stdout is one JSON object per line; the last line is always
-  `{"type": "result", ...}` with `text` (the final answer), `session_id`,
-  `subtype` and `denied`. Ignore unknown event types and fields.
+- stdout is exactly one JSON object: `{"type": "result", ...}` with `text`
+  (the final answer), `session_id`, `subtype`, `denied` and `log_end` (a
+  cursor into the session log, see below). Ignore unknown fields. Do not use
+  `--output-format json` unless you need to consume events in real time — it
+  streams every intermediate event and repeats the answer, which you would
+  pay to read twice.
 - Pick the mode for the task: `read` (analysis only, the default), `edit`
   (may edit inside the working directory), `yolo` (may also run commands).
   `-p` never asks for confirmation — anything the mode disallows is refused
@@ -48,11 +52,34 @@ paimon -p "fix the failing test in tests/test_foo.py" \
 
 ## Resume
 
+Always resume by id, using the `session_id` from the previous result:
+
 ```bash
-paimon -c -p "now also update the docs"       # latest session in this directory
-paimon -r <session_id> -p "..."               # a specific one (id prefix is enough)
-paimon sessions --json                        # enumerate resumable sessions here
+paimon -r <session_id> -p "now also update the docs"   # id prefix is enough
+paimon sessions --json                                 # enumerate resumable sessions here
 ```
+
+Do not use `-c` (resume latest): it picks the newest session in the
+directory, so any concurrent paimon run — yours or another agent's — can
+slip in between and receive your follow-up.
+
+## Inspecting what a run did
+
+The result line is normally all you need. When it is not — `denied` is
+non-zero, the run failed or timed out, or the answer looks off — read the
+persisted event log instead of rerunning with a streaming format:
+
+```bash
+paimon log <session_id> --turns 1             # everything the last turn did
+paimon log <session_id> --after <log_end>     # only what a later run added
+paimon log <session_id> --tail 20             # the last 20 records
+```
+
+One clipped line per event, each prefixed `[seq]` (tool calls, tool results
+with sizes, assistant text). `log_end` from a result is the seq cursor: pass
+the previous run's `log_end` to `--after` to see exactly the new records.
+Add `--json` for raw records or `--full` to un-clip content — both are
+verbose, so filter first.
 
 ## Exit codes
 

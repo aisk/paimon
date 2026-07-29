@@ -36,10 +36,10 @@ uvx paimon
 
 ```bash
 paimon login --profile glm --model zai:glm-4.7 --api-key-env ZAI_API_KEY
-paimon --profile glm -p "apply the plan in PLAN.md" --mode edit --output-format json
+paimon --profile glm -p "apply the plan in PLAN.md" --mode edit --output-format result
 ```
 
-自带的 skill 会向调用方 agent 说明这套流程（先用 `paimon status --json` 检查、单次运行、解析 JSON 输出、从最后一行 `result` 中取得 session id 用于续跑）：
+自带的 skill 会向调用方 agent 说明这套流程（先用 `paimon status --json` 检查、单次运行、读取唯一一行 result 对象、用其中的 `session_id` 续跑、用 `paimon log` 查看运行过程）：
 
 ```bash
 paimon install-skill                  # 安装到 Claude Code（~/.claude/skills/paimon）
@@ -56,7 +56,10 @@ paimon -r            # 从当前目录的会话中选择
 paimon -r a1b2c3     # 按 id 恢复
 paimon -c            # 恢复最近一个会话
 paimon sessions      # 列出会话（--json 输出机器可读格式）
+paimon log a1b2c3    # 查看会话做了什么，每个事件一行
 ```
+
+`paimon log` 的每行输出都带一个稳定的序号；`--after SEQ`、`--turns N`、`--tail N` 缩小范围，`--json` 和 `--full` 输出原始记录。
 
 ## 其他运行方式
 
@@ -69,7 +72,7 @@ paimon --model zai:glm-4.7          # 仅本次运行使用该模型
 paimon --profile work               # 单独配置的另一个账号
 ```
 
-`-p` 不会停下来询问，当前模式需要确认的操作会被直接拒绝；如果本次运行需要修改文件，传 `--mode edit` 或 `--mode yolo`。加 `--output-format json` 每行输出一个 JSON 事件，用 `--timeout`/`--max-tool-calls` 为无人值守的运行设置上限。
+`-p` 不会停下来询问，当前模式需要确认的操作会被直接拒绝；如果本次运行需要修改文件，传 `--mode edit` 或 `--mode yolo`。加 `--output-format result` 输出一个包含结果的 JSON 对象（`json` 则每行输出一个事件），用 `--timeout`/`--max-tool-calls` 为无人值守的运行设置上限。
 
 ## 配置
 

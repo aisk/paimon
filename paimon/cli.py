@@ -11,27 +11,7 @@ from .agent import Agent
 from .app import PaimonApp
 from .config import Config
 from .llm import split_model_string
-from .session import Session, SessionError, resume_hint
-
-
-class CliError(Exception):
-    """A message to report as ``paimon: ...`` before exiting with status 1."""
-
-
-def _resolve_session(prefix: str) -> Session:
-    matches = [session for session in Session.list(Path.cwd()) if session.id.startswith(prefix)]
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        raise CliError(f"no session matching '{prefix}' in this directory")
-    raise CliError(f"ambiguous session id '{prefix}' ({len(matches)} matches)")
-
-
-def _latest_session() -> Session:
-    sessions = Session.list(Path.cwd())
-    if not sessions:
-        raise CliError("no session to continue in this directory")
-    return sessions[0]
+from .session import SessionError, resume_hint
 
 
 def main() -> None:
@@ -45,6 +25,7 @@ def main() -> None:
         description="Paimon terminal code agent",
         epilog="commands: status (login state and configuration), "
                "login (log in without the UI), sessions (list resumable sessions), "
+               "log (inspect a session's event log), "
                "install-skill (teach a calling code agent how to drive paimon)",
     )
     parser.add_argument("-r", "--resume", nargs="?", const="", default=None, metavar="ID",
@@ -62,8 +43,9 @@ def main() -> None:
                         dest="prompt",
                         help="run one turn without the UI and exit; with no value the prompt "
                              "is read from stdin")
-    parser.add_argument("--output-format", choices=("text", "json"), default="text",
-                        help="output for --print: text (default) or one JSON event per line")
+    parser.add_argument("--output-format", choices=("text", "json", "result"), default="text",
+                        help="output for --print: text (default), one JSON event per line, "
+                             "or just the final result as one JSON object")
     parser.add_argument("--timeout", type=float, default=None, metavar="SECS",
                         help="with --print: give up after this many seconds (exit 124)")
     parser.add_argument("--max-tool-calls", type=int, default=None, metavar="N",
@@ -146,10 +128,10 @@ def main() -> None:
 
     try:
         if args.continue_latest:
-            resume_session = _latest_session()
+            resume_session = commands.latest_session()
         else:
-            resume_session = _resolve_session(args.resume) if args.resume else None
-    except CliError as exc:
+            resume_session = commands.resolve_session(args.resume) if args.resume else None
+    except ValueError as exc:
         if headless:
             sys.exit(headless_mode.fail(str(exc), args.output_format))
         print(f"paimon: {exc}", file=sys.stderr)
