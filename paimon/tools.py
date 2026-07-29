@@ -19,7 +19,7 @@ from pydantic_ai.tools import ToolDefinition
 # A confirm callback returns True to allow a dangerous tool, False to deny.
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
-# Permission modes: read (confirm writes, bash and reads outside cwd),
+# Permission modes: read (confirm writes, shell and reads outside cwd),
 # edit (auto-approve writes inside cwd), yolo (no confirmation at all).
 MODES = ("read", "edit", "yolo")
 
@@ -219,7 +219,7 @@ async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-async def _bash(args: dict, cwd: Path) -> str:
+async def _shell(args: dict, cwd: Path) -> str:
     # start_new_session puts the child in its own process group so we can kill
     # the whole tree (the shell plus anything it spawns) on timeout/interrupt.
     proc = await asyncio.create_subprocess_shell(
@@ -341,13 +341,13 @@ REGISTRY: dict[str, Tool] = {
             },
         },
     ),
-    "bash": Tool(
+    "shell": Tool(
         access="execute",
-        run=lambda args, cwd, mode: _bash(args, cwd),
+        run=lambda args, cwd, mode: _shell(args, cwd),
         schema={
             "type": "function",
             "function": {
-                "name": "bash",
+                "name": "shell",
                 "description": "Run a shell command in the working directory and return its combined stdout/stderr. Use this for listing, searching (grep/find/ls), git, running tests, etc.",
                 "parameters": {
                     "type": "object",

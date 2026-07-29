@@ -213,10 +213,10 @@ class LogTest(CommandTestCase):
         session.append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
         session.append_message(ModelResponse(parts=[
             TextPart(content=answer),
-            ToolCallPart(tool_name="bash", args={"command": "ls -la"}, tool_call_id="c1"),
+            ToolCallPart(tool_name="shell", args={"command": "ls -la"}, tool_call_id="c1"),
         ]))
         session.append_message(ModelRequest(parts=[
-            ToolReturnPart(tool_name="bash", content="file-a\nfile-b", tool_call_id="c1"),
+            ToolReturnPart(tool_name="shell", content="file-a\nfile-b", tool_call_id="c1"),
         ]))
 
     def test_renders_seq_prefixed_compact_lines(self) -> None:
@@ -228,8 +228,8 @@ class LogTest(CommandTestCase):
         self.assertIn(f"[1] session {session.id[:8]}", lines[0])
         self.assertIn("[2] user  list the files", out)
         self.assertIn("[3] assistant  Listing.", out)
-        self.assertIn("[3] tool_call bash  ls -la", out)
-        self.assertIn("[4] tool_result bash", out)
+        self.assertIn("[3] tool_call shell  ls -la", out)
+        self.assertIn("[4] tool_result shell", out)
         self.assertIn("file-a file-b", out)  # collapsed onto one line
 
     def test_corrupt_line_keeps_its_seq(self) -> None:
@@ -281,7 +281,7 @@ class LogTest(CommandTestCase):
         code, out, err = self._run("log", "--tail", "1")
         self.assertEqual(code, 0)
         self.assertNotIn("user", out)
-        self.assertIn("[4] tool_result bash", out)
+        self.assertIn("[4] tool_result shell", out)
 
     def test_json_merges_seq_into_the_record(self) -> None:
         session = Session.create(Path.cwd())

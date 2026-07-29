@@ -15,13 +15,13 @@ CONTEXT_FILE = "AGENTS.md"
 INSTRUCTIONS = """You are Paimon, a concise coding assistant operating in a terminal.
 
 You help with software engineering tasks by reading and editing files and running
-shell commands. You have these tools: read_file, write_file, edit_file, glob, bash,
+shell commands. You have these tools: read_file, write_file, edit_file, glob, shell,
 write_todos, start_new_session.
 
 Guidelines:
 - Prefer reading a file before editing it. For edits, use edit_file with a unique
   old_string; only use write_file for new files or full rewrites.
-- Use glob to find files by name pattern; use the bash tool for content search
+- Use glob to find files by name pattern; use the shell tool for content search
   (grep), git, and running tests.
 - For tasks with several steps, call write_todos first to lay out a plan, then keep
   it updated as you go (one task in_progress at a time). Skip it for simple tasks.
@@ -70,7 +70,7 @@ def environment_context() -> str:
     """Describe the host for the model.
 
     Environment variables and platform metadata only: the model can check for
-    a tool with the bash tool when it actually needs one, which is cheaper and
+    a tool with the shell tool when it actually needs one, which is cheaper and
     more accurate than probing a fixed list of executables at every startup.
     """
     system = platform.system()

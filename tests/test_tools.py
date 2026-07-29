@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from paimon.tools import MODES, _bash, _glob, _inside, gate, run_tool
+from paimon.tools import MODES, _glob, _inside, _shell, gate, run_tool
 
 
 class GateTest(unittest.TestCase):
@@ -13,7 +13,7 @@ class GateTest(unittest.TestCase):
         self.cwd = Path(tmp.name).resolve()
 
     def test_yolo_allows_everything(self) -> None:
-        for name in ("read_file", "glob", "write_file", "edit_file", "bash", "write_todos"):
+        for name in ("read_file", "glob", "write_file", "edit_file", "shell", "write_todos"):
             self.assertEqual(gate(name, {"path": "/etc/hosts"}, "yolo", self.cwd), "allow")
 
     def test_reads_inside_cwd_are_free_outside_confirm(self) -> None:
@@ -27,14 +27,14 @@ class GateTest(unittest.TestCase):
     def test_read_mode_confirms_all_dangerous_tools(self) -> None:
         self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, "read", self.cwd), "confirm")
         self.assertEqual(gate("edit_file", {"path": "a.py"}, "read", self.cwd), "confirm")
-        self.assertEqual(gate("bash", {"command": "ls"}, "read", self.cwd), "confirm")
+        self.assertEqual(gate("shell", {"command": "ls"}, "read", self.cwd), "confirm")
 
     def test_edit_mode_auto_approves_writes_inside_cwd(self) -> None:
         self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, "edit", self.cwd), "allow")
         self.assertEqual(gate("edit_file", {"path": "sub/a.py"}, "edit", self.cwd), "allow")
         self.assertEqual(gate("write_file", {"path": "/tmp/a.py", "content": "x"}, "edit", self.cwd), "confirm")
         self.assertEqual(gate("edit_file", {"path": "../a.py"}, "edit", self.cwd), "confirm")
-        self.assertEqual(gate("bash", {"command": "ls"}, "edit", self.cwd), "confirm")
+        self.assertEqual(gate("shell", {"command": "ls"}, "edit", self.cwd), "confirm")
 
     def test_write_todos_and_missing_path_are_allowed(self) -> None:
         for mode in MODES:
@@ -76,13 +76,13 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(denied)
         self.assertIn("hi", result)
 
-    async def test_bash_timeout_terminates_and_reaps_process_tree(self) -> None:
+    async def test_shell_timeout_terminates_and_reaps_process_tree(self) -> None:
         with (
             patch("paimon.tools._COMMAND_TIMEOUT", 0.05),
             patch("paimon.tools._KILL_GRACE", 0.05),
             patch("paimon.tools._KILL_TIMEOUT", 0.5),
         ):
-            result = await _bash({"command": "trap '' TERM; sleep 30"}, self.cwd)
+            result = await _shell({"command": "trap '' TERM; sleep 30"}, self.cwd)
 
         self.assertEqual(result, "Error: command timed out after 0.05s.")
 

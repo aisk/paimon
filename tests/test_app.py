@@ -48,7 +48,7 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
 
 class ConfirmPanelTest(AppTestCase):
     @staticmethod
-    async def _open(app: PaimonApp, pilot, tool: str = "bash", args: dict | None = None) -> asyncio.Future:
+    async def _open(app: PaimonApp, pilot, tool: str = "shell", args: dict | None = None) -> asyncio.Future:
         task = asyncio.ensure_future(app._confirm(tool, args or {"command": "echo hi"}))
         await pilot.pause()
         return task
@@ -119,7 +119,7 @@ class ModeCycleTest(AppTestCase):
     async def test_shift_tab_while_confirm_panel_open_keeps_pending_future(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            task = asyncio.ensure_future(app._confirm("bash", {"command": "echo hi"}))
+            task = asyncio.ensure_future(app._confirm("shell", {"command": "echo hi"}))
             await pilot.pause()
             await pilot.press("shift+tab")
             self.assertEqual(app.mode, "edit")
@@ -186,10 +186,10 @@ class ResumeSessionTest(AppTestCase):
         session = self._old_session("do it")
         session.append_message(ModelResponse(parts=[
             TextPart(content="working"),
-            ToolCallPart(tool_name="bash", args='{"command": "ls"}', tool_call_id="c1"),
+            ToolCallPart(tool_name="shell", args='{"command": "ls"}', tool_call_id="c1"),
         ]))
         session.append_message(ModelRequest(parts=[
-            ToolReturnPart(tool_name="bash", content="a.py", tool_call_id="c1"),
+            ToolReturnPart(tool_name="shell", content="a.py", tool_call_id="c1"),
         ]))
         session.append_message(ModelResponse(parts=[TextPart(content="done")]))
         app = self.make_app(session=session)

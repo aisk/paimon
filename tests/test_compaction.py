@@ -33,8 +33,8 @@ class CompactionHelpersTest(unittest.TestCase):
     def test_cut_never_starts_at_tool_result(self) -> None:
         messages = [
             _user("do work"),
-            ModelResponse(parts=[ToolCallPart(tool_name="bash", args="{}", tool_call_id="call-1")]),
-            ModelRequest(parts=[ToolReturnPart(tool_name="bash", content="result", tool_call_id="call-1")]),
+            ModelResponse(parts=[ToolCallPart(tool_name="shell", args="{}", tool_call_id="call-1")]),
+            ModelRequest(parts=[ToolReturnPart(tool_name="shell", content="result", tool_call_id="call-1")]),
             _assistant("done"),
         ]
         with patch("paimon.compaction.count_tokens", return_value=10):

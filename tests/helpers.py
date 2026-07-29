@@ -14,8 +14,8 @@ from paimon.session import Session
 EVENT_SAMPLES = {
     "TextDelta": ("hi",),
     "ReasoningDelta": ("hm",),
-    "ToolStart": ("call-1", "bash", {"command": "ls"}),
-    "ToolEnd": ("call-1", "bash", "out"),
+    "ToolStart": ("call-1", "shell", {"command": "ls"}),
+    "ToolEnd": ("call-1", "shell", "out"),
     "TodosUpdate": ([{"content": "a", "status": "pending"}],),
     "SessionHandoff": ("do the next thing",),
     "TurnEnd": (),

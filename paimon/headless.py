@@ -327,7 +327,7 @@ def _install_interrupt(task: "asyncio.Task") -> None:
     """Make Ctrl-C cancel the turn rather than tear down the loop.
 
     Cancelling lets Agent.run write back the partial response (so the session
-    log keeps no dangling tool call) and lets the bash tool kill its process
+    log keeps no dangling tool call) and lets the shell tool kill its process
     tree. The handler is removed as it fires, so a second Ctrl-C hits the
     default handler and exits hard even if cleanup wedges.
     """

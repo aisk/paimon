@@ -55,15 +55,15 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
         renderer = self._renderer()
         await _feed(
             renderer,
-            ToolStart("call-1", "bash", {"command": "find . \\\n  -name '*.py'"}),
-            ToolEnd("call-1", "bash", "26"),
+            ToolStart("call-1", "shell", {"command": "find . \\\n  -name '*.py'"}),
+            ToolEnd("call-1", "shell", "26"),
         )
         self.assertEqual(self.out.getvalue(), "")
-        self.assertEqual(self.err.getvalue(), "· bash  find . \\ -name '*.py'\n")
+        self.assertEqual(self.err.getvalue(), "· shell  find . \\ -name '*.py'\n")
 
     async def test_long_detail_is_truncated(self) -> None:
         renderer = self._renderer()
-        await _feed(renderer, ToolStart("call-1", "bash", {"command": "x" * 500}))
+        await _feed(renderer, ToolStart("call-1", "shell", {"command": "x" * 500}))
         line = self.err.getvalue().strip()
         self.assertTrue(line.endswith("…"))
         self.assertLess(len(line), headless.DETAIL_WIDTH + 20)
@@ -74,8 +74,8 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
             renderer,
             ToolStart("call-1", "edit_file", {"path": "README.md"}),
             ToolEnd("call-1", "edit_file", "User denied this operation.", denied=True),
-            ToolStart("call-2", "bash", {"command": "ls"}),
-            ToolEnd("call-2", "bash", "User denied this operation.", denied=True),
+            ToolStart("call-2", "shell", {"command": "ls"}),
+            ToolEnd("call-2", "shell", "User denied this operation.", denied=True),
         )
         err = self.err.getvalue()
         self.assertEqual(err.count("→ denied"), 2)  # both outcomes reported
@@ -136,8 +136,8 @@ class JsonRendererTest(unittest.IsolatedAsyncioTestCase):
             renderer,
             ReasoningDelta("think"),
             TextDelta("Looking."),
-            ToolStart("call-1", "bash", {"command": "ls"}),
-            ToolEnd("call-1", "bash", "denied", denied=True),
+            ToolStart("call-1", "shell", {"command": "ls"}),
+            ToolEnd("call-1", "shell", "denied", denied=True),
             TodosUpdate([{"content": "a", "status": "pending"}]),
             ContextCompacted(100, 20),
             TextDelta("Done."),
@@ -184,8 +184,8 @@ class ResultRendererTest(unittest.IsolatedAsyncioTestCase):
             renderer,
             ReasoningDelta("think"),
             TextDelta("Looking."),
-            ToolStart("call-1", "bash", {"command": "ls"}),
-            ToolEnd("call-1", "bash", "denied", denied=True),
+            ToolStart("call-1", "shell", {"command": "ls"}),
+            ToolEnd("call-1", "shell", "denied", denied=True),
             TextDelta("Done."),
         )
         renderer.finish()

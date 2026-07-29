@@ -239,7 +239,7 @@ class GuardRailTest(CliTestCase):
 
     def test_tool_budget_exits_4_before_the_tool_runs(self) -> None:
         code, out, err = self._main_output("-p", "run it", "--output-format", "json",
-                                           "--max-tool-calls", "0", tool="bash")
+                                           "--max-tool-calls", "0", tool="shell")
         self.assertEqual(code, 4)
         lines = [json.loads(line) for line in out.splitlines()]
         self.assertEqual(lines[-1]["subtype"], "max_tool_calls")
@@ -248,7 +248,7 @@ class GuardRailTest(CliTestCase):
         self.assertNotIn("tool_result", types)  # ... and that it never executed
 
     def test_session_is_resumable_after_a_budget_stop(self) -> None:
-        self._main_output("-p", "run it", "--max-tool-calls", "0", tool="bash")
+        self._main_output("-p", "run it", "--max-tool-calls", "0", tool="shell")
         session = Session.list(self.cwd)[0]
         code, out, err = self._main_output("-p", "again", "-c")
         self.assertEqual(code, 0)
@@ -314,7 +314,7 @@ class HeadlessRunTest(CliTestCase):
 
     def test_denied_tool_still_exits_0(self) -> None:
         code, out, err = self._main_output(
-            "-p", "run it", tool="bash", model="test:stub",
+            "-p", "run it", tool="shell", model="test:stub",
         )
         self.assertEqual(code, 0)
         self.assertIn("denied", err)

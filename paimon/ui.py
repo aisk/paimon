@@ -232,7 +232,7 @@ class ConfirmPanel(Vertical, can_focus=True):
 
     def _detail(self) -> RenderableType:
         args = self.args
-        if self.tool_name == "bash":
+        if self.tool_name == "shell":
             return Content(self._clip(str(args.get("command") or "")))
         if self.tool_name == "write_file":
             path = str(args.get("path") or "")

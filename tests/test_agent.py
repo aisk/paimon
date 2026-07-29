@@ -202,7 +202,7 @@ class AgentToolsetTest(unittest.IsolatedAsyncioTestCase):
                 requests += 1
                 offered.append([tool.name for tool in info.function_tools])
                 if requests == 1:
-                    yield {0: DeltaToolCall(name="bash", json_args='{"command": "echo hi"}',
+                    yield {0: DeltaToolCall(name="shell", json_args='{"command": "echo hi"}',
                                             tool_call_id="call-1")}
                 else:
                     yield "done"
@@ -303,12 +303,12 @@ class ReplayEventsTest(unittest.TestCase):
             ModelResponse(parts=[
                 ThinkingPart(content="planning"),
                 TextPart(content="ok"),
-                ToolCallPart(tool_name="bash", args='{"command": "ls"}', tool_call_id="c1"),
+                ToolCallPart(tool_name="shell", args='{"command": "ls"}', tool_call_id="c1"),
                 ToolCallPart(tool_name="write_todos",
                              args='{"todos": [{"content": "x", "status": "pending"}]}', tool_call_id="c2"),
             ]),
             ModelRequest(parts=[
-                ToolReturnPart(tool_name="bash", content="a.py", tool_call_id="c1"),
+                ToolReturnPart(tool_name="shell", content="a.py", tool_call_id="c1"),
                 ToolReturnPart(tool_name="write_todos", content="[ ] x", tool_call_id="c2"),
             ]),
             ModelResponse(parts=[TextPart(content="done")]),
@@ -321,7 +321,7 @@ class ReplayEventsTest(unittest.TestCase):
             [UserInput, ReasoningDelta, TextDelta, ToolStart, TodosUpdate, ToolEnd, TextDelta],
         )
         tool_end = events[5]
-        self.assertEqual((tool_end.id, tool_end.name, tool_end.result), ("c1", "bash", "a.py"))
+        self.assertEqual((tool_end.id, tool_end.name, tool_end.result), ("c1", "shell", "a.py"))
 
     def test_compaction_summary_becomes_notice(self) -> None:
         events = replay_events([
