@@ -253,7 +253,7 @@ class PaimonApp(App):
             queued.display = False
             yield queued
             prompt = PromptInput(id="prompt", soft_wrap=True)
-            prompt.border_subtitle = "Enter send · Ctrl+J newline · Esc interrupt · Shift+Tab mode"
+            prompt.border_subtitle = "Enter send · Ctrl+J newline · / commands · Esc interrupt · Shift+Tab mode"
             yield prompt
             yield Static(id="statusbar")
 

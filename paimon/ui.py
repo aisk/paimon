@@ -79,6 +79,7 @@ class PromptInput(TextArea):
 
     Up on the first line / Down on the last line walk previously submitted
     prompts, bash-style; walking past the newest entry restores the draft.
+    "/" in an empty editor opens the command palette.
     """
 
     class Submitted(Message):
@@ -93,6 +94,11 @@ class PromptInput(TextArea):
         self._draft = ""
 
     async def _on_key(self, event: events.Key) -> None:
+        if event.character == "/" and not self.text:
+            event.prevent_default()
+            event.stop()
+            self.app.action_command_palette()
+            return
         if event.key == "enter":
             event.prevent_default()
             event.stop()
