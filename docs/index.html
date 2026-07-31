@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Paimon is a coding agent that can be used directly or run as a subagent.">
+    <meta name="theme-color" content="#f8f7f3">
+    <meta property="og:title" content="Paimon">
+    <meta property="og:description" content="A coding agent that can be used directly or run as a subagent.">
+    <meta property="og:type" content="website">
+    <title>Paimon</title>
+    <link rel="canonical" href="https://aisk.github.io/paimon/">
+    <link rel="icon" type="image/png" href="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <header>
+      <a class="site-name" href="./" title="Your best travel companion">
+        <img class="site-logo" src="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png" alt="" width="24" height="24">
+        <span>paimon</span>
+      </a>
+      <nav aria-label="Project links">
+        <a href="https://github.com/aisk/paimon">source</a>
+        <a href="https://github.com/aisk/paimon#readme">readme</a>
+        <a href="https://github.com/aisk/paimon/blob/master/README.zh-CN.md" lang="zh-CN">中文</a>
+      </nav>
+    </header>
+
+    <main>
+      <h1>Paimon</h1>
+
+      <figure class="paimon-image">
+        <img
+          src="https://static0.dualshockersimages.com/wordpress/wp-content/uploads/2023/03/paimon-genshin-impact.jpg"
+          alt="Paimon from Genshin Impact"
+          title="Not emergency food."
+        >
+      </figure>
+
+      <p class="lead">
+        Paimon, the Traveler’s best friend, is a deliberately minimal coding agent written in
+        Python. It can be used directly in a terminal or invoked non-interactively by another
+        coding agent.
+      </p>
+
+      <p>
+        It has an interactive interface for normal use and a headless interface with stable,
+        machine-readable output. Conversations are persisted, so a calling process can inspect a
+        run and continue the same session when another pass is needed.
+      </p>
+
+      <pre class="first-command" aria-label="Run Paimon"><code>uvx paimon</code></pre>
+
+      <section aria-labelledby="skill">
+        <h2 id="skill">Skill and subagent use</h2>
+        <p>
+          Paimon includes a skill that teaches coding agents such as Codex and Claude Code how to
+          use it as a worker. Install it with <a href="https://skills.sh/">skills.sh</a>:
+        </p>
+        <pre><code>npx skills add aisk/paimon</code></pre>
+        <p>
+          The calling agent can give Paimon a bounded task, read its result, review the changes,
+          and resume the same session with follow-up instructions. A typical delegation is not
+          limited to one call:
+        </p>
+
+        <figure class="agent-terminal">
+          <figcaption>Example: a calling agent delegates an implementation and follows up</figcaption>
+          <div class="terminal-bar">
+            <span>coedx</span>
+            <span>~/project</span>
+          </div>
+          <div class="terminal-body">
+            <p class="user-line"><span class="terminal-prompt">›</span> Fix the flaky retry test. Use Paimon for the implementation.</p>
+
+            <p><span class="agent-name">coedx</span> I’ll delegate the focused change, then review the diff and tests.</p>
+
+            <div class="tool-call">
+              <p><span class="tool-name">paimon</span></p>
+              <code>paimon --profile worker -p "fix the flaky retry test; run the focused tests" --mode edit --output-format result</code>
+            </div>
+            <p class="tool-result"><span>✓</span> session 7fd2c1e8 · updated retry.py · 8 tests passed</p>
+
+            <p><span class="agent-name">coedx</span> The test passes, but cancellation is still uncovered. I’ll continue the same session.</p>
+
+            <div class="tool-call">
+              <p><span class="tool-name">paimon</span> <span class="resume-tag">resume 7fd2c1e8</span></p>
+              <code>paimon --profile worker -r 7fd2c1e8 -p "add coverage for cancellation and fix any issue it exposes" --mode edit --output-format result</code>
+            </div>
+            <p class="tool-result"><span>✓</span> session 7fd2c1e8 · added regression coverage · 11 tests passed</p>
+
+            <p><span class="agent-name">coedx</span> Reviewed the final diff. The retry and cancellation paths are both covered.</p>
+          </div>
+        </figure>
+      </section>
+
+      <section aria-labelledby="models">
+        <h2 id="models">Models and providers</h2>
+        <p>
+          Paimon is not tied to one model vendor. It supports OpenAI, Anthropic, DeepSeek,
+          Moonshot, Z.AI, Cerebras, and other compatible providers. A custom API base can be used
+          for self-hosted or OpenAI-compatible endpoints.
+        </p>
+        <p>
+          Provider and model are configured separately, and model names are free-form. New or
+          unlisted models can therefore be used without waiting for them to be added to Paimon's
+          model picker.
+        </p>
+      </section>
+
+      <section aria-labelledby="install">
+        <h2 id="install">Install and run</h2>
+        <p>The recommended way to run the current release:</p>
+        <pre><code>uvx paimon</code></pre>
+        <p>To run the latest code from the <code>master</code> branch:</p>
+        <pre><code>uvx git+https://github.com/aisk/paimon@master</code></pre>
+        <p>For a persistent installation, choose one:</p>
+        <div class="install-option">
+          <span>with uv</span>
+          <pre><code>uv tool install paimon</code></pre>
+        </div>
+        <div class="install-option">
+          <span>with pip</span>
+          <pre><code>pip install paimon</code></pre>
+        </div>
+        <p>
+          Then run <code>paimon</code>. The first run asks for the provider, model, API base, and
+          API key.
+        </p>
+      </section>
+
+      <p class="more">More commands and configuration options are in the <a href="https://github.com/aisk/paimon#readme">README</a>.</p>
+
+      <details class="easter-egg">
+        <summary>ehe?</summary>
+        <code>uvx paimon --ehe</code>
+      </details>
+    </main>
+
+    <footer>
+      <a href="https://github.com/aisk/paimon">github.com/aisk/paimon</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/aisk/paimon/blob/master/LICENSE">license</a>
+      <span class="paimon-star" title="A tiny bit of Mora." aria-label="A tiny bit of Mora">✦</span>
+    </footer>
+  </body>
+</html>
