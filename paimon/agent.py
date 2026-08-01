@@ -9,7 +9,7 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Callable, Optional
 
 from pydantic_ai.direct import model_request_stream
 from pydantic_ai.messages import (
@@ -119,6 +119,15 @@ class CompactionNotice:
     """A compaction checkpoint encountered while replaying history."""
 
 
+# Everything ``Agent.run`` and ``replay_events`` can yield. Renderers dispatch
+# on isinstance; the alias exists so a type checker can flag an unhandled one.
+AgentEvent = (
+    TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
+    | SessionHandoff | TurnEnd | ContextCompacted | ContextCompactionFailed
+    | ModelRetry | UserInput | CompactionNotice
+)
+
+
 def _parse_args(args: object) -> dict:
     """Tool-call arguments as a dict, tolerating malformed JSON from the model."""
     if isinstance(args, dict):
@@ -132,12 +141,12 @@ def _parse_args(args: object) -> dict:
     return {}
 
 
-def replay_events(messages: list[ModelMessage]) -> list[object]:
+def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     """Persisted messages replayed as the events a live ``Agent.run`` yields.
 
     Lets a UI render resumed history through the same code path as live turns.
     """
-    events: list[object] = []
+    events: list[AgentEvent] = []
     for message in messages:
         if is_summary_message(message):
             events.append(CompactionNotice())
@@ -309,7 +318,57 @@ class Agent:
         """Compact on demand; None when the history is too short to be worth it."""
         return await self._maybe_compact(force=True)
 
-    async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[object]:
+    # ---- Tools the agent loop runs itself ----------------------------------
+    # These mutate agent-held state or end the turn, so they cannot go through
+    # the stateless tools.run_tool. Each handler fills ``slot`` with the tool
+    # result, calls ``persist()`` after every slot update, and yields the
+    # events to forward; yielding SessionHandoff ends the whole turn.
+
+    async def _run_write_todos(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
+                               persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+        # Reports itself as TodosUpdate alone — no ToolStart/ToolEnd — which is
+        # also the shape replay_events produces for it, so no renderer has to
+        # special-case the name.
+        self.todos = args.get("todos") or []
+        slot.content = tools.render_todos(self.todos)
+        persist()
+        yield TodosUpdate(list(self.todos))
+
+    async def _run_start_new_session(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
+                                     persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+        # On approval the turn ends without another model request: the whole
+        # point is to stop spending tokens on this history. The result is
+        # still written into its pre-seeded slot first, so the session stays
+        # valid and resumable.
+        yield ToolStart(call.tool_call_id, call.tool_name, args)
+        prompt_text = str(args.get("prompt") or "").strip()
+        if not prompt_text:
+            slot.content = "Error: prompt is required."
+            persist()
+            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+            return
+        needs_confirm = tools.gate(call.tool_name, args, self.mode, self.cwd,
+                                   self.toolset) == "confirm"
+        allowed = not needs_confirm or (
+            await self.confirm(call.tool_name, args) if self.confirm else False
+        )
+        if not allowed:
+            slot.content = "User denied this operation."
+            persist()
+            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
+            return
+        slot.content = ("Handoff accepted: this session ended here and a new "
+                        "session continued with the provided prompt.")
+        persist()
+        yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+        yield SessionHandoff(prompt_text)
+
+    _AGENT_HANDLED = {
+        "write_todos": _run_write_todos,
+        "start_new_session": _run_start_new_session,
+    }
+
+    async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[AgentEvent]:
         """Run one user turn to completion, yielding events along the way.
 
         ``expand=False`` skips @path expansion, for callers that assembled the
@@ -407,70 +466,39 @@ class Agent:
             tool_request = ModelRequest(parts=returns)
             record_id = self._append_message(tool_request)
 
+            def persist() -> None:
+                """Re-persist the tool request with the slots filled so far."""
+                self._replace_message(record_id, tool_request)
+
             for slot, call in zip(returns, calls):
                 args = _parse_args(call.args)
                 name = call.tool_name
 
                 # A name outside this agent's tool set is rejected before the
-                # special-cased tools below, so excluding write_todos or
+                # agent-handled table below, so excluding write_todos or
                 # start_new_session from a toolset actually disables them.
                 if name not in self.toolset:
                     yield ToolStart(call.tool_call_id, name, args)
                     slot.content = f"Error: unknown tool {name!r}"
-                    self._replace_message(record_id, tool_request)
+                    persist()
                     yield ToolEnd(call.tool_call_id, name, slot.content)
                     continue
 
-                # write_todos mutates agent-held state rather than the filesystem,
-                # so it is handled here instead of in the stateless execute_tool.
-                # It reports itself as TodosUpdate alone — no ToolStart/ToolEnd —
-                # which is also the shape replay_events produces for it, so no
-                # renderer has to special-case the name.
-                if name == "write_todos":
-                    self.todos = args.get("todos") or []
-                    result = tools.render_todos(self.todos)
-                    slot.content = result
-                    self._replace_message(record_id, tool_request)
-                    yield TodosUpdate(list(self.todos))
+                handler = self._AGENT_HANDLED.get(name)
+                if handler is not None:
+                    async for event in handler(self, call, args, slot, persist):
+                        yield event
+                        if isinstance(event, SessionHandoff):
+                            # Any later calls in this response keep their
+                            # "Interrupted by user." placeholders.
+                            return
                     continue
-
-                # start_new_session ends this turn instead of running a tool,
-                # so it is handled here. On approval the generator returns
-                # without another model request: the whole point is to stop
-                # spending tokens on this history. The result is still written
-                # into its pre-seeded slot first, so the session stays valid
-                # and resumable. Any later calls in the same response keep
-                # their "Interrupted by user." placeholders.
-                if name == "start_new_session":
-                    yield ToolStart(call.tool_call_id, name, args)
-                    prompt_text = str(args.get("prompt") or "").strip()
-                    if not prompt_text:
-                        slot.content = "Error: prompt is required."
-                        self._replace_message(record_id, tool_request)
-                        yield ToolEnd(call.tool_call_id, name, slot.content)
-                        continue
-                    needs_confirm = tools.gate(name, args, self.mode, self.cwd,
-                                               self.toolset) == "confirm"
-                    allowed = not needs_confirm or (
-                        await self.confirm(name, args) if self.confirm else False
-                    )
-                    if not allowed:
-                        slot.content = "User denied this operation."
-                        self._replace_message(record_id, tool_request)
-                        yield ToolEnd(call.tool_call_id, name, slot.content, denied=True)
-                        continue
-                    slot.content = ("Handoff accepted: this session ended here and a new "
-                                    "session continued with the provided prompt.")
-                    self._replace_message(record_id, tool_request)
-                    yield ToolEnd(call.tool_call_id, name, slot.content)
-                    yield SessionHandoff(prompt_text)
-                    return
 
                 yield ToolStart(call.tool_call_id, name, args)
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode,
                                                       self.confirm, self.toolset)
 
                 slot.content = result
-                self._replace_message(record_id, tool_request)
+                persist()
                 yield ToolEnd(call.tool_call_id, name, result, denied=denied)
             # loop again so the model can react to tool results

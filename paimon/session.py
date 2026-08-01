@@ -157,27 +157,34 @@ class Session:
         return Session(path, session_id, self.cwd)
 
     @classmethod
-    def _scan(cls, cwd: Path) -> list[tuple["Session", list[dict]]]:
-        """Valid sessions for cwd with their records, newest first by mtime."""
+    def list(cls, cwd: Path) -> list["Session"]:
+        """Sessions that have at least one message, newest first by mtime.
+
+        Reads each log only far enough to see the header and a first message,
+        so listing stays cheap with many long sessions.
+        """
         directory = _project_dir(cwd)
         if not directory.is_dir():
             return []
         paths = sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        return [(cls(path, str(records[0]["id"]), cwd), records)
-                for path in paths
-                if (records := cls._read_records(path))
-                and records[0].get("type") == "session"
-                and isinstance(records[0].get("id"), str)]
-
-    @classmethod
-    def list(cls, cwd: Path) -> list["Session"]:
-        """Sessions that have at least one message, newest first."""
-        return [session for session, records in cls._scan(cwd)
-                if any(record.get("type") == "message" for record in records)]
+        sessions = []
+        for path in paths:
+            records = cls._iter_records(path)
+            header = next(records, None)
+            if (header is None or header.get("type") != "session"
+                    or not isinstance(header.get("id"), str)):
+                continue
+            if any(record.get("type") == "message" for record in records):
+                sessions.append(cls(path, header["id"], cwd))
+        return sessions
 
     @staticmethod
-    def _read_records(path: Path) -> list[dict]:
-        records = []
+    def _iter_records(path: Path):
+        """The log's records in order, skipping unparseable lines.
+
+        An unreadable file yields nothing; consumers that can stop early
+        (previews, listing) should iterate this instead of _read_records.
+        """
         try:
             with path.open(encoding="utf-8") as file:
                 for line in file:
@@ -186,15 +193,18 @@ class Session:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(record, dict):
-                        records.append(record)
+                        yield record
         except OSError:
-            return []
-        return records
+            return
+
+    @staticmethod
+    def _read_records(path: Path) -> list[dict]:
+        return list(Session._iter_records(path))
 
     def messages(self) -> list[ModelMessage]:
         raw_messages: list[dict] = []
         positions: dict[str, int] = {}
-        for record in self._read_records(self.path):
+        for record in self._iter_records(self.path):
             if record.get("type") == "compaction":
                 summary = record.get("summary")
                 kept_messages = record.get("kept_messages")
@@ -220,21 +230,22 @@ class Session:
 
     def system_prompt(self) -> Optional[str]:
         """Return the system prompt snapshot stored for this session."""
-        for record in self._read_records(self.path):
+        for record in self._iter_records(self.path):
             if record.get("type") == "system_prompt" and isinstance(record.get("content"), str):
                 return record["content"]
         return None
 
     def created_at(self) -> Optional[str]:
         """ISO timestamp from the session header record, if present."""
-        records = self._read_records(self.path)
-        if records and records[0].get("type") == "session" and isinstance(records[0].get("created_at"), str):
-            return records[0]["created_at"]
+        header = next(self._iter_records(self.path), None)
+        if (header is not None and header.get("type") == "session"
+                and isinstance(header.get("created_at"), str)):
+            return header["created_at"]
         return None
 
     def first_user_text(self) -> Optional[str]:
         """The first user message, for picker previews."""
-        for record in self._read_records(self.path):
+        for record in self._iter_records(self.path):
             message = record.get("message")
             if record.get("type") != "message" or not isinstance(message, dict):
                 continue
