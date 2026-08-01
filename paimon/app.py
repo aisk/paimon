@@ -213,6 +213,8 @@ class PaimonApp(App):
                 self.action_compact,
             ),
             SystemCommand("New session", "Start a new empty session", self.action_new_session),
+            SystemCommand("Fork session", "Copy this conversation into a new session and continue there",
+                          self.action_fork_session),
             SystemCommand("Resume session", "Pick an earlier session in this directory to resume",
                           self.action_resume_session),
         ]
@@ -288,6 +290,24 @@ class PaimonApp(App):
         self._queue.clear()
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
+        self._refresh_statusbar()
+
+    def action_fork_session(self) -> None:
+        if self._turn is not None and self._turn.is_running:
+            return
+        forked = self.agent.session.fork()
+        try:
+            agent = Agent.open(session=forked, confirm=self._confirm,
+                               mode=self.mode, config=self.config)
+        except SessionError as exc:
+            self._add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
+            return
+        # The conversation on screen is the fork's history verbatim, so the
+        # log stays; only the agent underneath changes.
+        agent.todos = list(self.agent.todos)
+        self.agent.session.unlock()
+        self.agent = agent
+        self._add(Content.from_markup("[$text-muted]Forked session $id[/]", id=agent.session.id[:8]))
         self._refresh_statusbar()
 
     @work

@@ -127,6 +127,35 @@ class Session:
                         "cwd": str(session.cwd), "created_at": _now()})
         return session
 
+    def fork(self) -> "Session":
+        """Copy this session's log into a new session with a fresh id.
+
+        The copy keeps every line except the old header verbatim, so ``log``
+        line numbers stay aligned between the two sessions.
+        """
+        session_id = str(uuid4())
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = self.path.parent / f"{timestamp}-{session_id[:8]}.jsonl"
+        header = {"type": "session", "id": session_id,
+                  "cwd": str(self.cwd), "created_at": _now()}
+        lines = [json.dumps(header, ensure_ascii=False, separators=(",", ":"))]
+        with self.path.open(encoding="utf-8") as file:
+            for line in file:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    record = None
+                if isinstance(record, dict) and record.get("type") == "session":
+                    continue
+                lines.append(line.rstrip("\n"))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, ("\n".join(lines) + "\n").encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return Session(path, session_id, self.cwd)
+
     @classmethod
     def _scan(cls, cwd: Path) -> list[tuple["Session", list[dict]]]:
         """Valid sessions for cwd with their records, newest first by mtime."""

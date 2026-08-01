@@ -71,6 +71,60 @@ class PreviewTest(SessionScanTestCase):
         self.assertIsNone(Session.create(self.cwd).first_user_text())
 
 
+class ForkTest(SessionScanTestCase):
+    def test_fork_copies_log_under_a_fresh_id(self) -> None:
+        source = Session.create(self.cwd)
+        source.append_system_prompt("be helpful")
+        source.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        source.append_message(ModelResponse(parts=[TextPart(content="hello!")]))
+
+        fork = source.fork()
+
+        self.assertNotEqual(fork.id, source.id)
+        self.assertNotEqual(fork.path, source.path)
+        self.assertEqual(fork.path.parent, source.path.parent)
+        header = Session._read_records(fork.path)[0]
+        self.assertEqual(header["type"], "session")
+        self.assertEqual(header["id"], fork.id)
+        self.assertEqual(fork.system_prompt(), "be helpful")
+        self.assertEqual(fork.messages(), source.messages())
+
+    def test_fork_leaves_the_source_untouched(self) -> None:
+        source = Session.create(self.cwd)
+        source.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        before = source.path.read_text(encoding="utf-8")
+
+        source.fork()
+
+        self.assertEqual(source.path.read_text(encoding="utf-8"), before)
+
+    def test_fork_keeps_line_numbers_aligned(self) -> None:
+        source = Session.create(self.cwd)
+        source.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        with source.path.open("a", encoding="utf-8") as file:
+            file.write("not json\n")
+        source.append_message(ModelResponse(parts=[TextPart(content="hello!")]))
+
+        fork = source.fork()
+
+        source_lines = source.path.read_text(encoding="utf-8").splitlines()
+        fork_lines = fork.path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(fork_lines[1:], source_lines[1:])
+
+    def test_fork_preserves_compaction_checkpoints(self) -> None:
+        source = Session.create(self.cwd)
+        source.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        kept = ModelResponse(parts=[TextPart(content="hello!")])
+        source.append_compaction("earlier talk", [kept], tokens_before=100)
+
+        # The summary message is synthesized on replay with a fresh timestamp,
+        # so compare part contents rather than whole messages.
+        contents = [[part.content for part in message.parts] for message in source.fork().messages()]
+        self.assertEqual(contents, [[part.content for part in message.parts]
+                                    for message in source.messages()])
+        self.assertIn("earlier talk", contents[0][0])
+
+
 class LockTest(SessionScanTestCase):
     """Lock mechanics live in test_lockfile; this covers the session semantics."""
 

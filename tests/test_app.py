@@ -21,6 +21,7 @@ from textual.widgets import Static
 from textual.worker import WorkerState
 
 from helpers import SILENT_EVENTS, agent_events, stub_model
+from paimon import lockfile
 from paimon.agent import Agent, ReasoningDelta
 from paimon.app import PaimonApp, _EventRenderer, _session_label
 from paimon.config import Config
@@ -200,6 +201,43 @@ class ResumeSessionTest(AppTestCase):
             results = app.query(ToolResult)
             self.assertEqual(len(results), 1)
             self.assertIn("a.py", results.first()._full)
+
+
+class ForkSessionTest(AppTestCase):
+    async def test_fork_swaps_agent_and_keeps_the_log(self) -> None:
+        old = ResumeSessionTest._old_session("keep this")
+        app = self.make_app(session=old)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_fork_session()
+            await pilot.pause()
+            self.assertNotEqual(app.agent.session.id, old.id)
+            self.assertEqual(app.agent.history, old.messages())
+            self.assertTrue(app.query(UserMessage), "log survives the fork")
+            log_text = " ".join(str(w.render()) for w in app.query_one("#log").children)
+            self.assertIn("Forked session", log_text)
+            self.assertNotIn(str(old.path.resolve()), lockfile._held)
+            self.assertIn(str(app.agent.session.path.resolve()), lockfile._held)
+
+    async def test_source_session_stays_resumable(self) -> None:
+        old = ResumeSessionTest._old_session()
+        app = self.make_app(session=old)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_fork_session()
+            await pilot.pause()
+            resumed = Agent.open(session=old)
+            self.assertEqual(resumed.history, app.agent.history)
+            resumed.session.unlock()
+
+    async def test_noop_while_turn_is_running(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            before = app.agent
+            app._turn = SimpleNamespace(is_running=True)
+            app.action_fork_session()
+            await pilot.pause()
+            self.assertIs(app.agent, before)
 
 
 class SessionLabelTest(AppTestCase):

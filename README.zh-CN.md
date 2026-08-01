@@ -26,7 +26,7 @@ uvx paimon
 
 首次启动会询问 provider、模型、API base 和 key，并保存到 `~/.config/paimon/default/config.json`。之后输入要完成的任务即可。
 
-运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
+运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建、分叉或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
 
 在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
