@@ -534,7 +534,8 @@ class PaimonApp(App):
     async def _update_statusbar_tokens(self) -> None:
         # Token counting walks the whole history; keep it off the UI loop.
         tokens = await asyncio.to_thread(
-            compaction.count_tokens, list(self.agent.history), self.agent.tool_schemas
+            compaction.count_tokens, list(self.agent.history), self.agent.tool_schemas,
+            self.agent.system_prompt,
         )
         self._refresh_statusbar(tokens)
 
