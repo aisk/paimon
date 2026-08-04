@@ -12,11 +12,13 @@ from pathlib import Path
 
 CONTEXT_FILE = "AGENTS.md"
 
+# The available tools are not enumerated here: their schemas travel with every
+# request, and a prose list would drift from the agent's actual (possibly
+# narrowed) toolset.
 INSTRUCTIONS = """You are Paimon, a concise coding assistant operating in a terminal.
 
 You help with software engineering tasks by reading and editing files and running
-shell commands. You have these tools: read_file, write_file, edit_file, glob, shell,
-write_todos, start_new_session.
+shell commands.
 
 Guidelines:
 - Prefer reading a file before editing it. For edits, use edit_file with a unique
