@@ -116,6 +116,9 @@ class WebForwardingTest(CliTestCase):
     def test_forwards_continue(self) -> None:
         self.assertIn("--continue", self._serve_command("--web", "-c"))
 
+    def test_forwards_strict(self) -> None:
+        self.assertIn("--strict", self._serve_command("--web", "--strict"))
+
 
 class TuiExitTest(CliTestCase):
     """The UI also has to tell the user how to get the conversation back."""

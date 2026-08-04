@@ -26,7 +26,7 @@ uvx paimon
 
 The first launch asks for a provider, model, API base and key, and saves them to `~/.config/paimon/default/config.json`. Then just type what you want done.
 
-While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider or profile, new, fork or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, except clearly read-only ones like `ls` or `git status`, which run without asking, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider or profile, new, fork or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
 
 Write `@path/to/file` in a prompt to hand a file to the agent.
 
@@ -65,6 +65,7 @@ paimon log a1b2c3    # what a session did, one line per event
 
 ```bash
 paimon --mode edit                  # start in a less cautious permission mode
+paimon --strict                     # ask before every command, even read-only ones
 paimon --web                        # the same UI in a browser (--port, default 8000)
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"
@@ -72,14 +73,15 @@ paimon --model zai:glm-4.7          # this model for this run only
 paimon --profile work               # a separately configured account
 ```
 
-`-p` never stops to ask, so anything the current mode would prompt for is refused instead; pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format result` for a single JSON object with the outcome (or `json` for one event per line), and `--timeout`/`--max-tool-calls` to bound an unattended run.
+`-p` never stops to ask, so anything the current mode would prompt for is refused instead (recognized read-only commands still run in read mode); pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format result` for a single JSON object with the outcome (or `json` for one event per line), and `--timeout`/`--max-tool-calls` to bound an unattended run.
 
 ## Configuration
 
-`~/.config/paimon/<name>/config.json` holds each profile's model settings (`default` unless `--profile` says otherwise). Long conversations can be summarized in place near the context limit by adding:
+`~/.config/paimon/<name>/config.json` holds each profile's model settings (`default` unless `--profile` says otherwise). Two optional keys change how it behaves: auto-allowing read-only commands, and summarizing long conversations in place near the context limit.
 
 ```json
 {
+  "safe_commands": false,
   "compaction": {
     "enabled": true,
     "context_window": 128000,
@@ -88,5 +90,9 @@ paimon --profile work               # a separately configured account
   }
 }
 ```
+
+`safe_commands` (default `true`) lets read and edit modes run a small fixed set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns it off for one run. Commands are matched by name and flags, so anything with a pipe, a redirect or a substitution still asks.
+
+**This is a guardrail against agent mistakes, not a security boundary.** Recognized commands are still resolved through `PATH` and can still follow symlinks out of the working directory, and even a pure read pulls file contents into the model's context, so read-only is not confidentiality-safe. For real isolation, run Paimon inside a container or VM.
 
 Sessions live in `~/.local/share/paimon/sessions/` (`PAIMON_DATA_HOME` overrides). File changes render nicer if [delta](https://github.com/dandavison/delta) is installed.

@@ -26,7 +26,7 @@ uvx paimon
 
 首次启动会询问 provider、模型、API base 和 key，并保存到 `~/.config/paimon/default/config.json`。之后输入要完成的任务即可。
 
-运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建、分叉或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
+运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，`ls`、`git status` 这类明确只读的命令除外，会直接执行，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建、分叉或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
 
 在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
@@ -65,6 +65,7 @@ paimon log a1b2c3    # 查看会话做了什么，每个事件一行
 
 ```bash
 paimon --mode edit                  # 以更宽松的权限模式启动
+paimon --strict                     # 每条命令都先询问，包括只读命令
 paimon --web                        # 在浏览器中使用同一套 UI（--port，默认 8000）
 paimon -p "what does cli.py do?"    # 直接在 stdout 输出回答，不启动 UI
 cat log.txt | paimon -p "summarize this"
@@ -72,14 +73,15 @@ paimon --model zai:glm-4.7          # 仅本次运行使用该模型
 paimon --profile work               # 单独配置的另一个账号
 ```
 
-`-p` 不会停下来询问，当前模式需要确认的操作会被直接拒绝；如果本次运行需要修改文件，传 `--mode edit` 或 `--mode yolo`。加 `--output-format result` 输出一个包含结果的 JSON 对象（`json` 则每行输出一个事件），用 `--timeout`/`--max-tool-calls` 为无人值守的运行设置上限。
+`-p` 不会停下来询问，当前模式需要确认的操作会被直接拒绝（识别为只读的命令在 read 模式下仍会执行）；如果本次运行需要修改文件，传 `--mode edit` 或 `--mode yolo`。加 `--output-format result` 输出一个包含结果的 JSON 对象（`json` 则每行输出一个事件），用 `--timeout`/`--max-tool-calls` 为无人值守的运行设置上限。
 
 ## 配置
 
-`~/.config/paimon/<name>/config.json` 保存每个 profile 的模型设置（不传 `--profile` 时为 `default`）。长对话可以在接近上下文上限时原地总结，添加如下配置：
+`~/.config/paimon/<name>/config.json` 保存每个 profile 的模型设置（不传 `--profile` 时为 `default`）。两个可选配置项可以改变它的行为：自动放行只读命令，以及在接近上下文上限时原地总结长对话。
 
 ```json
 {
+  "safe_commands": false,
   "compaction": {
     "enabled": true,
     "context_window": 128000,
@@ -88,5 +90,9 @@ paimon --profile work               # 单独配置的另一个账号
   }
 }
 ```
+
+`safe_commands`（默认 `true`）允许 read 和 edit 模式不经询问执行一小组固定的、明确只读的命令（`ls`、`cat`、`git status` 等）；`--strict` 可在单次运行中关闭它。匹配基于命令名和参数，因此包含管道、重定向或命令替换的写法仍会询问。
+
+**这是防止 agent 失误的护栏，不是安全边界。** 被识别的命令仍然通过 `PATH` 查找，仍可能顺着符号链接读到工作目录之外；而且哪怕是纯读取，也会把文件内容带进模型上下文，只读不等于保密安全。需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
 会话存放在 `~/.local/share/paimon/sessions/`（`PAIMON_DATA_HOME` 可覆盖）。安装 [delta](https://github.com/dandavison/delta) 后文件改动的展示效果更好。

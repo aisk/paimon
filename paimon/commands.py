@@ -83,6 +83,7 @@ def status(argv: list) -> int:
             "model": config.model,
             "api_base": config.api_base,
             "api_key_set": bool(config.api_key),
+            "safe_commands": config.safe_commands,
             "config_path": str(config_path(profile)),
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
@@ -92,6 +93,8 @@ def status(argv: list) -> int:
         print(f"model: {config.model} ({key_note})")
         if config.api_base:
             print(f"api base: {config.api_base}")
+        if not config.safe_commands:
+            print("safe read-only commands: off (strict)")
         print(f"config: {config_path(profile)}")
         print(f"sessions here: {len(Session.list(Path.cwd()))}")
     else:

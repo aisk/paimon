@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 import os
+import shlex
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,8 @@ ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
 # Permission modes: read (confirm writes, shell and reads outside cwd),
 # edit (auto-approve writes inside cwd), yolo (no confirmation at all).
+# In read and edit modes, shell commands recognized by safe_command() run
+# without confirmation unless the safe_commands toggle is off.
 MODES = ("read", "edit", "yolo")
 
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
@@ -33,9 +36,9 @@ class Tool:
     ``run`` takes (args, cwd, mode) and returns a string or an awaitable of
     one; it is None for tools the agent loop handles itself (write_todos).
     ``access`` drives gate(): "read" runs freely inside cwd, "write" is
-    auto-approved inside cwd in edit mode, "execute" always needs
-    confirmation outside yolo, "none" is never gated, "always" needs
-    confirmation even in yolo mode.
+    auto-approved inside cwd in edit mode, "execute" needs confirmation
+    outside yolo except for commands safe_command() recognizes as read-only,
+    "none" is never gated, "always" needs confirmation even in yolo mode.
     """
 
     schema: dict
@@ -79,14 +82,180 @@ def _inside(path: Path, cwd: Path) -> bool:
         return False
 
 
+# Any of these in the raw command string means the argv view built below may
+# not be what the shell actually runs (substitution, redirection, chaining,
+# escaping, brace expansion, glob character classes that can match ".."), so
+# the command is never auto-allowed. A false rejection only costs one
+# confirmation prompt, so this errs hard toward rejection.
+_SHELL_METACHARS = frozenset("$`;&|<>()\\{[\n\r")
+
+
+@dataclass(frozen=True)
+class _SafeCommandSpec:
+    """What still needs checking for a command that is read-only by nature."""
+
+    deny_flags: tuple[str, ...] = ()  # flags that write, execute, or hang
+    check_paths: bool = True  # non-flag args must resolve inside cwd
+
+
+# Commands with no exec/write capability at argv level, or whose few
+# dangerous flags are denied below. Deliberately absent: sed (-i), awk
+# (system()), sort (-o writes), uniq (second positional is an output file),
+# xargs, tee, less/more (! shell escape), curl/wget (network), env/printenv
+# (would dump API keys into model context).
+_SAFE_COMMANDS: dict[str, _SafeCommandSpec] = {
+    "ls": _SafeCommandSpec(),
+    "pwd": _SafeCommandSpec(),
+    "cat": _SafeCommandSpec(),
+    "head": _SafeCommandSpec(),
+    "tail": _SafeCommandSpec(deny_flags=("-f", "-F", "--follow")),  # hangs until timeout
+    "wc": _SafeCommandSpec(),
+    "stat": _SafeCommandSpec(),
+    "file": _SafeCommandSpec(deny_flags=("-C", "--compile")),  # -C writes a .mgc file
+    "which": _SafeCommandSpec(check_paths=False),  # args are command names, not paths
+    "du": _SafeCommandSpec(),
+    "df": _SafeCommandSpec(),
+    "grep": _SafeCommandSpec(),
+    "rg": _SafeCommandSpec(deny_flags=("--pre", "--hostname-bin")),  # both execute programs
+    # The complete set of GNU find actions with side effects; everything
+    # else prints to stdout or filters.
+    "find": _SafeCommandSpec(deny_flags=("-exec", "-execdir", "-ok", "-okdir", "-delete",
+                                         "-fls", "-fprint", "-fprint0", "-fprintf")),
+    "tree": _SafeCommandSpec(deny_flags=("-o",)),  # -o writes the listing to a file
+    "diff": _SafeCommandSpec(),
+    "readlink": _SafeCommandSpec(),
+    "realpath": _SafeCommandSpec(),
+    "echo": _SafeCommandSpec(check_paths=False),
+    "uname": _SafeCommandSpec(check_paths=False),
+    "whoami": _SafeCommandSpec(check_paths=False),
+    # -s sets the clock; -f reads a file, so its paths are checked like any other.
+    "date": _SafeCommandSpec(deny_flags=("-s", "--set")),
+    "nproc": _SafeCommandSpec(check_paths=False),
+}
+
+# "grep" is deliberately absent: its -O/--open-files-in-pager runs an
+# arbitrary command, and git's option bundling (-nOsh) makes that hard to
+# screen reliably. Plain grep and rg cover the same ground.
+_SAFE_GIT_SUBCOMMANDS = frozenset({
+    "status", "log", "diff", "show", "blame", "shortlog", "describe",
+    "rev-parse", "ls-files", "ls-tree", "branch", "remote", "tag",
+})
+# --ext-diff/--textconv run configured external programs, --show-signature
+# runs gpg.program, --no-index reads files outside the repo. (--output and
+# --output-directory write files; matched by prefix below.)
+_UNSAFE_GIT_FLAGS = ("--ext-diff", "--textconv", "--no-index", "--show-signature")
+# Options that read a file named on the command line, which would otherwise
+# escape the cwd check git's positional args cannot get (refs vs paths).
+_GIT_DENY_FLAGS = {
+    "blame": ("--contents",),
+    "ls-files": ("-X", "--exclude-from"),
+}
+# Subcommands whose bare/flag form lists but whose positional args mutate
+# (`git branch NAME` creates, `git tag NAME` tags, `git remote add` adds):
+# every token after the subcommand must come from the listed set.
+_GIT_FLAGS_ONLY = {
+    "branch": frozenset({"-a", "--all", "-r", "--remotes", "-v", "-vv",
+                         "--verbose", "-l", "--list", "--show-current"}),
+    "remote": frozenset({"-v", "--verbose"}),
+    "tag": frozenset({"-l", "--list", "-n"}),
+}
+
+
+def _flag_denied(tok: str, deny_flags: tuple[str, ...]) -> bool:
+    """True if tok matches a denied flag, including combined shorts ("-20f")."""
+    if tok.split("=", 1)[0] in deny_flags:
+        return True
+    if tok.startswith("--"):
+        return False
+    letters = {f[1] for f in deny_flags if len(f) == 2}
+    return any(ch in letters for ch in tok[1:])
+
+
+def _hidden_glob(tok: str) -> bool:
+    """True if a path segment could expand to ".." and escape the cwd check.
+
+    The token is checked literally, so "cwd/.*" looks contained, but the
+    shell expands it to "." and "..". Only patterns whose segment starts with
+    a dot can match "..", since "*" does not match leading dots.
+    """
+    return any(seg.startswith(".") and ("*" in seg or "?" in seg) for seg in tok.split("/"))
+
+
+def _safe_git(argv: list[str]) -> bool:
+    """argv is everything after "git". Global options before the subcommand
+    (-c, -C, --git-dir, --exec-path, ...) all start with "-" and are rejected
+    by the membership test on argv[0]."""
+    if not argv or argv[0] not in _SAFE_GIT_SUBCOMMANDS:
+        return False
+    flags_only = _GIT_FLAGS_ONLY.get(argv[0])
+    if flags_only is not None:
+        return all(tok in flags_only for tok in argv[1:])
+    deny = _UNSAFE_GIT_FLAGS + _GIT_DENY_FLAGS.get(argv[0], ())
+    for tok in argv[1:]:
+        if not tok.startswith("-"):
+            continue  # a ref or a pathspec; git's own repo boundary applies
+        if tok.split("=", 1)[0].startswith("--output") or _flag_denied(tok, deny):
+            return False
+        if "/" in tok:
+            return False  # an attached path value (--contents=/etc/passwd)
+    return True
+
+
+def safe_command(command: str, cwd: Path) -> bool:
+    """Conservatively decide whether a shell command is clearly read-only.
+
+    A guardrail against agent mistakes, not a security boundary: anything not
+    positively recognized returns False and the caller falls back to the
+    normal confirmation flow, so a miss costs a prompt, never a denial.
+    """
+    if any(ch in _SHELL_METACHARS for ch in command):
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    # Tilde expands at word start and after "=" in bash; reject both
+    # positions rather than guess what /bin/sh does. Mid-token tildes
+    # (git's HEAD~1) stay allowed.
+    if any(tok.startswith("~") or "=~" in tok for tok in argv):
+        return False
+    if argv[0] == "git":
+        return _safe_git(argv[1:])
+    spec = _SAFE_COMMANDS.get(argv[0])  # exact match: "./ls", "/bin/ls", "FOO=1 ls" miss
+    if spec is None:
+        return False
+    for tok in argv[1:]:
+        if tok.startswith("-"):
+            # A flag carrying an attached path (-f/etc/passwd, --from-file=/x)
+            # would never reach the containment check below.
+            if _flag_denied(tok, spec.deny_flags) or "/" in tok:
+                return False
+        elif _hidden_glob(tok):
+            return False
+        elif spec.check_paths and not _inside(_resolve(tok, cwd), cwd):
+            return False
+    return True
+
+
 def gate(name: str, args: dict, mode: str, cwd: Path,
-         registry: Optional[dict[str, Tool]] = None) -> str:
-    """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm")."""
+         registry: Optional[dict[str, Tool]] = None,
+         safe_commands: bool = True) -> str:
+    """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm").
+
+    ``safe_commands`` auto-allows shell commands recognized as clearly
+    read-only (see safe_command); False restores confirm-everything behavior.
+    """
     tool = (REGISTRY if registry is None else registry).get(name)
     if tool is not None and tool.access == "always":
         return "confirm"
     if mode == "yolo" or tool is None or tool.access == "none":
         return "allow"
+    if tool.access == "execute":
+        if safe_commands and safe_command(str(args.get("command") or ""), cwd):
+            return "allow"
+        return "confirm"
     # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
     inside = _inside(_resolve(str(args.get("path") or ""), cwd), cwd)
     if tool.access == "read":
@@ -98,7 +267,8 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
 
 async def run_tool(name: str, args: dict, cwd: Path, mode: str,
                    confirm: Optional[ConfirmFn] = None,
-                   registry: Optional[dict[str, Tool]] = None) -> tuple[str, bool]:
+                   registry: Optional[dict[str, Tool]] = None,
+                   safe_commands: bool = True) -> tuple[str, bool]:
     """Gate, optionally confirm, then execute a tool call.
 
     Returns ``(result, denied)``. This is the enforcement point: a call that
@@ -106,7 +276,7 @@ async def run_tool(name: str, args: dict, cwd: Path, mode: str,
     headless Agent cannot bypass the permission mode. ``registry`` narrows the
     available tools (an agent's own set); None means the full REGISTRY.
     """
-    if gate(name, args, mode, cwd, registry) == "confirm":
+    if gate(name, args, mode, cwd, registry, safe_commands=safe_commands) == "confirm":
         allowed = await confirm(name, args) if confirm else False
         if not allowed:
             return "User denied this operation.", True
@@ -225,6 +395,9 @@ async def _shell(args: dict, cwd: Path) -> str:
     proc = await asyncio.create_subprocess_shell(
         args["command"],
         cwd=str(cwd),
+        # Without this a command that reads stdin (a bare "cat") would block
+        # until the timeout, eating the user's keystrokes in the TUI.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
