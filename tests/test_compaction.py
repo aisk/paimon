@@ -24,6 +24,24 @@ def _assistant(content: str) -> ModelResponse:
     return ModelResponse(parts=[TextPart(content=content)])
 
 
+class ContextWindowTest(unittest.TestCase):
+    def test_override_beats_the_table(self) -> None:
+        self.assertEqual(compaction.context_window("zai:glm-4.6", 42_000), 42_000)
+
+    def test_known_model_families_are_inferred(self) -> None:
+        self.assertEqual(compaction.context_window("zai:glm-4.6"), 200_000)
+        self.assertEqual(compaction.context_window("zai:glm-4.5"), 128_000)
+        self.assertEqual(compaction.context_window("anthropic:claude-sonnet-4-5"), 200_000)
+        self.assertEqual(compaction.context_window("bedrock:us.anthropic.claude-opus-4-1"), 200_000)
+        self.assertEqual(compaction.context_window("openai:gpt-5-mini"), 272_000)
+        self.assertEqual(compaction.context_window("deepseek:deepseek-chat"), 128_000)
+
+    def test_unknown_model_and_no_override_disable_compaction(self) -> None:
+        self.assertIsNone(compaction.context_window("acme:mystery-1"))
+        self.assertIsNone(compaction.context_window(None))
+        self.assertIsNone(compaction.context_window("acme:mystery-1", 0))
+
+
 class CompactionHelpersTest(unittest.TestCase):
     def test_threshold_requires_known_window_and_exceeds_reserve(self) -> None:
         self.assertFalse(compaction.should_compact(90, None, 10))

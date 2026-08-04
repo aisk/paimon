@@ -290,7 +290,8 @@ class Agent:
         if not force:
             if not self.config.compaction_enabled:
                 return None
-            window = compaction.context_window(self.config.compaction_context_window)
+            window = compaction.context_window(self.config.model,
+                                               self.config.compaction_context_window)
             tokens_before = compaction.count_tokens(self.history, self.tool_schemas)
             if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
                 return None

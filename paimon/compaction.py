@@ -42,9 +42,46 @@ class CompactionResult:
         return [summary_message(self.summary), *self.kept_messages]
 
 
-def context_window(override: Optional[int] = None) -> Optional[int]:
-    """The configured input window; None disables compaction."""
-    return override if override and override > 0 else None
+# Input-window sizes by model-name fragment, first match wins, so the more
+# specific entry goes first. Deliberately coarse and conservative: a value
+# that is too small only compacts early, while none at all would silently
+# disable the compaction safety net (the config override covers the rest).
+_KNOWN_WINDOWS: tuple[tuple[str, int], ...] = (
+    ("gpt-4.1", 1_000_000),
+    ("gpt-4o", 128_000),
+    ("gpt-5", 272_000),
+    ("glm-4.6", 200_000),
+    ("claude", 200_000),
+    ("gemini", 1_000_000),
+    ("o1", 200_000),
+    ("o3", 200_000),
+    ("o4-mini", 200_000),
+    ("grok", 256_000),
+    ("deepseek", 128_000),
+    ("glm", 128_000),
+    ("kimi", 128_000),
+    ("moonshot", 128_000),
+    ("qwen", 128_000),
+    ("mistral", 128_000),
+    ("llama", 128_000),
+)
+
+
+def context_window(model: Optional[str], override: Optional[int] = None) -> Optional[int]:
+    """The window to compact against: the override, else a built-in estimate.
+
+    None means the window is unknown, which disables auto-compaction; callers
+    surface that state rather than let it look like compaction is working.
+    """
+    if override and override > 0:
+        return override
+    if not model:
+        return None
+    name = model.lower()
+    for fragment, window in _KNOWN_WINDOWS:
+        if fragment in name:
+            return window
+    return None
 
 
 def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None) -> int:

@@ -519,11 +519,15 @@ class PaimonApp(App):
         if self.config.profile != DEFAULT_PROFILE:
             parts.insert(1, f"profile {self.config.profile}")
         if tokens is not None:
-            window = compaction.context_window(self.config.compaction_context_window)
+            window = compaction.context_window(self.config.model,
+                                               self.config.compaction_context_window)
             if window:
                 parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
             else:
-                parts.append(f"context ~{tokens / 1000:.1f}k tokens")
+                # Unknown window: auto-compaction cannot trigger, so say so
+                # instead of looking like it is merely waiting to.
+                parts.append(f"context ~{tokens / 1000:.1f}k tokens "
+                             "(auto-compaction off: unknown context window)")
         self.query_one("#statusbar", Static).update(Content("  ·  ".join(parts)))
 
     @work(exclusive=True, group="statusbar")
