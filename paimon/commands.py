@@ -18,7 +18,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
-from .config import Config, config_path, validate_profile
+from .config import UNSET, Config, config_path, validate_profile
 from .llm import is_provider_available, split_model_string
 from .session import SUMMARY_PREFIX, Session
 from .tools import summarize_call
@@ -137,7 +137,7 @@ def login(argv: list) -> int:
     parser.add_argument("--model", required=True, metavar="PROVIDER:NAME",
                         help="model to use, e.g. 'zai:glm-4.7'")
     parser.add_argument("--api-base", metavar="URL",
-                        help="endpoint override for the provider")
+                        help="endpoint override for the provider (pass '' to clear a stored one)")
     key_source = parser.add_mutually_exclusive_group()
     key_source.add_argument("--api-key-env", metavar="VAR",
                             help="read the API key from this environment variable")
@@ -156,7 +156,12 @@ def login(argv: list) -> int:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
 
-    Config.load(profile).save(model=args.model, api_base=args.api_base, api_key=api_key)
+    Config.load(profile).save(
+        model=args.model,
+        # An absent flag keeps the stored value; only an explicit '' clears it.
+        api_base=args.api_base if args.api_base is not None else UNSET,
+        api_key=api_key if api_key is not None else UNSET,
+    )
     print(f"logged in: {args.model}")
     return 0
 
