@@ -131,6 +131,12 @@ class LoginTest(CommandTestCase):
         self.assertEqual(data["api_key"], "sk-old")
         self.assertEqual(data["theme"], "dark")
 
+    def test_empty_api_base_clears_the_stored_override(self) -> None:
+        self._write_config(model="zai:glm-4.7", api_base="https://old/v1")
+        code, out, err = self._run("login", "--model", "openai:gpt-5", "--api-base", "")
+        self.assertEqual(code, 0)
+        self.assertNotIn("api_base", json.loads(config_path().read_text()))
+
 
 class ProfileTest(CommandTestCase):
     def test_login_and_status_share_a_profile(self) -> None:

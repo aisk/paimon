@@ -26,6 +26,30 @@ class ConfigProfileTest(unittest.TestCase):
         self.assertEqual(Config.load().model, "test:default")
         self.assertEqual(json.loads(config_path("work").read_text())["model"], "test:work")
 
+    def test_save_none_clears_while_unpassed_fields_keep_their_values(self) -> None:
+        config = Config.load()
+        config.save(model="test:m", api_base="https://old/v1", api_key="sk-old")
+        config.save(model="test:m2", api_base=None)
+
+        data = json.loads(config_path().read_text())
+        self.assertEqual(data["model"], "test:m2")
+        self.assertNotIn("api_base", data)
+        self.assertEqual(data["api_key"], "sk-old")
+        self.assertIsNone(config.api_base)
+        self.assertEqual(Config.load().api_key, "sk-old")
+
+    def test_save_empty_string_clears_too(self) -> None:
+        config = Config.load()
+        config.save(api_base="https://old/v1")
+        config.save(api_base="")
+        self.assertNotIn("api_base", json.loads(config_path().read_text()))
+
+    def test_save_persists_show_reasoning_false(self) -> None:
+        config = Config.load()
+        config.save(show_reasoning=True)
+        config.save(show_reasoning=False)
+        self.assertFalse(Config.load().show_reasoning)
+
     def test_load_records_the_profile_on_the_instance(self) -> None:
         self.assertEqual(Config.load().profile, "default")
         self.assertEqual(Config.load("work").profile, "work")

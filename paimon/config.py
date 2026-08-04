@@ -16,6 +16,10 @@ from typing import Optional
 
 DEFAULT_PROFILE = "default"
 
+# Default for save() arguments, so passing None can mean "clear the stored
+# value" (re-logging in with a blank api_base must drop the old override).
+UNSET: object = object()
+
 _NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 
 
@@ -110,22 +114,27 @@ class Config:
 
     def save(
         self,
-        model: Optional[str] = None,
-        api_base: Optional[str] = None,
-        api_key: Optional[str] = None,
-        theme: Optional[str] = None,
-        show_reasoning: Optional[bool] = None,
+        model: object = UNSET,
+        api_base: object = UNSET,
+        api_key: object = UNSET,
+        theme: object = UNSET,
+        show_reasoning: object = UNSET,
     ) -> None:
-        """Persist the fields passed (and not None) to config.json and update self.
+        """Persist the fields passed to config.json and update self.
 
-        Other fields already in the file are preserved.
+        Passing None (or an empty string) removes the stored value; fields not
+        passed and other keys already in the file are preserved.
         """
         path = config_path(self.profile)
         data = _load_file_config(path)
         for key, value in (("model", model), ("api_base", api_base),
                            ("api_key", api_key), ("theme", theme),
                            ("show_reasoning", show_reasoning)):
-            if value is not None:
+            if value is UNSET:
+                continue
+            if value is None or value == "":
+                data.pop(key, None)
+            else:
                 data[key] = value
 
         path.parent.mkdir(parents=True, exist_ok=True)
