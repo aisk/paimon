@@ -83,7 +83,7 @@ class Config:
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
-    # Useful for custom model names that are absent from LiteLLM's model catalog.
+    # Overrides the built-in window table, for model names it does not know.
     compaction_context_window: Optional[int] = None
 
     @classmethod
