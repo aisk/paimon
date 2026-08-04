@@ -292,11 +292,11 @@ class Agent:
                 return None
             window = compaction.context_window(self.config.model,
                                                self.config.compaction_context_window)
-            tokens_before = compaction.count_tokens(self.history, self.tool_schemas)
+            tokens_before = self.count_context_tokens()
             if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
                 return None
         else:
-            tokens_before = compaction.count_tokens(self.history, self.tool_schemas)
+            tokens_before = self.count_context_tokens()
 
         result = await compaction.compact(
             self.history,
@@ -304,6 +304,7 @@ class Agent:
             keep_recent_tokens=self.config.compaction_keep_recent_tokens,
             tokens_before=tokens_before,
             tool_schemas=self.tool_schemas,
+            system_prompt=self.system_prompt,
         )
         if result is None:
             return None
@@ -312,8 +313,12 @@ class Agent:
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.history = result.messages
-        result.tokens_after = compaction.count_tokens(self.history, self.tool_schemas)
+        result.tokens_after = self.count_context_tokens()
         return result
+
+    def count_context_tokens(self) -> int:
+        """Estimate the tokens of everything the next request would send."""
+        return compaction.count_tokens(self.history, self.tool_schemas, self.system_prompt)
 
     async def compact_now(self) -> Optional[compaction.CompactionResult]:
         """Compact on demand; None when the history is too short to be worth it."""

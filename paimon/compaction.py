@@ -84,11 +84,18 @@ def context_window(model: Optional[str], override: Optional[int] = None) -> Opti
     return None
 
 
-def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None) -> int:
-    """Approximate context tokens as serialized characters / 4."""
+def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None,
+                 system_prompt: Optional[str] = None) -> int:
+    """Approximate context tokens as serialized characters / 4.
+
+    The estimate must cover everything a request actually sends, so the
+    system prompt (absent from the history) is counted here too.
+    """
     payload = json.dumps(ModelMessagesTypeAdapter.dump_python(messages, mode="json"), ensure_ascii=False)
     if tool_schemas:
         payload += json.dumps(tool_schemas, ensure_ascii=False, default=str)
+    if system_prompt:
+        payload += system_prompt
     return max(1, (len(payload) + 3) // 4)
 
 
@@ -148,6 +155,7 @@ async def compact(
     keep_recent_tokens: int,
     tokens_before: int,
     tool_schemas: Optional[list[dict]] = None,
+    system_prompt: Optional[str] = None,
 ) -> Optional[CompactionResult]:
     """Summarize the old prefix and return a new effective context."""
     cut = find_cut_index(messages, keep_recent_tokens)
@@ -185,5 +193,5 @@ Use these sections:
     if not summary.strip():
         raise RuntimeError("Context compaction returned an empty summary")
     result = CompactionResult(summary.strip(), kept_messages, tokens_before, tokens_after=0)
-    result.tokens_after = count_tokens(result.messages, tool_schemas)
+    result.tokens_after = count_tokens(result.messages, tool_schemas, system_prompt)
     return result

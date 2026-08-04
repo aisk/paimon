@@ -43,6 +43,12 @@ class ContextWindowTest(unittest.TestCase):
 
 
 class CompactionHelpersTest(unittest.TestCase):
+    def test_count_includes_the_system_prompt(self) -> None:
+        messages = [_user("hi")]
+        bare = compaction.count_tokens(messages)
+        with_prompt = compaction.count_tokens(messages, system_prompt="x" * 4_000)
+        self.assertGreaterEqual(with_prompt - bare, 900)
+
     def test_threshold_requires_known_window_and_exceeds_reserve(self) -> None:
         self.assertFalse(compaction.should_compact(90, None, 10))
         self.assertFalse(compaction.should_compact(90, 100, 10))
