@@ -85,6 +85,19 @@ class AgentSystemPromptTest(unittest.TestCase):
                            append_system_prompt="role")
             self.assertEqual(session.system_prompt(), "snapshot")
 
+    def test_prompt_does_not_enumerate_tool_names(self) -> None:
+        # Schemas travel with every request; a prose list would drift from a
+        # narrowed toolset.
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+
+            with patch("paimon.agent.Session.create", return_value=session):
+                agent = Agent.open(cwd=cwd, config=_config(),
+                                   toolset={"read_file": tools.REGISTRY["read_file"]})
+
+            self.assertNotIn("You have these tools", agent.system_prompt)
+
     def test_session_without_snapshot_does_not_regenerate_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)

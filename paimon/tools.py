@@ -441,8 +441,3 @@ def definitions(registry: dict[str, Tool]) -> list[ToolDefinition]:
         )
         for tool in registry.values()
     ]
-
-
-# The full tool set, for callers that do not narrow it per agent.
-TOOLS = schemas(REGISTRY)
-TOOL_DEFINITIONS = definitions(REGISTRY)
