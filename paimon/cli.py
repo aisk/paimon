@@ -55,8 +55,11 @@ def main() -> None:
                              "the new session's system prompt; persisted with the session, "
                              "so not combinable with --continue/--resume")
     parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="read",
-                        help="permission mode: read (confirm writes, commands and reads outside cwd), "
-                             "edit (auto-approve edits in cwd), yolo (no confirmation)")
+                        help="permission mode: read (confirm writes, non-read-only commands and "
+                             "reads outside cwd), edit (auto-approve edits in cwd), yolo (no confirmation)")
+    parser.add_argument("--strict", action="store_true",
+                        help="always ask before shell commands, even clearly read-only ones "
+                             "(overrides the safe_commands config for this run)")
     parser.add_argument("--web", action="store_true",
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
@@ -78,6 +81,8 @@ def main() -> None:
         config = Config.load(args.profile)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.strict:
+        config.safe_commands = False  # session-only; save() never persists this key
     if args.model is not None:
         try:
             split_model_string(args.model)
@@ -97,6 +102,8 @@ def main() -> None:
             flags += ["--continue"]
         if args.mode != "read":
             flags += ["--mode", args.mode]
+        if args.strict:
+            flags += ["--strict"]
         if args.model:
             flags += ["--model", args.model]
         if args.profile:

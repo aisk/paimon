@@ -496,7 +496,8 @@ class Agent:
 
                 yield ToolStart(call.tool_call_id, name, args)
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode,
-                                                      self.confirm, self.toolset)
+                                                      self.confirm, self.toolset,
+                                                      safe_commands=self.config.safe_commands)
 
                 slot.content = result
                 persist()

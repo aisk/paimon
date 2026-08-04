@@ -162,6 +162,22 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(end.denied)
             self.assertEqual((cwd / "a.txt").read_text(), "hi")
 
+    async def test_read_only_commands_run_unless_the_config_says_strict(self) -> None:
+        """The safe_commands setting has to reach run_tool, not just the gate."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            confirm = AsyncMock(return_value=False)
+            agent = self._agent(cwd, confirm=confirm, mode="read")
+
+            end = await self._run_tool_turn(agent, "shell", '{"command": "pwd"}')
+            confirm.assert_not_awaited()
+            self.assertFalse(end.denied)
+
+            agent.config.safe_commands = False
+            end = await self._run_tool_turn(agent, "shell", '{"command": "pwd"}')
+            confirm.assert_awaited_once()
+            self.assertTrue(end.denied)
+
 
 class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
     async def test_write_todos_yields_only_a_todos_update(self) -> None:

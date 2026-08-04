@@ -36,11 +36,13 @@ paimon -p "fix the failing test in tests/test_foo.py" \
   `--output-format json` unless you need to consume events in real time — it
   streams every intermediate event and repeats the answer, which you would
   pay to read twice.
-- Pick the mode for the task: `read` (analysis only, the default), `edit`
-  (may edit inside the working directory), `yolo` (may also run commands).
-  `-p` never asks for confirmation — anything the mode disallows is refused
-  and counted in `denied`; a non-zero count usually means rerun with a more
-  permissive mode.
+- Pick the mode for the task: `read` (analysis plus clearly read-only
+  commands like `ls`/`git status`, the default), `edit` (may edit inside the
+  working directory), `yolo` (may also run commands). `-p` never asks for
+  confirmation: anything the mode disallows is refused and counted in
+  `denied`; a non-zero count usually means rerun with a more permissive
+  mode. `--strict` restores ask-before-every-command, so under `-p` even
+  read-only commands are refused.
 - `--model provider:name` overrides the model for this run;
   `--profile NAME` switches to a separately configured account.
 - `--append-system-prompt "You are a code reviewer. Only report findings."`

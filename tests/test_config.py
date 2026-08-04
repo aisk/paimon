@@ -34,6 +34,19 @@ class ConfigProfileTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config.load("../evil")
 
+    def test_safe_commands_defaults_on(self) -> None:
+        self.assertTrue(Config.load().safe_commands)
+
+    def test_safe_commands_loaded_and_preserved(self) -> None:
+        path = config_path("default")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"safe_commands": False}))
+
+        config = Config.load()
+        self.assertFalse(config.safe_commands)
+        config.save(model="test:stub")
+        self.assertFalse(json.loads(path.read_text())["safe_commands"])
+
 
 if __name__ == "__main__":
     unittest.main()

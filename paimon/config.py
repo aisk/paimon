@@ -80,6 +80,9 @@ class Config:
     theme: Optional[str] = None
     # Display-only: reasoning is still generated, persisted and sent back.
     show_reasoning: bool = False
+    # Auto-allow clearly read-only shell commands (ls, git status, ...) in
+    # read/edit modes. A guardrail toggle, not a security boundary.
+    safe_commands: bool = True
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
@@ -102,6 +105,7 @@ class Config:
             api_key=data.get("api_key"),
             theme=data.get("theme"),
             show_reasoning=data.get("show_reasoning", cls.show_reasoning),
+            safe_commands=data.get("safe_commands", cls.safe_commands),
             compaction_enabled=compaction.get("enabled", cls.compaction_enabled),
             compaction_reserve_tokens=compaction.get("reserve_tokens", cls.compaction_reserve_tokens),
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
