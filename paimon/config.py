@@ -82,7 +82,9 @@ class Config:
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     theme: Optional[str] = None
-    # Display-only: reasoning is still generated, persisted and sent back.
+    # Stream reasoning expanded in the TUI (it folds once the block ends) and
+    # print it in headless mode. When off the TUI folds it behind a line-count
+    # stub instead; either way it is still generated, persisted and sent back.
     show_reasoning: bool = False
     # Auto-allow clearly read-only shell commands (ls, git status, ...) in
     # read/edit modes. A guardrail toggle, not a security boundary.

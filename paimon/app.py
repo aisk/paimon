@@ -35,7 +35,7 @@ from . import compaction, tools
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .session import Session, SessionError, resume_hint
-from .ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
+from .ui import AssistantMessage, ConfirmPanel, FoldedText, PromptInput, ToolResult, UserMessage
 
 # All three markers are East Asian Width "narrow", so the labels stay aligned on
 # terminals that render ambiguous-width glyphs double-wide. Finished work is
@@ -95,7 +95,7 @@ class _EventRenderer:
     def __init__(self, app: "PaimonApp") -> None:
         self._app = app
         self._stream: MarkdownStream | None = None
-        self._reasoning: Static | None = None
+        self._reasoning: FoldedText | None = None
         self._reasoning_buf = ""
         self._first_text_block = True
 
@@ -111,14 +111,13 @@ class _EventRenderer:
             self._app._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
 
         elif isinstance(ev, ReasoningDelta):
-            if not self._app.config.show_reasoning:
-                return
             self._reasoning_buf += ev.text
-            body = Content(self._reasoning_buf)
             if self._reasoning is None:
-                self._reasoning = self._app._add(body, classes="reasoning")
-            else:
-                self._reasoning.update(body)
+                self._reasoning = FoldedText(
+                    "", classes="reasoning", expanded=self._app.config.show_reasoning
+                )
+                await self._app.query_one("#log", VerticalScroll).mount(self._reasoning)
+            self._reasoning.set_text(self._reasoning_buf)
 
         elif isinstance(ev, TextDelta):
             if self._stream is None:
@@ -175,6 +174,10 @@ class _EventRenderer:
         if self._stream is not None:
             await self._stream.stop()
             self._stream = None
+        if self._reasoning is not None and self._app.config.show_reasoning:
+            # fold the live stream now that the block is over; blocks the user
+            # clicked open themselves are left alone
+            self._reasoning.collapse()
         self._reasoning = None
         self._reasoning_buf = ""
 
@@ -377,8 +380,8 @@ class PaimonApp(App):
 
     def action_toggle_reasoning(self) -> None:
         self.config.save(show_reasoning=not self.config.show_reasoning)
-        state = "shown" if self.config.show_reasoning else "hidden"
-        self._add(Content.from_markup(f"[$text-muted]Thinking display: {state}[/]"))
+        state = "streamed live" if self.config.show_reasoning else "folded"
+        self._add(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
 
     # ---- login --------------------------------------------------------------
 
@@ -676,7 +679,7 @@ class PaimonApp(App):
                     # the model is about to react to what just happened
                     set_state("waiting")
                 elif isinstance(ev, ReasoningDelta):
-                    # hidden reasoning has no visible stream, so the spinner stands in
+                    # folded reasoning only ticks a line count, so the spinner stands in
                     set_state(None if self.config.show_reasoning else "thinking")
                 elif isinstance(ev, SessionHandoff):
                     # the switch happens after this worker finishes, in

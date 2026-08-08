@@ -340,13 +340,27 @@ class ReasoningDisplayTest(AppTestCase):
             self.assertEqual(len(widgets), 1)
             self.assertIn("thinking hard", str(widgets.first().render()))
 
-    async def test_reasoning_hidden_by_default(self) -> None:
+    async def test_reasoning_folded_by_default(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             renderer = _EventRenderer(app)
-            await renderer.handle(ReasoningDelta("thinking hard"))
+            await renderer.handle(ReasoningDelta("line one\nline two\nline three"))
             await pilot.pause()
-            self.assertFalse(app.query(".reasoning"))
+            body = str(app.query(".reasoning").first().render())
+            self.assertIn("3 lines", body)
+            self.assertNotIn("line one", body)
+
+    async def test_live_reasoning_folds_when_the_block_ends(self) -> None:
+        app = self.make_app(config=Config(model="test-model", show_reasoning=True))
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app)
+            await renderer.handle(ReasoningDelta("line one\nline two"))
+            await pilot.pause()
+            widget = app.query(".reasoning").first()
+            self.assertIn("line one", str(widget.render()))
+            await renderer.close()
+            await pilot.pause()
+            self.assertNotIn("line one", str(widget.render()))
 
     async def test_toggle_flips_and_persists(self) -> None:
         app = self.make_app()

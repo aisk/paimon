@@ -38,40 +38,57 @@ class AssistantMessage(Markdown):
         return f"**Paimon**\n\n{body}" if heading else body
 
 
-class ToolResult(Static):
-    """Tool output shown as a preview; click toggles the full text when truncated."""
+class FoldedText(Static):
+    """Long text folded behind a line-count stub; click toggles the full body.
 
-    PREVIEW_LINES = 15
+    Bodies of at most one line render as-is with no toggle.
+    """
 
-    def __init__(self, result: str, *, denied: bool = False) -> None:
-        self._full = result or "(no output)"
-        self._expanded = False
-        classes = "tool-result denied" if denied else "tool-result"
+    def __init__(self, body: str, *, classes: str = "", expanded: bool = False) -> None:
+        self._full = body
+        self._expanded = expanded
         super().__init__(self._body(), classes=classes)
 
     @property
-    def _hidden_lines(self) -> int:
-        return max(0, len(self._full.splitlines()) - self.PREVIEW_LINES)
+    def _foldable(self) -> bool:
+        return len(self._full.splitlines()) > 1
 
     def _body(self) -> Content:
+        if not self._foldable:
+            return Content(self._full)
         if self._expanded:
             return Content.from_markup(
                 "$body\n[$text-muted i]click to collapse[/]", body=self._full
             )
-        if not self._hidden_lines:
-            return Content(self._full)
-        preview = "\n".join(self._full.splitlines()[: self.PREVIEW_LINES])
         return Content.from_markup(
-            "$body\n[$text-muted i]… +$more lines — click to expand[/]",
-            body=preview,
-            more=str(self._hidden_lines),
+            "[$text-muted i]… $lines lines — click to expand[/]",
+            lines=str(len(self._full.splitlines())),
         )
 
+    def set_text(self, body: str) -> None:
+        self._full = body
+        self.update(self._body())
+
+    def collapse(self) -> None:
+        if self._expanded:
+            self._expanded = False
+            self.update(self._body())
+
     def on_click(self) -> None:
-        if not self._hidden_lines:
+        if not self._foldable:
             return
         self._expanded = not self._expanded
         self.update(self._body())
+
+
+class ToolResult(FoldedText):
+    """Tool output folded to a line-count stub; click expands the full text."""
+
+    def __init__(self, result: str, *, denied: bool = False) -> None:
+        super().__init__(
+            result or "(no output)",
+            classes="tool-result denied" if denied else "tool-result",
+        )
 
 
 class PromptInput(TextArea):
