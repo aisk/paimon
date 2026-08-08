@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -273,6 +273,22 @@ class PaimonApp(App):
             self.action_login()
         elif self._pick_session:
             self.action_resume_session()
+
+    def on_key(self, event: events.Key) -> None:
+        """Route stray typing back into the prompt.
+
+        Clicking the log (say, to expand a folded result) focuses the scroll
+        container and keystrokes would silently vanish; any printable key that
+        bubbles up unclaimed refocuses the prompt and lands in it. Modal
+        screens and the confirm panel keep the keyboard to themselves.
+        """
+        if not event.is_printable or len(self.screen_stack) > 1 or self.query(ConfirmPanel):
+            return
+        prompt = self.query_one(PromptInput)
+        if self.focused is not prompt:
+            prompt.focus()
+            prompt.insert(event.character)
+            event.stop()
 
     async def _show_resumed(self) -> None:
         renderer = _EventRenderer(self)

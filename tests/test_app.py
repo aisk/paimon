@@ -93,6 +93,27 @@ class ConfirmPanelTest(AppTestCase):
             self.assertFalse(await task)
 
 
+class StrayTypingTest(AppTestCase):
+    async def test_typing_with_log_focused_lands_in_the_prompt(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.query_one("#log", VerticalScroll).focus()
+            await pilot.press("h", "i")
+            prompt = app.query_one(PromptInput)
+            self.assertIs(app.focused, prompt)
+            self.assertEqual(prompt.text, "hi")
+
+    async def test_confirm_panel_keeps_the_keyboard(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await ConfirmPanelTest._open(app, pilot, args={"command": "rm x"})
+            await pilot.press("x")  # a key the panel does not handle
+            self.assertIsInstance(app.focused, ConfirmPanel)
+            self.assertEqual(app.query_one(PromptInput).text, "")
+            await pilot.press("escape")
+            self.assertFalse(await task)
+
+
 class ModeCycleTest(AppTestCase):
     async def test_shift_tab_cycles_mode_and_updates_indicators(self) -> None:
         app = self.make_app()
