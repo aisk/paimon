@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 from textual.worker import WorkerState
 
@@ -81,6 +81,20 @@ class ConfirmPanelTest(AppTestCase):
             task = await self._open(app, pilot, "write_file", {"path": "c.py", "content": "x"})
             await pilot.press("2")
             self.assertFalse(await task)
+
+    async def test_stale_panel_is_swept_before_mounting(self) -> None:
+        # remove() is asynchronous, so a leftover panel from an interrupted
+        # confirm can still be mounted when the next one arrives; it must not
+        # collide on the fixed widget ID.
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            leftover = ConfirmPanel("shell", {"command": "old"},
+                                    asyncio.get_running_loop().create_future())
+            await app.query_one("#workspace", Vertical).mount(leftover)
+            task = await self._open(app, pilot, args={"command": "new"})
+            self.assertEqual(len(app.query(ConfirmPanel)), 1)
+            await pilot.press("enter")
+            self.assertTrue(await task)
 
     async def test_start_new_session_detail_shows_the_prompt(self) -> None:
         app = self.make_app()

@@ -564,6 +564,10 @@ class PaimonApp(App):
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         panel = ConfirmPanel(tool_name, args, future)
         prompt = self.query_one(PromptInput)
+        # Removal below is asynchronous, so a panel from the previous confirm
+        # (or an interrupted turn) may still be mounted; sweep it first or the
+        # fixed widget ID collides.
+        await self.query(ConfirmPanel).remove()
         await self.query_one("#workspace", Vertical).mount(panel, before=prompt)
         prompt.display = False
         try:
