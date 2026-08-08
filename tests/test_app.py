@@ -96,6 +96,22 @@ class ConfirmPanelTest(AppTestCase):
             await pilot.press("enter")
             self.assertTrue(await task)
 
+    async def test_quit_while_blocked_on_confirm_does_not_crash(self) -> None:
+        # Quitting cancels the turn worker only after the DOM is torn down,
+        # so the cancel handler must not touch widgets anymore.
+        app = self.make_app()
+        with patch("paimon.agent.build_model",
+                   return_value=stub_model("shell", '{"command": "rm x"}')):
+            async with app.run_test() as pilot:
+                app.handle_submit(PromptInput.Submitted("go"))
+                for _ in range(200):
+                    await pilot.pause()
+                    if app.query(ConfirmPanel):
+                        break
+                else:
+                    raise AssertionError("confirm panel never appeared")
+                await pilot.press("ctrl+c")
+
     async def test_start_new_session_detail_shows_the_prompt(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:

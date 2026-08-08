@@ -716,14 +716,18 @@ class PaimonApp(App):
                 else:
                     set_state(None)
         except asyncio.CancelledError:
-            self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
+            # Quitting the app also cancels this worker, but only after the
+            # DOM is torn down — mounting anything then raises MountError.
+            if self.is_running:
+                self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
             raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
             timer.stop()
-            await renderer.close()
-            set_state(None)
-            self.query_one(PromptInput).focus()
+            if self.is_running:
+                await renderer.close()
+                set_state(None)
+                self.query_one(PromptInput).focus()
 
 
