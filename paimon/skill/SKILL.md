@@ -37,7 +37,8 @@ paimon -p "fix the failing test in tests/test_foo.py" \
   streams every intermediate event and repeats the answer, which you would
   pay to read twice.
 - Pick the mode for the task: `read` (analysis plus clearly read-only
-  commands like `ls`/`git status`, the default), `edit` (may edit inside the
+  commands like `ls`/`git status`, including `cd dir && …` chains and pipes
+  of recognized commands, the default), `edit` (may edit inside the
   working directory), `yolo` (may also run commands). `-p` never asks for
   confirmation: anything the mode disallows is refused and counted in
   `denied`; a non-zero count usually means rerun with a more permissive

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,8 @@ class GateTest(unittest.TestCase):
         for mode in ("read", "edit"):
             self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
             self.assertEqual(gate("shell", {"command": "git status"}, mode, self.cwd), "allow")
+        with patch.dict(os.environ, {"CDPATH": ""}):
+            self.assertEqual(gate("shell", {"command": "cd sub && ls"}, "read", self.cwd), "allow")
         self.assertEqual(gate("shell", {}, "read", self.cwd), "confirm")
 
     def test_strict_disables_safe_commands(self) -> None:
@@ -145,13 +148,76 @@ class SafeCommandTest(unittest.TestCase):
                     "date -f/etc/passwd", "date -f /etc/passwd"):
             self.assertFalse(safe_command(cmd, self.cwd), cmd)
 
-    def test_shell_metacharacters_reject(self) -> None:
+    def test_hard_metacharacters_reject(self) -> None:
+        # Substitution, redirection, escaping and expansion are rejected even
+        # inside quotes; only ";", "&" and "|" get position-aware handling.
         for cmd in (
-            "ls; rm x", "ls | wc -l", "cat $(pwd)/x", "echo `id`",
-            "ls > out.txt", "ls & rm x", "cat < /etc/passwd", "(ls)",
-            "ls \\\n x", "cat {..,x}/y", "ls [.][.]",
+            "cat $(pwd)/x", "echo `id`", "ls > out.txt", "cat < /etc/passwd",
+            "(ls)", "ls \\\n x", "cat {..,x}/y", "ls [.][.]",
+            'echo "$HOME"', "echo \"`id`\"",
         ):
             self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_compound_commands_allowed(self) -> None:
+        for cmd in ("ls | wc -l", "git log --oneline | head -5",
+                    "grep -rn foo . | wc -l", "ls && pwd",
+                    "git log; git status", "ls || pwd", "echo a&&pwd"):
+            self.assertTrue(safe_command(cmd, self.cwd), cmd)
+
+    def test_compound_unsafe_segment_rejects(self) -> None:
+        for cmd in ("ls; rm x", "ls | rm x", "ls && rm -rf .",
+                    "git status; git push", "cat f | sed -i s/a/b/ f",
+                    'echo "&&" && rm x'):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_quoted_operators_allowed(self) -> None:
+        for cmd in ('grep "a|b" f', "grep -E 'foo|bar' .", "echo 'a && b'",
+                    "grep ';' f"):
+            self.assertTrue(safe_command(cmd, self.cwd), cmd)
+
+    def test_operator_edge_cases_reject(self) -> None:
+        for cmd in ("ls &&", "&& ls", "| wc", "ls |", "ls ;; pwd",
+                    "ls && && pwd", "ls & pwd", "ls & rm x", "ls &",
+                    "ls |& pwd", "ls 'x && pwd"):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_cd_chains_allowed(self) -> None:
+        with patch.dict(os.environ, {"CDPATH": ""}):
+            for cmd in ("cd sub && ls", "cd sub && cat a.txt",
+                        "cd sub && cd deeper && ls", "cd sub && ls ../",
+                        "cd 'sub' && ls", f"cd {self.cwd}/sub && ls", "cd sub"):
+                self.assertTrue(safe_command(cmd, self.cwd), cmd)
+
+    def test_cd_forms_reject(self) -> None:
+        for cmd in ("cd", "cd -", "cd -P sub", "cd a b", "cd ..", "cd ../x",
+                    "cd a/../b && ls", "cd .* && ls", "cd sub* && ls",
+                    "cd s?b && ls"):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_cd_glob_target_cannot_escape_via_symlink(self) -> None:
+        # A glob's literal form hides the symlink it matches, so the target's
+        # containment check would otherwise pass while the shell cd's out.
+        (self.cwd / "sublink").symlink_to("/etc")
+        self.assertFalse(safe_command("cd sublink* && cat passwd", self.cwd))
+
+    def test_cd_requires_pure_and_chain(self) -> None:
+        # With ";" or "||" a failed or skipped cd leaves later segments in a
+        # different directory than modeled; in a pipeline cd runs in its own
+        # subshell and applies to nothing.
+        for cmd in ("cd sub; ls", "cd sub | ls", "ls | cd sub",
+                    "cd sub || ls", "ls; cd sub && cat f",
+                    "ls || cd sub && cat ../f"):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_cd_boundary_is_original_cwd(self) -> None:
+        self.assertFalse(safe_command("cd sub && cat ../../f", self.cwd))
+        (self.cwd / "link").symlink_to("/etc")
+        self.assertFalse(safe_command("cd link && ls", self.cwd))
+
+    def test_cdpath_rejects_cd_only(self) -> None:
+        with patch.dict(os.environ, {"CDPATH": "/tmp"}):
+            self.assertFalse(safe_command("cd sub && ls", self.cwd))
+            self.assertTrue(safe_command("ls | wc -l", self.cwd))
 
     def test_tilde_and_parse_failures_reject(self) -> None:
         for cmd in ("cat ~/secrets", "grep --include=~/x foo", "ls 'unclosed", ""):

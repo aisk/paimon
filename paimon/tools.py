@@ -82,12 +82,63 @@ def _inside(path: Path, cwd: Path) -> bool:
         return False
 
 
-# Any of these in the raw command string means the argv view built below may
-# not be what the shell actually runs (substitution, redirection, chaining,
+# Any of these anywhere in the raw command string — even inside quotes, since
+# "$" and backticks expand inside double quotes and the rest are rare enough
+# quoted that fail-closed simplicity wins — means the segment view built below
+# may not be what the shell actually runs (substitution, redirection,
 # escaping, brace expansion, glob character classes that can match ".."), so
 # the command is never auto-allowed. A false rejection only costs one
-# confirmation prompt, so this errs hard toward rejection.
-_SHELL_METACHARS = frozenset("$`;&|<>()\\{[\n\r")
+# confirmation prompt, so this errs hard toward rejection. ";", "&" and "|"
+# are not here: _split_segments handles them position-aware, so quoted forms
+# like grep "a|b" stay allowed.
+_SHELL_METACHARS = frozenset("$`<>()\\{[\n\r")
+
+
+def _split_segments(command: str) -> Optional[list[tuple[str, str]]]:
+    """Split a command at unquoted &&, ||, ";" and "|" into (operator,
+    segment) pairs; the first pair's operator is "".
+
+    Returns None for anything not worth modeling: a background "&", an empty
+    segment (doubled or dangling operator), an unterminated quote. Tracking
+    quotes with two booleans is sound only because backslash, "$" and
+    backticks were hard-rejected before this runs, so nothing sh recognizes
+    can move or escape a closing quote.
+    """
+    parts: list[tuple[str, str]] = []
+    buf: list[str] = []
+    op = ""
+    in_sq = in_dq = False
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if in_sq or in_dq:
+            if ch == ("'" if in_sq else '"'):
+                in_sq = in_dq = False
+            buf.append(ch)
+        elif ch in "'\"":
+            in_sq, in_dq = ch == "'", ch == '"'
+            buf.append(ch)
+        elif ch in ";&|":
+            two = command[i:i + 2]
+            if ch == "&" and two != "&&":
+                return None  # background job
+            seg = "".join(buf).strip()
+            if not seg:
+                return None  # leading operator, or a ";;"-style run
+            parts.append((op, seg))
+            buf = []
+            op = two if two in ("&&", "||") else ch
+            i += len(op) - 1
+        else:
+            buf.append(ch)
+        i += 1
+    if in_sq or in_dq:
+        return None
+    seg = "".join(buf).strip()
+    if not seg:
+        return None  # trailing operator, or an all-whitespace command
+    parts.append((op, seg))
+    return parts
 
 
 @dataclass(frozen=True)
@@ -201,41 +252,101 @@ def _safe_git(argv: list[str]) -> bool:
     return True
 
 
+def _safe_cd(argv: list[str], base: Path, root: Path) -> Optional[Path]:
+    """cd is modeled only in its plainest form: one directory argument that
+    stays inside root. Bare cd goes to $HOME and "cd -" to $OLDPWD, both
+    outside our view, and any flag changes semantics we do not track."""
+    if len(argv) != 2 or not argv[1] or argv[1].startswith("-"):
+        return None
+    # With CDPATH set, sh may resolve a relative target against a CDPATH
+    # entry instead of the current directory; do not guess which.
+    if os.environ.get("CDPATH"):
+        return None
+    tok = argv[1]
+    # sh's cd is logical ("link/.." strips the text, not the symlink) while
+    # _inside resolves symlinks first; a ".." segment is exactly where the
+    # two disagree, so ban it rather than model both semantics.
+    #
+    # A glob target ("sub*") resolves as its literal self, so the check
+    # below sees "cwd/sub*" (inside) while the shell cd's into whatever the
+    # glob matches — a symlink pointing outside root would escape, and every
+    # later segment would then resolve against that outside base. cd to a
+    # glob is pointless anyway, so reject any "*"/"?" outright.
+    if ".." in tok.split("/") or "*" in tok or "?" in tok:
+        return None
+    target = _resolve(tok, base)
+    # Resolved so later segments check against the directory the kernel will
+    # actually be in (without "..", physical and logical agree).
+    return target.resolve() if _inside(target, root) else None
+
+
+def _safe_simple(argv: list[str], base: Path, root: Path) -> Optional[Path]:
+    """Check one operator-free command from a compound line.
+
+    ``base`` resolves relative paths (it moves when an earlier segment was
+    cd); ``root`` is the original cwd and stays the containment boundary.
+    Returns the base for the next segment — a new directory for cd, ``base``
+    unchanged otherwise — or None when not clearly read-only.
+    """
+    # Tilde expands at word start and after "=" in bash; reject both
+    # positions rather than guess what /bin/sh does. Mid-token tildes
+    # (git's HEAD~1) stay allowed.
+    if any(tok.startswith("~") or "=~" in tok for tok in argv):
+        return None
+    if argv[0] == "cd":
+        return _safe_cd(argv, base, root)
+    if argv[0] == "git":
+        return base if _safe_git(argv[1:]) else None
+    spec = _SAFE_COMMANDS.get(argv[0])  # exact match: "./ls", "/bin/ls", "FOO=1 ls" miss
+    if spec is None:
+        return None
+    for tok in argv[1:]:
+        if tok.startswith("-"):
+            # A flag carrying an attached path (-f/etc/passwd, --from-file=/x)
+            # would never reach the containment check below.
+            if _flag_denied(tok, spec.deny_flags) or "/" in tok:
+                return None
+        elif _hidden_glob(tok):
+            return None
+        elif spec.check_paths and not _inside(_resolve(tok, base), root):
+            return None
+    return base
+
+
 def safe_command(command: str, cwd: Path) -> bool:
     """Conservatively decide whether a shell command is clearly read-only.
 
     A guardrail against agent mistakes, not a security boundary: anything not
     positively recognized returns False and the caller falls back to the
     normal confirmation flow, so a miss costs a prompt, never a denial.
+
+    Compound commands pass when every &&/||/;/|-separated segment passes on
+    its own. A cd segment moves the base later relative paths resolve
+    against, but containment is always checked against the original cwd.
     """
     if any(ch in _SHELL_METACHARS for ch in command):
         return False
-    try:
-        argv = shlex.split(command)
-    except ValueError:
+    parts = _split_segments(command)
+    if parts is None:
         return False
-    if not argv:
-        return False
-    # Tilde expands at word start and after "=" in bash; reject both
-    # positions rather than guess what /bin/sh does. Mid-token tildes
-    # (git's HEAD~1) stay allowed.
-    if any(tok.startswith("~") or "=~" in tok for tok in argv):
-        return False
-    if argv[0] == "git":
-        return _safe_git(argv[1:])
-    spec = _SAFE_COMMANDS.get(argv[0])  # exact match: "./ls", "/bin/ls", "FOO=1 ls" miss
-    if spec is None:
-        return False
-    for tok in argv[1:]:
-        if tok.startswith("-"):
-            # A flag carrying an attached path (-f/etc/passwd, --from-file=/x)
-            # would never reach the containment check below.
-            if _flag_denied(tok, spec.deny_flags) or "/" in tok:
-                return False
-        elif _hidden_glob(tok):
+    # cd may only chain with "&&": then the first failing segment stops the
+    # whole line, so every segment that does run runs in exactly the base
+    # modeled below. With ";" or "||" a failed or skipped cd leaves later
+    # segments in a different directory than modeled, and in a pipeline
+    # every segment runs in its own subshell, so cd would not apply at all.
+    pure_and = all(op == "&&" for op, _ in parts[1:])
+    base = cwd
+    for _, seg in parts:
+        try:
+            argv = shlex.split(seg)
+        except ValueError:
             return False
-        elif spec.check_paths and not _inside(_resolve(tok, cwd), cwd):
+        if not argv or (argv[0] == "cd" and not pure_and):
             return False
+        new_base = _safe_simple(argv, base, cwd)
+        if new_base is None:
+            return False
+        base = new_base
     return True
 
 

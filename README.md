@@ -91,7 +91,7 @@ paimon --profile work               # a separately configured account
 }
 ```
 
-`safe_commands` (default `true`) lets read and edit modes run a small fixed set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns it off for one run. Commands are matched by name and flags, so anything with a pipe, a redirect or a substitution still asks.
+`safe_commands` (default `true`) lets read and edit modes run a small fixed set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns it off for one run. Recognized commands may be chained with `&&`, `;` or pipes, including `cd dir && …` when the directory stays inside the working directory and every link in the chain is `&&`. Redirects, `$()`/backtick substitution and background `&` still ask.
 
 **This is a guardrail against agent mistakes, not a security boundary.** Recognized commands are still resolved through `PATH` and can still follow symlinks out of the working directory, and even a pure read pulls file contents into the model's context, so read-only is not confidentiality-safe. For real isolation, run Paimon inside a container or VM.
 
