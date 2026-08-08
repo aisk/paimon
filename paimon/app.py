@@ -22,6 +22,7 @@ from .agent import (
     ContextCompacted,
     ModelRetry,
     ReasoningDelta,
+    RequestStats,
     SessionHandoff,
     TextDelta,
     TodosUpdate,
@@ -235,6 +236,7 @@ class PaimonApp(App):
         self._todo_panel: Static | None = None
         self._queue: list[str] = []
         self._pending_handoff: str | None = None
+        self._tps: float | None = None
         if self.config.theme in self.available_themes:
             self.theme = self.config.theme
         self._persist_theme_changes = True
@@ -547,6 +549,8 @@ class PaimonApp(App):
                 # instead of looking like it is merely waiting to.
                 parts.append(f"context ~{tokens / 1000:.1f}k tokens "
                              "(auto-compaction off: unknown context window)")
+        if self._tps is not None:
+            parts.append(f"{self._tps:.0f} tps")
         self.query_one("#statusbar", Static).update(Content("  ·  ".join(parts)))
 
     @work(exclusive=True, group="statusbar")
@@ -701,6 +705,9 @@ class PaimonApp(App):
                 elif isinstance(ev, ReasoningDelta):
                     # folded reasoning only ticks a line count, so the spinner stands in
                     set_state(None if self.config.show_reasoning else "thinking")
+                elif isinstance(ev, RequestStats):
+                    self._tps = ev.output_tokens / ev.seconds
+                    self._update_statusbar_tokens()
                 elif isinstance(ev, SessionHandoff):
                     # the switch happens after this worker finishes, in
                     # on_worker_state_changed, since action_new_session

@@ -7,6 +7,7 @@ render however it likes.
 import asyncio
 import dataclasses
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
@@ -81,6 +82,14 @@ class SessionHandoff:
 
 
 @dataclass
+class RequestStats:
+    """Output speed of one finished model request, from provider-reported usage."""
+
+    output_tokens: int
+    seconds: float
+
+
+@dataclass
 class TurnEnd:
     pass
 
@@ -123,8 +132,8 @@ class CompactionNotice:
 # on isinstance; the alias exists so a type checker can flag an unhandled one.
 AgentEvent = (
     TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
-    | SessionHandoff | TurnEnd | ContextCompacted | ContextCompactionFailed
-    | ModelRetry | UserInput | CompactionNotice
+    | SessionHandoff | RequestStats | TurnEnd | ContextCompacted
+    | ContextCompactionFailed | ModelRetry | UserInput | CompactionNotice
 )
 
 
@@ -407,14 +416,18 @@ class Agent:
 
             content = ""  # accumulated text, kept if the stream is interrupted
             attempt = 0
+            stats: Optional[RequestStats] = None
 
             while True:
                 started = False  # this attempt has yielded something to the caller
+                first_event_at: Optional[float] = None
                 try:
                     async with model_request_stream(
                         model, request_messages, model_request_parameters=parameters
                     ) as stream:
                         async for event in stream:
+                            if first_event_at is None:
+                                first_event_at = time.monotonic()
                             if isinstance(event, PartStartEvent):
                                 part = event.part
                                 if isinstance(part, ThinkingPart) and part.content:
@@ -434,6 +447,11 @@ class Agent:
                                     content += delta.content_delta
                                     yield TextDelta(delta.content_delta)
                         response = stream.get()
+                        if first_event_at is not None:
+                            elapsed = time.monotonic() - first_event_at
+                            output_tokens = response.usage.output_tokens
+                            if output_tokens and elapsed > 0:
+                                stats = RequestStats(output_tokens, elapsed)
                     break
                 except asyncio.CancelledError:
                     # Interrupted mid-stream: keep partial text but drop incomplete
@@ -454,6 +472,8 @@ class Agent:
                     await asyncio.sleep(delay)
 
             self._append_message(response)
+            if stats is not None:
+                yield stats
 
             calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
             if not calls:

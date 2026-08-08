@@ -20,6 +20,7 @@ from paimon.agent import (
     Agent,
     CompactionNotice,
     ReasoningDelta,
+    RequestStats,
     SessionHandoff,
     TextDelta,
     TodosUpdate,
@@ -128,6 +129,26 @@ class MentionAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(user_texts), 1)
             self.assertIn('<mentioned_file path=', user_texts[0])
             self.assertIn("hello", user_texts[0])
+
+
+class RequestStatsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_each_request_yields_stats_from_reported_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("read_file", '{"path": "missing.txt"}')):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("hi")]
+
+            stats = [event for event in events if isinstance(event, RequestStats)]
+            # one per model request: the tool-call response and the final text
+            self.assertEqual(len(stats), 2)
+            for stat in stats:
+                self.assertGreater(stat.output_tokens, 0)
+                self.assertGreater(stat.seconds, 0)
 
 
 class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
