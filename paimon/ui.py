@@ -56,12 +56,13 @@ class FoldedText(Static):
     def _body(self) -> Content:
         if not self._foldable:
             return Content(self._full)
+        # No explicit color: the stub inherits the host widget's (dim) color.
         if self._expanded:
             return Content.from_markup(
-                "$body\n[$text-muted i]click to collapse[/]", body=self._full
+                "$body\n[i]click to collapse[/]", body=self._full
             )
         return Content.from_markup(
-            "[$text-muted i]… $lines lines — click to expand[/]",
+            "[i]… $lines lines — click to expand[/]",
             lines=str(len(self._full.splitlines())),
         )
 
