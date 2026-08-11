@@ -75,10 +75,16 @@ def _resolve(path: str, cwd: Path) -> Path:
 
 
 def _inside(path: Path, cwd: Path) -> bool:
-    """True if path (symlinks resolved) is inside cwd."""
+    """True if path (symlinks resolved) is inside cwd.
+
+    A path that cannot be resolved at all (a symlink loop raises RuntimeError,
+    not OSError) counts as outside: gate() then asks for confirmation instead
+    of letting the exception escape the tool-call error boundary and end the
+    turn.
+    """
     try:
         return path.resolve().is_relative_to(cwd.resolve())
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return False
 
 

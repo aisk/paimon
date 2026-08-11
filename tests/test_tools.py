@@ -279,6 +279,17 @@ class InsideTest(unittest.TestCase):
             self.assertFalse(_inside(secret, cwd))
             self.assertFalse(_inside(link, cwd))
 
+    def test_symlink_loop_confirms_instead_of_raising(self) -> None:
+        """resolve() raises RuntimeError on a loop, outside any tool-call error
+        boundary: it has to come back as a permission decision, not end the turn."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            loop = cwd / "loop"
+            loop.symlink_to(loop)
+
+            self.assertFalse(_inside(loop, cwd))
+            self.assertEqual(gate("read_file", {"path": "loop"}, "read", cwd), "confirm")
+
 
 class GlobSandboxTest(unittest.TestCase):
     def test_sandboxed_glob_filters_symlink_escapes(self) -> None:
