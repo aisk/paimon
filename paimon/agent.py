@@ -37,6 +37,9 @@ from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .session import Session, SessionIncompleteError, is_summary_message
 
+# Transient compaction failures tolerated in one turn before it is left off.
+_MAX_COMPACTION_FAILURES = 3
+
 
 # ---- Events yielded by Agent.run -------------------------------------------
 
@@ -416,16 +419,25 @@ class Agent:
         """
         prompt = expand_mentions(user_input, self.cwd) if expand else user_input
         self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
-        compaction_failed = False
+        # A compaction that failed for a transient reason is retried on the
+        # next step of this turn — the context only keeps growing, so giving
+        # up on the first rate limit disables the safety net exactly when it
+        # is needed. Anything else, and repeated transient failures, stop it
+        # for the rest of the turn instead of paying for it every step.
+        compaction_off = False
+        compaction_failures = 0
 
         while True:
-            if not compaction_failed:
+            if not compaction_off:
                 try:
                     compacted = await self._maybe_compact()
                 except Exception as exc:  # noqa: BLE001 - the normal request may still fit
-                    compaction_failed = True
+                    compaction_failures += 1
+                    compaction_off = (not retry.is_transient(exc)
+                                      or compaction_failures >= _MAX_COMPACTION_FAILURES)
                     yield ContextCompactionFailed(str(exc))
                 else:
+                    compaction_failures = 0
                     if compacted:
                         yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
 

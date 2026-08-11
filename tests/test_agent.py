@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from helpers import make_session, stub_model
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.messages import (
@@ -19,6 +21,7 @@ from paimon import compaction, lockfile, tools
 from paimon.agent import (
     Agent,
     CompactionNotice,
+    ContextCompactionFailed,
     ReasoningDelta,
     RequestStats,
     SessionHandoff,
@@ -478,6 +481,40 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             replayed = session.messages()
             self.assertEqual(len(replayed), 2)
             self.assertIn("checkpoint", replayed[0].parts[0].content)
+
+
+class CompactionFailureTest(unittest.IsolatedAsyncioTestCase):
+    """A failed compaction must not silently disable the safety net for the turn."""
+
+    async def _run_with(self, failure: Exception) -> tuple[list, AsyncMock]:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            # write_todos needs no confirmation, so the turn takes two model
+            # requests and therefore two compaction checks.
+            arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+            compact = AsyncMock(side_effect=[failure, None])
+            with (
+                patch("paimon.agent.build_model",
+                      return_value=stub_model("write_todos", arguments)),
+                patch("paimon.agent.Agent._maybe_compact", new=compact),
+            ):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go")]
+            return events, compact
+
+    async def test_transient_failure_is_retried_on_the_next_step(self) -> None:
+        events, compact = await self._run_with(httpx.ConnectError("dropped"))
+
+        self.assertEqual(compact.await_count, 2)
+        self.assertEqual(len([e for e in events if isinstance(e, ContextCompactionFailed)]), 1)
+
+    async def test_a_failure_that_will_not_fix_itself_stops_for_the_turn(self) -> None:
+        events, compact = await self._run_with(ValueError("no context window"))
+
+        self.assertEqual(compact.await_count, 1)
+        self.assertEqual(len([e for e in events if isinstance(e, ContextCompactionFailed)]), 1)
 
 
 if __name__ == "__main__":
