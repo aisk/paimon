@@ -307,7 +307,8 @@ class PaimonApp(App):
     def action_new_session(self) -> None:
         if self._turn is not None and self._turn.is_running:
             return
-        agent = Agent.open(confirm=self._confirm, mode=self.mode, config=self.config)
+        agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
+                           config=self.config)
         self.agent.session.unlock()
         self.agent = agent
         self.query_one("#log", VerticalScroll).remove_children()
@@ -322,7 +323,7 @@ class PaimonApp(App):
             return
         forked = self.agent.session.fork()
         try:
-            agent = Agent.open(session=forked, confirm=self._confirm,
+            agent = Agent.open(cwd=self.agent.cwd, session=forked, confirm=self._confirm,
                                mode=self.mode, config=self.config)
         except SessionError as exc:
             self._add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
@@ -348,7 +349,7 @@ class PaimonApp(App):
             self.query_one(PromptInput).focus()
             return
         try:
-            agent = Agent.open(session=labels[choice], confirm=self._confirm,
+            agent = Agent.open(cwd=self.agent.cwd, session=labels[choice], confirm=self._confirm,
                                mode=self.mode, config=self.config)
         except SessionError as exc:  # busy in another process, or no persisted system prompt
             self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))

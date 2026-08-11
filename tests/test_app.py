@@ -503,6 +503,24 @@ class FailedTurnQueueTest(AppTestCase):
             self.assertFalse(app._queue)
 
 
+class AgentCwdTest(AppTestCase):
+    """Switching sessions keeps the agent's cwd, rather than falling back to
+    the process cwd, so the permission boundary cannot drift."""
+
+    async def test_new_and_forked_sessions_inherit_the_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            elsewhere = Path(directory).resolve()
+            app = self.make_app()
+            async with app.run_test():
+                app.agent.cwd = elsewhere
+
+                app.action_new_session()
+                self.assertEqual(app.agent.cwd, elsewhere)
+
+                app.action_fork_session()
+                self.assertEqual(app.agent.cwd, elsewhere)
+
+
 class HandoffTest(AppTestCase):
     """start_new_session in the TUI: confirm (even in yolo), switch, resume hint."""
 
