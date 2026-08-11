@@ -16,6 +16,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models.function import FunctionModel
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 from textual.worker import WorkerState
@@ -457,6 +458,49 @@ class QueueTest(AppTestCase):
             self.assertEqual(prompt.text, "queued later\nhalf-typed draft")
             self.assertFalse(app._queue)
             self.assertEqual(started, ["first message\n\nsecond message"], "cancel must not auto-submit")
+
+
+class FailedTurnQueueTest(AppTestCase):
+    """A turn that errored is not a turn that finished: queued input stays put."""
+
+    @staticmethod
+    def _failing_model() -> FunctionModel:
+        async def stream(messages, info):
+            raise RuntimeError("provider failed")
+            yield  # pragma: no cover - only here to make this a generator
+
+        return FunctionModel(stream_function=stream)
+
+    async def test_run_turn_marks_a_model_error(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            with patch("paimon.agent.build_model", return_value=self._failing_model()):
+                app._start_turn("go")
+                for _ in range(200):
+                    await pilot.pause()
+                    if app._turn is not None and not app._turn.is_running:
+                        break
+            self.assertTrue(app._turn_failed)
+            self.assertEqual(app._turn.state, WorkerState.SUCCESS,
+                             "the error is shown in the log, so the worker itself succeeds")
+
+    async def test_queue_returns_to_the_input_after_an_error(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptInput)
+            app._turn = SimpleNamespace(is_running=True)
+            app.handle_submit(PromptInput.Submitted("queued while it ran"))
+            await pilot.pause()
+
+            started: list[str] = []
+            app._start_turn = started.append
+            app._turn_failed = True
+            app.on_worker_state_changed(SimpleNamespace(worker=app._turn, state=WorkerState.SUCCESS))
+            await pilot.pause()
+
+            self.assertFalse(started, "a failed turn must not fire the queue at the model")
+            self.assertEqual(prompt.text, "queued while it ran")
+            self.assertFalse(app._queue)
 
 
 class HandoffTest(AppTestCase):

@@ -233,6 +233,10 @@ class PaimonApp(App):
         self._resumed = resumed
         self._pick_session = pick_session
         self._turn: Worker | None = None
+        # run_turn reports model errors in the log instead of letting them
+        # escape the worker (which would exit the app), so the worker still
+        # ends up SUCCESS; this is what tells the two apart afterwards.
+        self._turn_failed = False
         self._todo_panel: Static | None = None
         self._queue: list[str] = []
         self._pending_handoff: str | None = None
@@ -610,16 +614,17 @@ class PaimonApp(App):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Flush queued prompts once the running turn is over.
 
-        A finished turn submits them as the next turn; an interrupted turn
-        hands them back to the input so they aren't fired at a model the user
-        just stopped.
+        A finished turn submits them as the next turn; a turn that was
+        stopped or that failed hands them back to the input, so they aren't
+        fired at a model the user just stopped or that just errored.
         """
         done = (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED)
         if event.worker is not self._turn or event.state not in done:
             return
+        finished = event.state == WorkerState.SUCCESS and not self._turn_failed
         if self._pending_handoff is not None:
             prompt, self._pending_handoff = self._pending_handoff, None
-            if event.state == WorkerState.SUCCESS:
+            if finished:
                 self._complete_handoff(prompt)
                 return
         if not self._queue:
@@ -627,13 +632,13 @@ class PaimonApp(App):
         text = "\n\n".join(self._queue)
         self._queue.clear()
         self._refresh_queued()
-        if event.state == WorkerState.CANCELLED:
+        if finished:
+            self._start_turn(text)
+        else:
             prompt = self.query_one(PromptInput)
             draft = prompt.text
             prompt.load_text(f"{text}\n{draft}" if draft else text)
             prompt.move_cursor(prompt.document.end)
-        else:
-            self._start_turn(text)
 
     def _complete_handoff(self, prompt: str) -> None:
         """Switch to a fresh session and submit the approved handoff prompt.
@@ -662,6 +667,7 @@ class PaimonApp(App):
     @work(exclusive=True)
     async def run_turn(self, text: str) -> None:
         renderer = _EventRenderer(self)
+        self._turn_failed = False
         turn_started = time.monotonic()
         state: str | None = None
         phrase = ""
@@ -722,6 +728,7 @@ class PaimonApp(App):
                 self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
             raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
+            self._turn_failed = True
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
             timer.stop()
