@@ -233,6 +233,32 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.todos, todos.todos)
 
 
+    async def test_malformed_todos_are_a_tool_error_the_turn_survives(self) -> None:
+        """The model writes these arguments, so the wrong shape must reach it as a
+        tool error instead of raising out of the agent loop and killing the turn."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("write_todos", '{"todos": "oops"}')):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go")]
+
+            self.assertFalse([e for e in events if isinstance(e, TodosUpdate)])
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertIn("must be an array", end.result)
+            self.assertEqual(agent.todos, [], "the bad list is not adopted")
+            self.assertTrue([e for e in events if isinstance(e, TurnEnd)],
+                            "the model gets the error and finishes the turn")
+            # ...and a resume of that session shows the same failed call.
+            replayed = replay_events(session.messages())
+            self.assertFalse([e for e in replayed if isinstance(e, TodosUpdate)])
+            self.assertIn("must be an array",
+                          next(e for e in replayed if isinstance(e, ToolEnd)).result)
+
+
 class AgentToolsetTest(unittest.IsolatedAsyncioTestCase):
     """A per-agent toolset narrows both what the model sees and what may run."""
 

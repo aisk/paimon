@@ -49,6 +49,20 @@ class Tool:
 _TODO_MARKERS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
 
 
+def normalize_todos(value: object) -> Optional[list[dict]]:
+    """The ``todos`` argument as a task list, or None when it is malformed.
+
+    The model writes this argument, so an unexpected shape has to become a
+    tool error rather than an exception: every consumer (the result text, the
+    TUI panel, the JSON stream) assumes a list of objects.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        return None
+    return value
+
+
 def render_todos(todos: list[dict]) -> str:
     """Plain-text rendering of the todo list, used as the tool result the model sees."""
     if not todos:

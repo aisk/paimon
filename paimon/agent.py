@@ -156,6 +156,9 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     Lets a UI render resumed history through the same code path as live turns.
     """
     events: list[AgentEvent] = []
+    # write_todos calls whose arguments never made a todo update: they were
+    # rejected live as a normal tool error, so they replay as one.
+    rejected_todos: set[str] = set()
     for message in messages:
         if is_summary_message(message):
             events.append(CompactionNotice())
@@ -164,7 +167,8 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
             for part in message.parts:
                 if isinstance(part, UserPromptPart) and isinstance(part.content, str) and part.content:
                     events.append(UserInput(part.content))
-                elif isinstance(part, ToolReturnPart) and part.tool_name != "write_todos":
+                elif isinstance(part, ToolReturnPart) and (part.tool_name != "write_todos"
+                                                           or part.tool_call_id in rejected_todos):
                     events.append(ToolEnd(part.tool_call_id, part.tool_name,
                                           str(part.content or "(no output)")))
         elif isinstance(message, ModelResponse):
@@ -175,9 +179,13 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                     events.append(TextDelta(part.content))
                 elif isinstance(part, ToolCallPart):
                     args = _parse_args(part.args)
-                    if part.tool_name == "write_todos":
-                        events.append(TodosUpdate(args.get("todos") or []))
+                    todos = (tools.normalize_todos(args.get("todos"))
+                             if part.tool_name == "write_todos" else None)
+                    if todos is not None:
+                        events.append(TodosUpdate(todos))
                     else:
+                        if part.tool_name == "write_todos":
+                            rejected_todos.add(part.tool_call_id)
                         events.append(ToolStart(part.tool_call_id, part.tool_name, args))
     return events
 
@@ -343,8 +351,17 @@ class Agent:
                                persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
         # Reports itself as TodosUpdate alone — no ToolStart/ToolEnd — which is
         # also the shape replay_events produces for it, so no renderer has to
-        # special-case the name.
-        self.todos = args.get("todos") or []
+        # special-case the name. A malformed argument is the exception: it
+        # renders as a normal failed tool call, live and on replay alike.
+        todos = tools.normalize_todos(args.get("todos"))
+        if todos is None:
+            yield ToolStart(call.tool_call_id, call.tool_name, args)
+            slot.content = ("Error: 'todos' must be an array of "
+                            "{content, status} objects.")
+            persist()
+            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+            return
+        self.todos = todos
         slot.content = tools.render_todos(self.todos)
         persist()
         yield TodosUpdate(list(self.todos))
