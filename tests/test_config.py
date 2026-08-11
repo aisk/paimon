@@ -38,6 +38,21 @@ class ConfigProfileTest(unittest.TestCase):
         self.assertIsNone(config.api_base)
         self.assertEqual(Config.load().api_key, "sk-old")
 
+    def test_unrelated_save_keeps_a_runtime_override(self) -> None:
+        """paimon --model X assigns the field on the live instance; persisting a
+        theme from the TUI must not swap the running agent back to the stored model."""
+        config = Config.load()
+        config.save(model="test:stored", api_key="sk-stored")
+        config.model = "test:override"
+        config.save(theme="nord")
+
+        self.assertEqual(config.model, "test:override")
+        self.assertEqual(config.theme, "nord")
+        self.assertEqual(config.api_key, "sk-stored")
+        stored = json.loads(config_path().read_text())
+        self.assertEqual(stored["model"], "test:stored", "the override is not persisted")
+        self.assertEqual(stored["theme"], "nord")
+
     def test_save_empty_string_clears_too(self) -> None:
         config = Config.load()
         config.save(api_base="https://old/v1")

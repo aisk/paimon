@@ -133,11 +133,11 @@ class Config:
         """
         path = config_path(self.profile)
         data = _load_file_config(path)
-        for key, value in (("model", model), ("api_base", api_base),
-                           ("api_key", api_key), ("theme", theme),
-                           ("show_reasoning", show_reasoning)):
-            if value is UNSET:
-                continue
+        passed = [(key, value) for key, value in (
+            ("model", model), ("api_base", api_base), ("api_key", api_key),
+            ("theme", theme), ("show_reasoning", show_reasoning),
+        ) if value is not UNSET]
+        for key, value in passed:
             if value is None or value == "":
                 data.pop(key, None)
             else:
@@ -153,8 +153,9 @@ class Config:
             os.close(fd)
         os.chmod(path, 0o600)
 
-        self.model = data.get("model")
-        self.api_base = data.get("api_base")
-        self.api_key = data.get("api_key")
-        self.theme = data.get("theme")
-        self.show_reasoning = data.get("show_reasoning", type(self).show_reasoning)
+        # Only the fields this call wrote are refreshed from the file. A
+        # runtime override the caller set on the instance (paimon --model X
+        # assigns self.model) must survive an unrelated save, such as the TUI
+        # persisting a theme change.
+        for key, _ in passed:
+            setattr(self, key, data.get(key, getattr(type(self), key)))
