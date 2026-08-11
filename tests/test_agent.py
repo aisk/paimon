@@ -15,7 +15,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from paimon import compaction, tools
+from paimon import compaction, lockfile, tools
 from paimon.agent import (
     Agent,
     CompactionNotice,
@@ -31,7 +31,7 @@ from paimon.agent import (
     replay_events,
 )
 from paimon.config import Config
-from paimon.session import is_summary_message, summary_message
+from paimon.session import Session, SessionIncompleteError, is_summary_message, summary_message
 
 
 def _config() -> Config:
@@ -257,6 +257,44 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse([e for e in replayed if isinstance(e, TodosUpdate)])
             self.assertIn("must be an array",
                           next(e for e in replayed if isinstance(e, ToolEnd)).result)
+
+
+class SessionLockReleaseTest(unittest.TestCase):
+    """Agent.open takes the session lock early; no failure after that may keep it."""
+
+    def test_unparsable_history_releases_the_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+
+            with patch.object(Session, "messages", side_effect=ValueError("corrupt")):
+                with self.assertRaises(ValueError):
+                    Agent.open(cwd=cwd, session=session, config=_config())
+
+            self.assertFalse(lockfile.held(session.path))
+
+    def test_prompt_build_failure_releases_a_new_sessions_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            with (
+                patch("paimon.agent.Session.create", return_value=session),
+                patch("paimon.agent.build_system_prompt", side_effect=OSError("disk full")),
+            ):
+                with self.assertRaises(OSError):
+                    Agent.open(cwd=cwd, config=_config())
+
+            self.assertFalse(lockfile.held(session.path))
+
+    def test_a_missing_snapshot_still_releases_the_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            with self.assertRaises(SessionIncompleteError):
+                Agent.open(cwd=cwd, session=session, config=_config())
+
+            self.assertFalse(lockfile.held(session.path))
 
 
 class AgentToolsetTest(unittest.IsolatedAsyncioTestCase):

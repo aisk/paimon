@@ -259,21 +259,28 @@ class Agent:
         cwd = Path(cwd or Path.cwd())
         if session is not None and append_system_prompt:
             raise ValueError("append_system_prompt only applies to a new session")
+        is_new = session is None
         if session is None:
             session = Session.create(cwd)
-            session.lock()
-            system_prompt = build_system_prompt(cwd)
-            if append_system_prompt:
-                system_prompt += f"\n\n{append_system_prompt.strip()}"
-            session.append_system_prompt(system_prompt)
-        else:
-            session.lock()
-            system_prompt = session.system_prompt()
-            if system_prompt is None:
-                session.unlock()
-                raise SessionIncompleteError("Session does not contain a persisted system prompt")
-        return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
-                   config=config, toolset=toolset)
+        session.lock()
+        # Everything after the lock can fail — a full disk while writing the
+        # prompt, a message the current pydantic-ai cannot parse — and no
+        # Agent is returned to unlock it, so the lock is released here.
+        try:
+            if is_new:
+                system_prompt = build_system_prompt(cwd)
+                if append_system_prompt:
+                    system_prompt += f"\n\n{append_system_prompt.strip()}"
+                session.append_system_prompt(system_prompt)
+            else:
+                system_prompt = session.system_prompt()
+                if system_prompt is None:
+                    raise SessionIncompleteError("Session does not contain a persisted system prompt")
+            return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
+                       config=config, toolset=toolset)
+        except BaseException:
+            session.unlock()
+            raise
 
     def _model(self) -> Model:
         """The configured model, rebuilt when login changes the config."""
