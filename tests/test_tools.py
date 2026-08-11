@@ -1,10 +1,24 @@
+import asyncio
 import os
+import re
+import signal
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from paimon.tools import MODES, _glob, _inside, _shell, gate, run_tool, safe_command
+from paimon.tools import (
+    MAX_OUTPUT,
+    MODES,
+    _glob,
+    _inside,
+    _shell,
+    gate,
+    run_tool,
+    safe_command,
+    shell_output_dir,
+)
 
 
 class GateTest(unittest.TestCase):
@@ -24,6 +38,15 @@ class GateTest(unittest.TestCase):
             self.assertEqual(gate("read_file", {"path": "../x"}, mode, self.cwd), "confirm")
             self.assertEqual(gate("glob", {"pattern": "*.py"}, mode, self.cwd), "allow")
             self.assertEqual(gate("glob", {"pattern": "*", "path": "/tmp"}, mode, self.cwd), "confirm")
+
+    def test_shell_overflow_files_read_without_confirmation(self) -> None:
+        """A command's own overflow file is readable back; nothing else moves."""
+        with tempfile.TemporaryDirectory() as data_home:
+            with patch.dict(os.environ, {"PAIMON_DATA_HOME": data_home}):
+                overflow = str(shell_output_dir() / "20260811-120000-1-abc.log")
+                self.assertEqual(gate("read_file", {"path": overflow}, "read", self.cwd), "allow")
+                self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, "read", self.cwd), "confirm")
+                self.assertEqual(gate("write_file", {"path": overflow}, "edit", self.cwd), "confirm")
 
     def test_read_mode_confirms_all_dangerous_tools(self) -> None:
         self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, "read", self.cwd), "confirm")
@@ -108,7 +131,132 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         ):
             result = await _shell({"command": "trap '' TERM; sleep 30"}, self.cwd)
 
-        self.assertEqual(result, "Error: command timed out after 0.05s.")
+        self.assertIn("(timed out after 0.05s)", result)
+
+
+def _filler(lines: int, payload: str, newline: bool = True) -> str:
+    """A POSIX sh loop printing ``payload`` ``lines`` times (/bin/sh, not bash)."""
+    fmt = "%s\\n" if newline else "%s"
+    return f'i=0; while [ $i -lt {lines} ]; do printf "{fmt}" "{payload}"; i=$((i+1)); done'
+
+
+def _overflow_path(result: str) -> Path:
+    match = re.search(r"full output: (\S+?)\]", result)
+    assert match, f"no overflow path in result: {result[-300:]!r}"
+    return Path(match.group(1))
+
+
+class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
+    """The model has to see how a command ended, which is what the tail holds."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        data = tempfile.TemporaryDirectory()
+        self.addCleanup(data.cleanup)
+        env = patch.dict(os.environ, {"PAIMON_DATA_HOME": data.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _reap(self, pid: int) -> None:
+        """Kill a process this test started, whatever the assertions did."""
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    @staticmethod
+    def _pid_from(result: str) -> int:
+        match = re.search(r"pid (\d+)", result)
+        assert match, f"no pid in result: {result!r}"
+        return int(match.group(1))
+
+    async def test_tail_survives_a_large_output_and_the_head_is_kept_on_disk(self) -> None:
+        # 300 * 101 bytes overshoots the byte budget while staying well under
+        # the line budget, so this is byte truncation alone.
+        command = f'{_filler(300, "x" * 100)}; echo FINAL-ERROR; exit 7'
+        result = await _shell({"command": command}, self.cwd)
+
+        self.assertIn("FINAL-ERROR", result, "the tail is what the model needs")
+        self.assertIn("(exit code 7)", result)
+        self.assertIn("showing last", result)
+        self.assertLessEqual(len(result), MAX_OUTPUT, "execute_tool must never re-cut this")
+
+        path = _overflow_path(result)
+        self.assertEqual(path.parent, shell_output_dir())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        full = path.read_text()
+        self.assertTrue(full.startswith("x" * 100), "the head is recoverable")
+        self.assertIn("FINAL-ERROR", full)
+
+    async def test_line_budget_truncates_before_the_byte_budget(self) -> None:
+        command = _filler(3000, "line")  # ~15KB, far under the byte cap
+        result = await _shell({"command": command}, self.cwd)
+
+        body = result.split("\n\n[")[0]
+        self.assertEqual(len(body.splitlines()), 2_000)
+        self.assertIn("of 3,000 lines", result)
+        self.assertIn("full output:", result)
+        self.assertIn("(exit code 0)", result)
+
+    async def test_multibyte_output_stays_within_the_result_budget(self) -> None:
+        command = f'{_filler(400, "😀" * 40)}; echo TAIL-OK'
+        result = await _shell({"command": command}, self.cwd)
+
+        self.assertIn("TAIL-OK", result, "the cut must not eat the last line")
+        self.assertLessEqual(len(result), MAX_OUTPUT)
+
+    async def test_one_enormous_line_keeps_its_end(self) -> None:
+        """No newline to cut on, so the end of the line is the whole answer."""
+        result = await _shell({"command": _filler(400, "x" * 100, newline=False)}, self.cwd)
+
+        self.assertIn("of line 1 (line is ", result)
+        self.assertLessEqual(len(result), MAX_OUTPUT)
+        self.assertIn("full output:", result)
+        self.assertEqual(len(_overflow_path(result).read_bytes()), 40_000)
+
+    async def test_timeout_keeps_what_the_command_already_printed(self) -> None:
+        command = "printf 'partial-output\\n'; trap '' TERM; sleep 30"
+        with (
+            patch("paimon.tools._COMMAND_TIMEOUT", 0.3),
+            patch("paimon.tools._KILL_GRACE", 0.05),
+            patch("paimon.tools._KILL_TIMEOUT", 0.5),
+        ):
+            result = await _shell({"command": command}, self.cwd)
+
+        self.assertIn("partial-output", result, "a timeout is when output matters most")
+        self.assertIn("(timed out after 0.3s)", result)
+
+    async def test_a_backgrounded_descendant_does_not_hold_the_turn(self) -> None:
+        """The command is finished even though something it started holds the pipe."""
+        with patch("paimon.tools._COMMAND_TIMEOUT", 10.0):
+            started = time.monotonic()
+            result = await _shell({"command": "sleep 10 & echo pid $!"}, self.cwd)
+            elapsed = time.monotonic() - started
+        self.addCleanup(self._reap, self._pid_from(result))
+
+        self.assertIn("(exit code 0)", result)
+        self.assertLess(elapsed, 3.0, "waiting for stdout EOF would have taken the full timeout")
+
+    async def test_timeout_kills_the_descendants_too(self) -> None:
+        command = "sleep 30 & echo pid $!; trap '' TERM; sleep 30"
+        with (
+            patch("paimon.tools._COMMAND_TIMEOUT", 0.3),
+            patch("paimon.tools._KILL_GRACE", 0.05),
+            patch("paimon.tools._KILL_TIMEOUT", 0.5),
+        ):
+            result = await _shell({"command": command}, self.cwd)
+        pid = self._pid_from(result)
+        self.addCleanup(self._reap, pid)
+
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            await asyncio.sleep(0.05)
+        self.fail(f"backgrounded descendant {pid} outlived the timeout")
 
 
 class SafeCommandTest(unittest.TestCase):
