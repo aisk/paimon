@@ -228,11 +228,17 @@ class Agent:
     def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
                  confirm: Optional[ConfirmFn] = None, mode: str = "read",
                  config: Optional[Config] = None,
-                 toolset: Optional[dict[str, tools.Tool]] = None):
+                 toolset: Optional[dict[str, tools.Tool]] = None,
+                 model_override: Optional[str] = None):
         self.cwd = Path(cwd or Path.cwd())
         self.confirm = confirm
         self.mode = mode
         self.config = config or Config.load()
+        # Per-agent model choice. One Config instance is shared by every agent
+        # in the process, so writing config.model would repoint all of them;
+        # this overrides the model for this agent alone, credentials included
+        # (they come from the config either way).
+        self.model_override = model_override
         self.todos: list[dict] = []
         self.session = session
         self.system_prompt = system_prompt
@@ -248,7 +254,8 @@ class Agent:
              confirm: Optional[ConfirmFn] = None, mode: str = "read",
              config: Optional[Config] = None,
              append_system_prompt: Optional[str] = None,
-             toolset: Optional[dict[str, tools.Tool]] = None) -> "Agent":
+             toolset: Optional[dict[str, tools.Tool]] = None,
+             model_override: Optional[str] = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
 
         ``append_system_prompt`` is added to the end of a new session's system
@@ -280,16 +287,22 @@ class Agent:
                 if system_prompt is None:
                     raise SessionIncompleteError("Session does not contain a persisted system prompt")
             return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
-                       config=config, toolset=toolset)
+                       config=config, toolset=toolset, model_override=model_override)
         except BaseException:
             session.unlock()
             raise
 
+    @property
+    def model_name(self) -> Optional[str]:
+        """The model this agent talks to: its own override, else the config's."""
+        return self.model_override or self.config.model
+
     def _model(self) -> Model:
         """The configured model, rebuilt when login changes the config."""
-        if not self.config.model:
+        name = self.model_name
+        if not name:
             raise RuntimeError("No model configured; log in first")
-        key = (self.config.model, self.config.api_base, self.config.api_key)
+        key = (name, self.config.api_base, self.config.api_key)
         if self._cached_model is None or self._cached_model[0] != key:
             self._cached_model = (key, build_model(*key))
         return self._cached_model[1]
@@ -317,13 +330,17 @@ class Agent:
         if not force:
             if not self.config.compaction_enabled:
                 return None
-            window = compaction.context_window(self.config.model,
+            window = compaction.context_window(self.model_name,
                                                self.config.compaction_context_window)
-            tokens_before = self.count_context_tokens()
+            # Nothing to compare against, so counting would be wasted work: an
+            # unknown window disables auto-compaction outright.
+            if window is None:
+                return None
+            tokens_before = await self.count_context_tokens()
             if not compaction.should_compact(tokens_before, window, self.config.compaction_reserve_tokens):
                 return None
         else:
-            tokens_before = self.count_context_tokens()
+            tokens_before = await self.count_context_tokens()
 
         result = await compaction.compact(
             self.history,
@@ -340,12 +357,19 @@ class Agent:
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.history = result.messages
-        result.tokens_after = self.count_context_tokens()
+        result.tokens_after = await self.count_context_tokens()
         return result
 
-    def count_context_tokens(self) -> int:
-        """Estimate the tokens of everything the next request would send."""
-        return compaction.count_tokens(self.history, self.tool_schemas, self.system_prompt)
+    async def count_context_tokens(self) -> int:
+        """Estimate the tokens of everything the next request would send.
+
+        Off the event loop: the count serializes the whole history, which is
+        hundreds of kilobytes on a long session.  It runs at the top of every
+        model step, and every agent shares one loop, so counting inline stalls
+        every other agent's streaming output for as long as it takes.
+        """
+        return await asyncio.to_thread(
+            compaction.count_tokens, list(self.history), self.tool_schemas, self.system_prompt)
 
     async def compact_now(self) -> Optional[compaction.CompactionResult]:
         """Compact on demand; None when the history is too short to be worth it."""

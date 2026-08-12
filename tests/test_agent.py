@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -481,6 +482,69 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             replayed = session.messages()
             self.assertEqual(len(replayed), 2)
             self.assertIn("checkpoint", replayed[0].parts[0].content)
+
+
+class CompactionTokenCountTest(unittest.IsolatedAsyncioTestCase):
+    """Counting tokens serializes the whole history, so it stays off the loop."""
+
+    @staticmethod
+    def _agent(cwd: Path, **settings) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        return Agent.open(cwd=cwd, session=session, config=Config(**settings))
+
+    async def test_an_unknown_window_counts_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # "test:stub" matches no entry in the window table and there is no
+            # override, so auto-compaction is off and counting is wasted work.
+            agent = self._agent(Path(directory), model="test:stub")
+            with patch("paimon.compaction.count_tokens") as count:
+                self.assertIsNone(await agent._maybe_compact())
+            count.assert_not_called()
+
+    async def test_the_count_runs_in_a_worker_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory), model="test:stub",
+                                compaction_context_window=1_000,
+                                compaction_reserve_tokens=0)
+            threads: list[threading.Thread] = []
+
+            def count(*args, **kwargs) -> int:
+                threads.append(threading.current_thread())
+                return 1  # well under the window, so nothing is compacted
+
+            with patch("paimon.compaction.count_tokens", side_effect=count):
+                self.assertIsNone(await agent._maybe_compact())
+
+            self.assertEqual(len(threads), 1)
+            self.assertIsNot(threads[0], threading.main_thread())
+
+
+class ModelOverrideTest(unittest.TestCase):
+    """Agents share one Config, so a per-agent model cannot live in it."""
+
+    def test_the_override_wins_and_the_shared_config_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            config = Config(model="test:stub", api_base="https://example/v1", api_key="k")
+            plain = Agent(make_session(cwd), "snapshot", config=config)
+            overridden = Agent(make_session(cwd), "snapshot", config=config,
+                               model_override="test:other")
+
+            self.assertEqual(plain.model_name, "test:stub")
+            self.assertEqual(overridden.model_name, "test:other")
+            self.assertEqual(config.model, "test:stub")
+
+            with patch("paimon.agent.build_model", side_effect=lambda *key: key) as build:
+                self.assertEqual(plain._model(), ("test:stub", "https://example/v1", "k"))
+                self.assertEqual(overridden._model(), ("test:other", "https://example/v1", "k"))
+            self.assertEqual(build.call_count, 2)
+
+    def test_the_override_picks_its_own_context_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(make_session(Path(directory)), "snapshot",
+                          config=Config(model="test:stub"), model_override="claude-x")
+            self.assertEqual(compaction.context_window(agent.model_name), 200_000)
 
 
 class CompactionFailureTest(unittest.IsolatedAsyncioTestCase):

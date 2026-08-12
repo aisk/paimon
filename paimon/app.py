@@ -408,7 +408,22 @@ class PaimonApp(App):
 
     # ---- login --------------------------------------------------------------
 
+    def _config_is_busy(self) -> bool:
+        """Whether a running turn makes it unsafe to rewrite the config.
+
+        Config is process-wide, and a turn re-reads the model at the top of
+        every step (Agent._model), so a login or profile switch landing
+        mid-turn silently swaps providers between two tool calls. Both refuse
+        while a turn is in flight. This is the one place that widens to "any
+        pane is running" once panes exist; today there is only one.
+        """
+        return self._turn is not None and self._turn.is_running
+
     def action_login(self) -> None:
+        if self._config_is_busy():
+            self._add(Content.from_markup("[$text-muted]Busy — log in after this turn[/]"))
+            return
+
         def _done(completed: bool | None) -> None:
             if completed:
                 self._add(
@@ -431,7 +446,7 @@ class PaimonApp(App):
 
     @work
     async def action_switch_profile(self) -> None:
-        if self._turn is not None and self._turn.is_running:
+        if self._config_is_busy():
             self._add(Content.from_markup("[$text-muted]Busy — switch profiles after this turn[/]"))
             return
         current = self.config.profile
@@ -541,11 +556,13 @@ class PaimonApp(App):
     # ---- status bar ---------------------------------------------------------
 
     def _refresh_statusbar(self, tokens: int | None = None) -> None:
-        parts = [f"{self.mode} mode", self.config.model or "no model", f"session {self.agent.session.id[:8]}"]
+        # The agent's model, not the config's: a pane may override it.
+        parts = [f"{self.mode} mode", self.agent.model_name or "no model",
+                 f"session {self.agent.session.id[:8]}"]
         if self.config.profile != DEFAULT_PROFILE:
             parts.insert(1, f"profile {self.config.profile}")
         if tokens is not None:
-            window = compaction.context_window(self.config.model,
+            window = compaction.context_window(self.agent.model_name,
                                                self.config.compaction_context_window)
             if window:
                 parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
@@ -560,12 +577,7 @@ class PaimonApp(App):
 
     @work(exclusive=True, group="statusbar")
     async def _update_statusbar_tokens(self) -> None:
-        # Token counting walks the whole history; keep it off the UI loop.
-        tokens = await asyncio.to_thread(
-            compaction.count_tokens, list(self.agent.history), self.agent.tool_schemas,
-            self.agent.system_prompt,
-        )
-        self._refresh_statusbar(tokens)
+        self._refresh_statusbar(await self.agent.count_context_tokens())
 
     # ---- confirmation hook (called from the agent loop) --------------------
 

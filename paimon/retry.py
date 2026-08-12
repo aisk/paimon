@@ -8,6 +8,7 @@ would duplicate them.
 """
 
 import asyncio
+import random
 
 import httpx
 from pydantic_ai.exceptions import ModelHTTPError
@@ -33,8 +34,15 @@ def is_transient(exc: BaseException) -> bool:
 
 
 def backoff(attempt: int) -> float:
-    """Seconds to wait before ``attempt`` (1 is the first retry)."""
-    return min(_BASE_DELAY * 2 ** (attempt - 1), _MAX_DELAY)
+    """Seconds to wait before ``attempt`` (1 is the first retry).
+
+    Jittered over the upper half of the exponential delay. Concurrent agents
+    share one API key, so a rate limit hits all of them at the same instant;
+    a deterministic delay would have them retry in lockstep and exhaust every
+    attempt on the same collision.
+    """
+    delay = min(_BASE_DELAY * 2 ** (attempt - 1), _MAX_DELAY)
+    return delay / 2 + random.random() * delay / 2
 
 
 def describe(exc: BaseException) -> str:

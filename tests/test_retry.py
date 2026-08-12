@@ -28,10 +28,14 @@ class RetryPolicyTest(unittest.TestCase):
         self.assertFalse(retry.is_transient(ValueError("bad model string")))
 
     def test_backoff_grows_and_is_capped(self) -> None:
-        delays = [retry.backoff(n) for n in range(1, 8)]
-        self.assertEqual(delays[:4], [1.0, 2.0, 4.0, 8.0])
-        self.assertEqual(delays[-1], 16.0)
-        self.assertEqual(sorted(delays), delays)
+        for attempt, base in enumerate([1.0, 2.0, 4.0, 8.0, 16.0, 16.0, 16.0], start=1):
+            delay = retry.backoff(attempt)
+            self.assertGreaterEqual(delay, base / 2, attempt)
+            self.assertLessEqual(delay, base, attempt)
+
+    def test_backoff_is_jittered(self) -> None:
+        """Concurrent agents sharing a key must not retry in lockstep."""
+        self.assertGreater(len({retry.backoff(4) for _ in range(20)}), 1)
 
 
 def _failing_model(failures: int, exc: Exception) -> FunctionModel:
@@ -75,9 +79,12 @@ class AgentRetryTest(unittest.IsolatedAsyncioTestCase):
         events = await self._run(model)
 
         retries = [event for event in events if isinstance(event, ModelRetry)]
-        self.assertEqual([(r.attempt, r.delay) for r in retries], [(1, 1.0), (2, 2.0)])
+        self.assertEqual([r.attempt for r in retries], [1, 2])
+        # Jittered, so only the range is fixed (see retry.backoff).
+        self.assertTrue(0.5 <= retries[0].delay <= 1.0, retries[0].delay)
+        self.assertTrue(1.0 <= retries[1].delay <= 2.0, retries[1].delay)
         self.assertEqual(retries[0].error, "HTTP 429")
-        self.assertEqual(self.sleeps, [1.0, 2.0])
+        self.assertEqual(self.sleeps, [r.delay for r in retries])
         self.assertEqual("".join(e.text for e in events if isinstance(e, TextDelta)), "done")
 
     async def test_retries_stop_at_the_attempt_limit(self) -> None:

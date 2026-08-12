@@ -26,7 +26,7 @@ from paimon import lockfile
 from paimon.agent import Agent, ReasoningDelta
 from paimon.app import PaimonApp, _EventRenderer, _session_label
 from paimon.config import Config
-from paimon.login import PickerScreen
+from paimon.login import LoginScreen, PickerScreen
 from paimon.session import Session
 from paimon.ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
@@ -656,6 +656,28 @@ class ProfileSwitchTest(AppTestCase):
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
             self.assertEqual(app.config.profile, "default")
+
+    async def test_login_is_refused_while_a_turn_is_running(self) -> None:
+        """Login rewrites the model every running turn re-reads at each step."""
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app._turn = SimpleNamespace(is_running=True)
+            app.action_login()
+            await pilot.pause()
+            self.assertEqual(self._login_screens(app), [])
+
+    async def test_login_opens_when_no_turn_is_running(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.action_login()
+            await pilot.pause()
+            # LoginScreen immediately pushes its provider picker on top, so
+            # look down the stack rather than at the active screen.
+            self.assertEqual(len(self._login_screens(app)), 1)
+
+    @staticmethod
+    def _login_screens(app: PaimonApp) -> list[LoginScreen]:
+        return [screen for screen in app.screen_stack if isinstance(screen, LoginScreen)]
 
 
 if __name__ == "__main__":
