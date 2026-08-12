@@ -5,7 +5,9 @@ messages sent to the model: old messages become a checkpoint summary while a
 recent suffix is kept verbatim.
 """
 
+import asyncio
 import json
+import weakref
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,10 +25,30 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from .session import summary_message
+from .session import is_agents_message, summary_message
 
 
 _TOOL_RESULT_LIMIT = 2_000
+
+# How many compactions may be in flight at once. Every agent in the process
+# shares one event loop, and compaction is the largest request any of them
+# sends: without a ceiling, eight panes filling up together fire eight
+# whole-history requests at the provider at the same moment, which is exactly
+# when a rate limit is least affordable (three failures and compaction is off
+# for the rest of that turn).
+_MAX_CONCURRENT_COMPACTIONS = 3
+
+# Keyed by event loop: an asyncio primitive binds to the loop that first blocks
+# on it, and the test suite runs a fresh loop per test.
+_slots: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _slots.get(loop)
+    if semaphore is None:
+        semaphore = _slots[loop] = asyncio.Semaphore(_MAX_CONCURRENT_COMPACTIONS)
+    return semaphore
 
 
 @dataclass
@@ -133,6 +155,12 @@ def _serialize_messages(messages: list[ModelMessage]) -> str:
     tool results truncated."""
     serialized: list[str] = []
     for message in messages:
+        # Agent status lines are about a moment, not about the work: the
+        # summary prompt asks for current status, and a checkpoint that
+        # preserved "a1f2 finished" from three hours ago would keep saying it
+        # for the rest of the session.
+        if is_agents_message(message):
+            continue
         if isinstance(message, ModelResponse):
             message = ModelResponse(
                 parts=[part for part in message.parts if not isinstance(part, ThinkingPart)],
@@ -180,15 +208,16 @@ Use these sections:
 {_serialize_messages(old_messages)}
 </conversation>"""
 
-    response = await model_request(
-        model,
-        [ModelRequest(parts=[
-            SystemPromptPart(content="You create context checkpoint summaries for an AI coding agent."),
-            UserPromptPart(content=prompt),
-        ])],
-        model_settings={"max_tokens": 2_048},
-        model_request_parameters=ModelRequestParameters(allow_text_output=True),
-    )
+    async with _slot():
+        response = await model_request(
+            model,
+            [ModelRequest(parts=[
+                SystemPromptPart(content="You create context checkpoint summaries for an AI coding agent."),
+                UserPromptPart(content=prompt),
+            ])],
+            model_settings={"max_tokens": 2_048},
+            model_request_parameters=ModelRequestParameters(allow_text_output=True),
+        )
     summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))
     if not summary.strip():
         raise RuntimeError("Context compaction returned an empty summary")

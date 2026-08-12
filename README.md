@@ -30,6 +30,8 @@ While it runs: `Shift+Tab` switches how much the agent may do on its own (**read
 
 `Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. The command palette docks the tabs at the top, the left or the right.
 
+Paimon can open panes itself: ask for two independent things and it starts a second agent in its own tab, with the same tools, working directory and permission mode. Its permission prompts appear in that tab, so `Ctrl+G` is how you unblock it. Those sessions belong to the one that started them, so they stay out of `paimon sessions` and end when it does.
+
 Write `@path/to/file` in a prompt to hand a file to the agent.
 
 ## Using Paimon as a subagent

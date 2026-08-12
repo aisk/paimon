@@ -10,7 +10,7 @@ from unittest.mock import patch
 from helpers import SILENT_EVENTS, agent_events, make_session, stub_model
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from paimon import headless
+from paimon import headless, tools
 from paimon.agent import (
     Agent,
     ContextCompacted,
@@ -370,3 +370,25 @@ class DriveTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeadlessToolsetTest(unittest.TestCase):
+    """-p runs one turn and then tears the loop down, so an agent it started
+    would be cancelled at an arbitrary point, mid-cleanup included."""
+
+    def test_agent_tools_are_not_offered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            renderer = headless.JsonRenderer(io.StringIO(), _config())
+            with patch.object(headless, "_drive", return_value=0) as drive:
+                with patch.object(headless, "_make_renderer", return_value=renderer):
+                    headless.run(prompt="hi", piped="", cwd=cwd, mode="read",
+                                 session=None, config=_config())
+            agent = drive.call_args[0][0]
+            self.addCleanup(agent.session.unlock)
+
+            for name in tools.SUPERVISED_TOOLS:
+                self.assertNotIn(name, agent.toolset)
+            names = [schema["function"]["name"] for schema in agent.tool_schemas]
+            self.assertNotIn("spawn_agent", names)
+            self.assertIn("shell", names, "the ordinary tools are all still there")

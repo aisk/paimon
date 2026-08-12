@@ -20,13 +20,19 @@ from typing import Optional
 
 from .config import UNSET, Config, config_path, validate_profile
 from .llm import is_provider_available, split_model_string
-from .session import SUMMARY_PREFIX, Session
+from .session import Session, is_synthetic_user_text
 from .tools import summarize_call
 
 
 def resolve_session(prefix: str) -> Session:
-    """The unique session of the current directory matching the id prefix."""
-    matches = [session for session in Session.list(Path.cwd()) if session.id.startswith(prefix)]
+    """The unique session of the current directory matching the id prefix.
+
+    Subagent sessions are included here and nowhere else: naming an id is
+    deliberate, while everything that picks a session on the user's behalf
+    (--continue, the listings, the picker) must not land on one.
+    """
+    matches = [session for session in Session.list(Path.cwd(), include_children=True)
+               if session.id.startswith(prefix)]
     if len(matches) == 1:
         return matches[0]
     if not matches:
@@ -225,7 +231,7 @@ def _is_turn_start(record: Optional[dict]) -> bool:
     for part in message.get("parts") or []:
         content = part.get("content") if isinstance(part, dict) else None
         if (isinstance(part, dict) and part.get("part_kind") == "user-prompt"
-                and isinstance(content, str) and not content.startswith(SUMMARY_PREFIX)):
+                and isinstance(content, str) and not is_synthetic_user_text(content)):
             return True
     return False
 

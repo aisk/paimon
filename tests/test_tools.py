@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from paimon.tools import (
     MAX_OUTPUT,
     MODES,
+    ToolContext,
     _glob,
     _inside,
     _shell,
@@ -21,7 +22,7 @@ from paimon.tools import (
 )
 
 
-class GateTest(unittest.TestCase):
+class GateTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -39,14 +40,38 @@ class GateTest(unittest.TestCase):
             self.assertEqual(gate("glob", {"pattern": "*.py"}, mode, self.cwd), "allow")
             self.assertEqual(gate("glob", {"pattern": "*", "path": "/tmp"}, mode, self.cwd), "confirm")
 
-    def test_shell_overflow_files_read_without_confirmation(self) -> None:
-        """A command's own overflow file is readable back; nothing else moves."""
+    def test_only_the_agents_own_overflow_files_are_read_without_confirmation(self) -> None:
+        """A command's own overflow file is readable back; nothing else moves.
+
+        The exemption is per agent: the directory is shared by every session
+        and project on the machine, so a blanket one would be a free sideways
+        read into another agent's command output.
+        """
         with tempfile.TemporaryDirectory() as data_home:
             with patch.dict(os.environ, {"PAIMON_DATA_HOME": data_home}):
-                overflow = str(shell_output_dir() / "20260811-120000-1-abc.log")
-                self.assertEqual(gate("read_file", {"path": overflow}, "read", self.cwd), "allow")
-                self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, "read", self.cwd), "confirm")
-                self.assertEqual(gate("write_file", {"path": overflow}, "edit", self.cwd), "confirm")
+                directory = shell_output_dir()
+                directory.mkdir(parents=True, exist_ok=True)
+                mine = directory / "20260811-120000-1-abc.log"
+                theirs = directory / "20260811-120000-2-def.log"
+                mine.write_text("x")
+                theirs.write_text("x")
+                ctx = ToolContext(shell_outputs={mine.resolve()})
+
+                self.assertEqual(gate("read_file", {"path": str(mine)}, "read", self.cwd, ctx=ctx), "allow")
+                self.assertEqual(gate("read_file", {"path": str(theirs)}, "read", self.cwd, ctx=ctx), "confirm")
+                self.assertEqual(gate("read_file", {"path": str(mine)}, "read", self.cwd), "confirm")
+                self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, "read", self.cwd, ctx=ctx), "confirm")
+                self.assertEqual(gate("write_file", {"path": str(mine)}, "edit", self.cwd, ctx=ctx), "confirm")
+
+    async def test_a_command_records_the_overflow_file_it_wrote(self) -> None:
+        """The gate exemption above is only reachable through this."""
+        with tempfile.TemporaryDirectory() as data_home:
+            with patch.dict(os.environ, {"PAIMON_DATA_HOME": data_home}):
+                ctx = ToolContext()
+                result = await _shell({"command": _filler(3000, "line")}, self.cwd, ctx)
+                self.assertEqual(ctx.shell_outputs, {_overflow_path(result).resolve()})
+                self.assertEqual(gate("read_file", {"path": str(_overflow_path(result))},
+                                      "read", self.cwd, ctx=ctx), "allow")
 
     def test_read_mode_confirms_all_dangerous_tools(self) -> None:
         self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, "read", self.cwd), "confirm")

@@ -12,7 +12,7 @@ import os
 import shlex
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -31,21 +31,41 @@ MODES = ("read", "edit", "yolo")
 
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
+# Bounds for wait_for_agent. A wait that cannot expire is a deadlock waiting to
+# happen: the agent being waited on may be blocked on a permission prompt in a
+# tab nobody is looking at, and the caller has to get control back to say so.
+DEFAULT_WAIT_TIMEOUT = 60.0
+MAX_WAIT_TIMEOUT = 600.0
+
+
+@dataclass
+class ToolContext:
+    """Per-agent state a tool needs beyond its own arguments.
+
+    One instance belongs to one ``Agent``, which is what keeps the shell
+    overflow files it collects from being readable by every other agent in the
+    process (see gate()).
+    """
+
+    # Resolved paths of the overflow files this agent's own commands produced.
+    shell_outputs: set = field(default_factory=set)
+
 
 @dataclass(frozen=True)
 class Tool:
     """One tool: its model-facing schema, executor, and gating class.
 
-    ``run`` takes (args, cwd, mode) and returns a string or an awaitable of
-    one; it is None for tools the agent loop handles itself (write_todos).
-    ``access`` drives gate(): "read" runs freely inside cwd, "write" is
-    auto-approved inside cwd in edit mode, "execute" needs confirmation
-    outside yolo except for commands safe_command() recognizes as read-only,
-    "none" is never gated, "always" needs confirmation even in yolo mode.
+    ``run`` takes (args, cwd, mode, ctx) and returns a string or an awaitable
+    of one; it is None for tools the agent loop handles itself (write_todos,
+    the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
+    "write" is auto-approved inside cwd in edit mode, "execute" needs
+    confirmation outside yolo except for commands safe_command() recognizes as
+    read-only, "none" is never gated, "always" needs confirmation even in yolo
+    mode.
     """
 
     schema: dict
-    run: Optional[Callable[[dict, Path, str], object]]
+    run: Optional[Callable[[dict, Path, str, ToolContext], object]]
     access: str = "none"
 
 
@@ -89,6 +109,18 @@ def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
 def _resolve(path: str, cwd: Path) -> Path:
     p = Path(path)
     return p if p.is_absolute() else cwd / p
+
+
+def _real(path: Path) -> Optional[Path]:
+    """The path with symlinks resolved, or None when it cannot be resolved.
+
+    None never compares equal to a recorded path, so an unresolvable path
+    falls through to confirmation instead of raising inside the gate.
+    """
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _inside(path: Path, cwd: Path) -> bool:
@@ -375,7 +407,8 @@ def safe_command(command: str, cwd: Path) -> bool:
 
 def gate(name: str, args: dict, mode: str, cwd: Path,
          registry: Optional[dict[str, Tool]] = None,
-         safe_commands: bool = True) -> str:
+         safe_commands: bool = True,
+         ctx: Optional[ToolContext] = None) -> str:
     """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm").
 
     ``safe_commands`` auto-allows shell commands recognized as clearly
@@ -394,10 +427,14 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
     resolved = _resolve(str(args.get("path") or ""), cwd)
     inside = _inside(resolved, cwd)
     if tool.access == "read":
-        # Shell overflow files are paimon's own record of a command the user
-        # already approved, so reading one back is not a new escalation. This
-        # narrow allowance is why they live in the data dir and not in /tmp.
-        return "allow" if inside or _inside(resolved, shell_output_dir()) else "confirm"
+        # An overflow file this agent's own command produced is paimon's record
+        # of something the user already approved, so reading it back is not a
+        # new escalation. The exemption is per agent on purpose: the directory
+        # itself is shared by every session and project on the machine, and a
+        # blanket allowance would let one agent read another one's command
+        # output — a different project's, or last week's — without a prompt.
+        own_output = ctx is not None and _real(resolved) in ctx.shell_outputs
+        return "allow" if inside or own_output else "confirm"
     if tool.access == "write" and mode == "edit" and inside:
         return "allow"
     return "confirm"
@@ -406,19 +443,22 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
 async def run_tool(name: str, args: dict, cwd: Path, mode: str,
                    confirm: Optional[ConfirmFn] = None,
                    registry: Optional[dict[str, Tool]] = None,
-                   safe_commands: bool = True) -> tuple[str, bool]:
+                   safe_commands: bool = True,
+                   ctx: Optional[ToolContext] = None) -> tuple[str, bool]:
     """Gate, optionally confirm, then execute a tool call.
 
     Returns ``(result, denied)``. This is the enforcement point: a call that
     needs confirmation is denied when no confirm hook is available, so a
     headless Agent cannot bypass the permission mode. ``registry`` narrows the
     available tools (an agent's own set); None means the full REGISTRY.
+    ``ctx`` carries the calling agent's own state, so gating decisions that
+    depend on what this agent did earlier stay scoped to it.
     """
-    if gate(name, args, mode, cwd, registry, safe_commands=safe_commands) == "confirm":
+    if gate(name, args, mode, cwd, registry, safe_commands=safe_commands, ctx=ctx) == "confirm":
         allowed = await confirm(name, args) if confirm else False
         if not allowed:
             return "User denied this operation.", True
-    return await execute_tool(name, args, cwd, mode=mode, registry=registry), False
+    return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx), False
 
 
 def _read_file(args: dict, cwd: Path) -> str:
@@ -750,7 +790,7 @@ async def _collect(proc: asyncio.subprocess.Process, tail: _OutputTail) -> None:
             pass
 
 
-async def _shell(args: dict, cwd: Path) -> str:
+async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> str:
     # start_new_session puts the child in its own process group so we can kill
     # the whole tree (the shell plus anything it spawns) on timeout/interrupt.
     proc = await asyncio.create_subprocess_shell(
@@ -779,6 +819,12 @@ async def _shell(args: dict, cwd: Path) -> str:
             raise
     finally:
         tail.close()
+        # Recorded so this agent — and only this agent — can read the file back
+        # without another confirmation; see gate().
+        if ctx is not None and tail.path is not None:
+            real = _real(tail.path)
+            if real is not None:
+                ctx.shell_outputs.add(real)
     out = tail.render()
     # The status follows the output instead of replacing it: a timeout or a
     # non-zero exit is exactly when what the command managed to print matters.
@@ -786,13 +832,15 @@ async def _shell(args: dict, cwd: Path) -> str:
 
 
 async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
-                       registry: Optional[dict[str, Tool]] = None) -> str:
+                       registry: Optional[dict[str, Tool]] = None,
+                       ctx: Optional[ToolContext] = None) -> str:
     """Run a registered tool. Always returns a string for the model."""
     tool = (REGISTRY if registry is None else registry).get(name)
     if tool is None or tool.run is None:
         return f"Error: unknown tool {name!r}"
+    ctx = ToolContext() if ctx is None else ctx
     try:
-        result = tool.run(args, cwd, mode)
+        result = tool.run(args, cwd, mode, ctx)
         if inspect.isawaitable(result):
             result = await result
     except asyncio.CancelledError:
@@ -807,7 +855,7 @@ async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
 REGISTRY: dict[str, Tool] = {
     "read_file": Tool(
         access="read",
-        run=lambda args, cwd, mode: _read_file(args, cwd),
+        run=lambda args, cwd, mode, ctx: _read_file(args, cwd),
         schema={
             "type": "function",
             "function": {
@@ -827,7 +875,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "write_file": Tool(
         access="write",
-        run=lambda args, cwd, mode: _write_file(args, cwd),
+        run=lambda args, cwd, mode, ctx: _write_file(args, cwd),
         schema={
             "type": "function",
             "function": {
@@ -846,7 +894,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "edit_file": Tool(
         access="write",
-        run=lambda args, cwd, mode: _edit_file(args, cwd),
+        run=lambda args, cwd, mode, ctx: _edit_file(args, cwd),
         schema={
             "type": "function",
             "function": {
@@ -866,7 +914,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "glob": Tool(
         access="read",
-        run=lambda args, cwd, mode: _glob(args, cwd, sandboxed=mode != "yolo"),
+        run=lambda args, cwd, mode, ctx: _glob(args, cwd, sandboxed=mode != "yolo"),
         schema={
             "type": "function",
             "function": {
@@ -886,7 +934,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "shell": Tool(
         access="execute",
-        run=lambda args, cwd, mode: _shell(args, cwd),
+        run=lambda args, cwd, mode, ctx: _shell(args, cwd, ctx),
         schema={
             "type": "function",
             "function": {
@@ -973,7 +1021,157 @@ REGISTRY: dict[str, Tool] = {
             },
         },
     ),
+    # The four below are stateful in the same way: they act on the pool of
+    # agents this process is running, which only the UI owns, so the agent loop
+    # hands them to its supervisor instead of running them here.
+    #
+    # access is written out rather than left to default to "none" so the choice
+    # is on the record: none of the four touches the filesystem or spawns a
+    # process on its own, and everything a started agent goes on to do is gated
+    # in that agent's own tab under the mode it inherited. Adding a tool here
+    # that does reach outside the process needs its own access class.
+    "spawn_agent": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "spawn_agent",
+                "description": (
+                    "Start another agent working in parallel in its own tab, with the same "
+                    "tools and working directory, and return its agent id. Use it for work "
+                    "that is independent of what you are doing right now — exploring a second "
+                    "part of the codebase, a long test run, a self-contained refactor — and "
+                    "keep the number of them small. The prompt must be self-contained: state "
+                    "the goal, the key file paths, the decisions already made and what to "
+                    "report back, because the new agent has no memory of this conversation "
+                    "and cannot ask you anything. Nothing it produces reaches you on its own: "
+                    "call read_agent to collect it, and wait_for_agent to wait for it. It "
+                    "cannot spawn agents of its own. Permission prompts for its tools appear "
+                    "in its tab, so it can sit blocked until the user answers them."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The new agent's first user message; must be self-contained.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Model for this agent only (optional; defaults to the current one).",
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            },
+        },
+    ),
+    "send_to_agent": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "send_to_agent",
+                "description": (
+                    "Send a follow-up instruction to an agent you started. It runs as that "
+                    "agent's next turn; if it is busy the message is queued and delivered "
+                    "when the current turn ends. Like the spawn prompt it has to stand on "
+                    "its own — the agent cannot see this conversation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["agent_id", "prompt"],
+                },
+            },
+        },
+    ),
+    "read_agent": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "read_agent",
+                "description": (
+                    "Read what an agent has written since you last read it (mode 'new', the "
+                    "default) or its whole answer so far (mode 'all'), together with its "
+                    "state. Only its assistant text comes back — not its thinking and not its "
+                    "tool output — so ask it in the spawn prompt to end with the summary you "
+                    "need."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["new", "all"],
+                            "description": "'new' (default) since your last read, or 'all'.",
+                        },
+                    },
+                    "required": ["agent_id"],
+                },
+            },
+        },
+    ),
+    "wait_for_agent": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "wait_for_agent",
+                "description": (
+                    "Wait until an agent is no longer running, then return its state. This "
+                    "never blocks forever: when the timeout runs out it returns 'running', "
+                    "and it returns early with 'needs_confirm' when the agent is stuck on a "
+                    "permission prompt in its own tab — say so, because only the user can "
+                    "clear that. Read its output with read_agent afterwards."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                        "timeout": {
+                            "type": "number",
+                            "description": (
+                                f"Seconds to wait (optional, default {DEFAULT_WAIT_TIMEOUT:g}, "
+                                f"maximum {MAX_WAIT_TIMEOUT:g})."
+                            ),
+                        },
+                    },
+                    "required": ["agent_id"],
+                },
+            },
+        },
+    ),
 }
+
+# Tools that only mean anything with the UI supervising a pool of panes: the
+# agent loop refuses them without a supervisor, and headless leaves them out of
+# its toolset entirely rather than offering the model something that cannot work.
+SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "read_agent", "wait_for_agent")
+
+# What a spawned agent must not be given: spawning (depth stays 1) and the
+# handoff, which would swap the session out from under the id its parent holds.
+SUBAGENT_DENIED = ("spawn_agent", "start_new_session")
+
+
+def without(registry: dict[str, Tool], names) -> dict[str, Tool]:
+    """A copy of ``registry`` with ``names`` removed.
+
+    Narrowing the registry — rather than the agent-handled table, which is
+    class-level and shared — is what actually disables a tool for one agent:
+    the loop rejects any name outside its own toolset before dispatching.
+    """
+    return {name: tool for name, tool in registry.items() if name not in set(names)}
+
 
 def schemas(registry: dict[str, Tool]) -> list[dict]:
     """The OpenAI-style schema list for a registry, in registry order."""

@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
 )
 
 from paimon import compaction
-from paimon.session import Session, is_summary_message
+from paimon.session import Session, agents_message, is_summary_message
 
 
 def _user(content: str) -> ModelRequest:
@@ -118,3 +118,17 @@ class SessionCompactionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentStatusExclusionTest(unittest.TestCase):
+    def test_agent_status_lines_never_reach_the_summary_prompt(self) -> None:
+        """The prompt asks for current status, so a checkpoint would carry an
+        hours-old "a1f2 finished" forward for the rest of the session."""
+        serialized = compaction._serialize_messages([
+            _user("real request"),
+            agents_message("a1f2 finished"),
+            _assistant("answer"),
+        ])
+
+        self.assertNotIn("a1f2 finished", serialized)
+        self.assertEqual(len(serialized.splitlines()), 2)

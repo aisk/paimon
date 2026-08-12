@@ -35,7 +35,14 @@ from .config import Config
 from .llm import build_model
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
-from .session import Session, SessionIncompleteError, is_summary_message
+from .session import (
+    Session,
+    SessionIncompleteError,
+    agents_message,
+    agents_text,
+    is_agents_message,
+    is_summary_message,
+)
 
 # Transient compaction failures tolerated in one turn before it is left off.
 _MAX_COMPACTION_FAILURES = 3
@@ -131,12 +138,24 @@ class CompactionNotice:
     """A compaction checkpoint encountered while replaying history."""
 
 
+@dataclass
+class AgentsNotice:
+    """A status line about the agents this session started.
+
+    Not replay-only: it is written into the history at the top of a turn, so
+    it is both yielded live and rebuilt when the session is resumed.
+    """
+
+    text: str
+
+
 # Everything ``Agent.run`` and ``replay_events`` can yield. Renderers dispatch
 # on isinstance; the alias exists so a type checker can flag an unhandled one.
 AgentEvent = (
     TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
     | SessionHandoff | RequestStats | TurnEnd | ContextCompacted
     | ContextCompactionFailed | ModelRetry | UserInput | CompactionNotice
+    | AgentsNotice
 )
 
 
@@ -165,6 +184,9 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     for message in messages:
         if is_summary_message(message):
             events.append(CompactionNotice())
+            continue
+        if is_agents_message(message):
+            events.append(AgentsNotice(agents_text(message)))
             continue
         if isinstance(message, ModelRequest):
             for part in message.parts:
@@ -239,6 +261,13 @@ class Agent:
         # this overrides the model for this agent alone, credentials included
         # (they come from the config either way).
         self.model_override = model_override
+        # Set by the UI when this agent may start and talk to other agents.
+        # None everywhere else (headless, tests), where the agent tools refuse
+        # rather than pretend.
+        self.supervisor = None
+        # Per-agent tool state, kept off the tool functions so one agent's
+        # shell overflow files stay invisible to the next one.
+        self.tool_context = tools.ToolContext()
         self.todos: list[dict] = []
         self.session = session
         self.system_prompt = system_prompt
@@ -255,23 +284,27 @@ class Agent:
              config: Optional[Config] = None,
              append_system_prompt: Optional[str] = None,
              toolset: Optional[dict[str, tools.Tool]] = None,
-             model_override: Optional[str] = None) -> "Agent":
+             model_override: Optional[str] = None,
+             parent: Optional[str] = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
 
         ``append_system_prompt`` is added to the end of a new session's system
         prompt and persisted with it, so a resumed session keeps it. Resuming
         with it set raises ``ValueError``: the persisted prompt is immutable.
+        ``parent`` marks the new session as a subagent's, which keeps it out of
+        the session listings its parent shows up in.
 
-        Raises ``SessionBusyError`` when another process holds the session and
-        ``SessionIncompleteError`` when a resumed log has no system prompt
-        snapshot — both ``SessionError``, and neither leaves a lock held.
+        Raises ``SessionBusyError`` when the session is already open (here or
+        in another process) and ``SessionIncompleteError`` when a resumed log
+        has no system prompt snapshot — both ``SessionError``, and neither
+        leaves a lock held.
         """
         cwd = Path(cwd or Path.cwd())
         if session is not None and append_system_prompt:
             raise ValueError("append_system_prompt only applies to a new session")
         is_new = session is None
         if session is None:
-            session = Session.create(cwd)
+            session = Session.create(cwd, parent)
         session.lock()
         # Everything after the lock can fail — a full disk while writing the
         # prompt, a message the current pydantic-ai cannot parse — and no
@@ -414,7 +447,7 @@ class Agent:
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
         needs_confirm = tools.gate(call.tool_name, args, self.mode, self.cwd,
-                                   self.toolset) == "confirm"
+                                   self.toolset, ctx=self.tool_context) == "confirm"
         allowed = not needs_confirm or (
             await self.confirm(call.tool_name, args) if self.confirm else False
         )
@@ -429,9 +462,30 @@ class Agent:
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
         yield SessionHandoff(prompt_text)
 
+    async def _run_supervised(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
+                              persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+        """spawn_agent / send_to_agent / read_agent / wait_for_agent.
+
+        They act on the pool of agents the UI is running, which no stateless
+        tool function can reach, and the supervisor is the one thing that knows
+        whether a given agent is busy — so they are dispatched from here.
+        """
+        yield ToolStart(call.tool_call_id, call.tool_name, args)
+        if self.supervisor is None:
+            slot.content = ("Error: agents are only available in the interactive UI; "
+                            "do this work yourself.")
+        else:
+            slot.content = await self.supervisor.handle(call.tool_name, args, caller=self)
+        persist()
+        yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+
     _AGENT_HANDLED = {
         "write_todos": _run_write_todos,
         "start_new_session": _run_start_new_session,
+        "spawn_agent": _run_supervised,
+        "send_to_agent": _run_supervised,
+        "read_agent": _run_supervised,
+        "wait_for_agent": _run_supervised,
     }
 
     async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[AgentEvent]:
@@ -442,6 +496,14 @@ class Agent:
         stdin, where a line like ``@foo.py`` is data rather than a mention).
         """
         prompt = expand_mentions(user_input, self.cwd) if expand else user_input
+        # Agents this session started report in here, at the top of the next
+        # turn, rather than by interrupting whatever the user is typing. It has
+        # to be a persisted message: an event the model never sees would defeat
+        # the point, which is to get it to call read_agent.
+        summary = self.supervisor.status_summary(self) if self.supervisor is not None else None
+        if summary:
+            self._append_message(agents_message(summary))
+            yield AgentsNotice(summary)
         self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
         # A compaction that failed for a transient reason is retried on the
         # next step of this turn — the context only keeps growing, so giving
@@ -583,7 +645,8 @@ class Agent:
                 yield ToolStart(call.tool_call_id, name, args)
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode,
                                                       self.confirm, self.toolset,
-                                                      safe_commands=self.config.safe_commands)
+                                                      safe_commands=self.config.safe_commands,
+                                                      ctx=self.tool_context)
 
                 slot.content = result
                 persist()

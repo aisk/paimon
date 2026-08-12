@@ -140,6 +140,40 @@ class LockTest(SessionScanTestCase):
         session.unlock()
         session.unlock()  # extra unlock is a no-op
 
+    def test_a_session_already_open_here_is_refused_too(self) -> None:
+        """The lock refcounts per process, so two panes would both be let in —
+        and their histories would interleave into one append-only log."""
+        session = Session.create(self.cwd)
+        session.lock()
+        self.addCleanup(session.unlock)
+
+        with self.assertRaisesRegex(SessionBusyError, "already open"):
+            Session(session.path, session.id, self.cwd).lock()
+
+
+class ChildSessionTest(SessionScanTestCase):
+    """Subagent sessions share the project directory but not the listings."""
+
+    def test_children_are_hidden_unless_asked_for(self) -> None:
+        mine = self._session_with_message("mine", mtime=1_000)
+        child = Session.create(self.cwd, parent=mine.id)
+        child.append_message(ModelRequest(parts=[UserPromptPart(content="theirs")]))
+
+        self.assertEqual([session.id for session in Session.list(self.cwd)], [mine.id])
+        listed = Session.list(self.cwd, include_children=True)
+        self.assertEqual(sorted(session.id for session in listed), sorted([mine.id, child.id]))
+        self.assertEqual(next(s for s in listed if s.id == child.id).parent, mine.id)
+
+    def test_a_fork_of_a_child_is_still_a_child(self) -> None:
+        parent = Session.create(self.cwd)
+        child = Session.create(self.cwd, parent=parent.id)
+        child.append_message(ModelRequest(parts=[UserPromptPart(content="theirs")]))
+
+        forked = child.fork()
+
+        self.assertEqual(forked.parent, parent.id)
+        self.assertNotIn(forked.id, [session.id for session in Session.list(self.cwd)])
+
 
 if __name__ == "__main__":
     unittest.main()

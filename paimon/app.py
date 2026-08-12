@@ -11,12 +11,13 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.widgets import ContentSwitcher, Static
 
-from . import compaction
+from . import compaction, tools
 from .agent import Agent
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .pane import SessionPane
 from .session import SessionError
+from .supervisor import Supervisor, SupervisorError
 from .tabs import DOCKS, PaneTabs
 
 # Every pane holds a live agent and its context, so panes cost model requests
@@ -82,7 +83,11 @@ class PaimonApp(App):
         self._persist_theme_changes = False
         super().__init__()
         self.config = agent.config
-        pane = SessionPane(agent, resumed=resumed, id="pane-1")
+        # Agents live in panes, so the supervisor borrows the app to open and
+        # close them; everything else about them it owns itself.
+        self._supervisor = Supervisor(launch=self._launch_agent, close=self._close_agent,
+                                      limit=MAX_PANES)
+        pane = SessionPane(agent, resumed=resumed, id="pane-1", supervisor=self._supervisor)
         self._panes = [pane]
         self._current = pane
         self._next_pane = 2
@@ -118,6 +123,10 @@ class PaimonApp(App):
     def on_session_pane_state_changed(self, event: SessionPane.StateChanged) -> None:
         """A pane started or finished something the strip or the bar shows."""
         event.stop()
+        # Worker.StateChanged does not bubble, so this message is also the only
+        # signal the supervisor gets that an agent has gone idle and can be
+        # handed the next thing waiting in its inbox.
+        self._supervisor.pump()
         self._sync_panes()
 
     def on_pane_tabs_selected(self, event: PaneTabs.Selected) -> None:
@@ -135,27 +144,93 @@ class PaimonApp(App):
             self.pane._add(Content.from_markup(
                 "[$text-error b]Cannot open a pane:[/] $body", body=str(exc)))
             return
-        pane = SessionPane(agent, id=f"pane-{self._next_pane}")
-        self._next_pane += 1
-        self._panes.append(pane)
+        pane = self._make_pane(agent)
         # Current before mounting: the pane focuses its prompt in on_mount, and
         # only does so if it is the one on screen.
         self._current = pane
         await self._switcher.add_content(pane, set_current=True)
         self._sync_panes()
 
+    def _make_pane(self, agent: Agent, *, agent_id: str | None = None) -> SessionPane:
+        """Register a pane for an agent. The caller mounts it."""
+        pane = SessionPane(agent, id=f"pane-{self._next_pane}",
+                           supervisor=self._supervisor, agent_id=agent_id)
+        self._next_pane += 1
+        self._panes.append(pane)
+        return pane
+
     async def action_close_pane(self) -> None:
         if len(self._panes) == 1:
             self.pane._add(Content.from_markup(
                 "[$text-muted]The last pane stays open — Ctrl+C quits[/]"))
             return
-        pane = self._current
+        await self._drop_pane(self._current)
+
+    async def _drop_pane(self, pane: SessionPane) -> None:
+        """Close a pane and take it off the screen. The one path out."""
+        if pane not in self._panes:
+            return
         index = self._panes.index(pane)
         pane.close()
+        # An agent whose pane is gone is over, but what it wrote stays
+        # readable: whoever started it may still be about to ask.
+        self._supervisor.released(pane)
         self._panes.remove(pane)
-        self._current = self._panes[min(index, len(self._panes) - 1)]
+        if not self._panes:
+            # Closing a pane stops the agents it started, so the last two can
+            # go at once. The app always has one conversation in it.
+            await self._replace_last_pane(pane)
+        current = self._panes[min(index, len(self._panes) - 1)]
         await pane.remove()
-        self._switch_to(self._current)
+        if self._current is pane:
+            self._switch_to(current)
+        else:
+            self._sync_panes()
+
+    async def _replace_last_pane(self, closed: SessionPane) -> None:
+        try:
+            agent = Agent.open(cwd=closed.agent.cwd, mode=closed.mode, config=self.config)
+        except SessionError:
+            self.exit()  # nothing left to show, and no session to show it in
+            return
+        await self._switcher.add_content(self._make_pane(agent))
+
+    # ---- agents -------------------------------------------------------------
+
+    async def _launch_agent(self, agent_id: str, parent, model: str | None) -> SessionPane:
+        """Open a background pane for an agent another pane asked for.
+
+        It is mounted hidden and never focused: a pane the user did not open
+        must not take the keyboard, or their next keystroke answers a
+        confirmation they never saw.
+        """
+        if len(self._panes) >= MAX_PANES:
+            raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
+        owner = next((pane for pane in self._panes if pane.agent is parent), self.pane)
+        agent = Agent.open(
+            cwd=owner.agent.cwd, mode=owner.mode, config=self.config, model_override=model,
+            # Marked as this session's child so it stays out of the session
+            # lists and out of `paimon -c`.
+            parent=owner.agent.session.id,
+            toolset=tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED),
+        )
+        pane = self._make_pane(agent, agent_id=agent_id)
+        try:
+            await self._switcher.add_content(pane)
+        except BaseException:
+            # Agent.open took the session lock, and nothing else will ever
+            # release it: without this the session stays busy for the life of
+            # the process, even to `paimon -r`.
+            self._panes.remove(pane)
+            agent.session.unlock()
+            raise
+        self._sync_panes()
+        return pane
+
+    def _close_agent(self, pane: SessionPane) -> None:
+        """The supervisor killed an agent: take its pane down with it."""
+        pane.close()  # cancel the turn and release the session now
+        self.call_later(self._drop_pane, pane)
 
     def _step_pane(self, step: int) -> None:
         if len(self._panes) > 1:
@@ -257,7 +332,7 @@ class PaimonApp(App):
         mid-turn silently swaps providers between two tool calls. Both refuse
         while any pane is running a turn.
         """
-        return any(pane.is_turn_running for pane in self.panes)
+        return any(pane.is_busy for pane in self.panes)
 
     def action_login(self) -> None:
         if self._config_is_busy():

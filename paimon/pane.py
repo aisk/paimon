@@ -23,6 +23,7 @@ from textual.worker import Worker, WorkerState
 from . import lockfile, tools
 from .agent import (
     Agent,
+    AgentsNotice,
     CompactionNotice,
     ContextCompactionFailed,
     ContextCompacted,
@@ -115,6 +116,11 @@ class _EventRenderer:
             self._first_text_block = True
             self._pane._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
 
+        elif isinstance(ev, AgentsNotice):
+            await self.close()
+            self._first_text_block = True
+            self._pane._add(Content.from_markup("[$text-muted]Agents: $text[/]", text=ev.text))
+
         elif isinstance(ev, ReasoningDelta):
             self._reasoning_buf += ev.text
             if self._reasoning is None:
@@ -203,10 +209,16 @@ class SessionPane(Vertical):
             self.pane = pane
             super().__init__()
 
-    def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None) -> None:
+    def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None,
+                 supervisor=None, agent_id: str | None = None) -> None:
         super().__init__(id=id)
         self.agent = agent
-        self.agent.confirm = self._confirm
+        # The pool this pane's agent can start and talk to other agents through,
+        # and — when this pane is one of those agents — the id its parent knows
+        # it by. Shown on the tab, since that id is what the model reports.
+        self.supervisor = supervisor
+        self.agent_id = agent_id
+        self._adopt(agent)
         self.mode = agent.mode
         self._resumed = resumed
         self._turn: Worker | None = None
@@ -244,7 +256,24 @@ class SessionPane(Vertical):
 
     @property
     def is_turn_running(self) -> bool:
+        """Whether a turn is streaming right now. For display only."""
         return self._turn is not None and self._turn.is_running
+
+    @property
+    def is_busy(self) -> bool:
+        """Whether a turn is running or about to start.
+
+        What every guard asks. A worker sits in PENDING for a tick before it
+        runs, and a second turn started in that window cancels the first
+        (run_turn is exclusive) — which, now that a turn can be started by the
+        supervisor and by the user at the same moment, is reachable.
+        """
+        return self._turn is not None and not self._turn.is_finished
+
+    @property
+    def turn_failed(self) -> bool:
+        """Whether the last finished turn ended in an error."""
+        return self._turn_failed
 
     @property
     def needs_confirm(self) -> bool:
@@ -259,16 +288,24 @@ class SessionPane(Vertical):
     def tab_title(self) -> str:
         """Short label for the tab strip."""
         title = " ".join(self._title.split())
-        return title or "new session"
+        title = title or "new session"
+        return f"{self.agent_id} {title}" if self.agent_id else title
 
     def _notify_state(self) -> None:
         self.post_message(self.StateChanged(self))
 
     def close(self) -> None:
-        """Give up everything this pane owns; the app removes the widget."""
+        """Give up everything this pane owns; the app removes the widget.
+
+        Idempotent: the widget goes away one message loop after the agent is
+        killed, and unlocking a session twice would drop a claim somebody else
+        has since taken.
+        """
+        if self._pane_closing:
+            return
         self._pane_closing = True
         self.interrupt()
-        self.agent.session.unlock()
+        self._retire_agent()
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
@@ -329,6 +366,29 @@ class SessionPane(Vertical):
 
     # ---- session switching --------------------------------------------------
 
+    def _adopt(self, agent: Agent) -> None:
+        """Take over an agent: this pane confirms for it and supervises it."""
+        self.agent = agent
+        agent.confirm = self._confirm
+        agent.supervisor = self.supervisor
+
+    def _retire_agent(self) -> list[str]:
+        """Release the current session and stop the agents it started.
+
+        Their ids only mean anything inside the conversation being left behind,
+        and their sessions are children of it, so nothing would ever read them
+        again. Returns the ids, for the caller to report.
+        """
+        killed = self.supervisor.kill_children(self.agent) if self.supervisor is not None else []
+        self.agent.session.unlock()
+        return killed
+
+    def _report_killed(self, killed: list[str]) -> None:
+        if killed:
+            self._add(Content.from_markup(
+                "[$text-muted]Stopped $n agent(s) started by the previous session: $ids[/]",
+                n=str(len(killed)), ids=", ".join(killed)))
+
     async def _show_resumed(self) -> None:
         renderer = _EventRenderer(self)
         for ev in replay_events(self.agent.history):
@@ -338,12 +398,15 @@ class SessionPane(Vertical):
         self._sync_statusbar(tokens=True)
 
     def new_session(self) -> None:
-        if self.is_turn_running:
+        if self.is_busy:
             return
+        # The toolset travels with the pane, not with the session: a pane that
+        # is somebody's subagent stays one, without spawning or handing off.
         agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
-                           config=self.config)
-        self.agent.session.unlock()
-        self.agent = agent
+                           config=self.config, toolset=self.agent.toolset,
+                           parent=self.agent.session.parent)
+        killed = self._retire_agent()
+        self._adopt(agent)
         self._title = ""
         self._tokens = None
         self.query_one("#log", VerticalScroll).remove_children()
@@ -351,25 +414,27 @@ class SessionPane(Vertical):
         self._queue.clear()
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
+        self._report_killed(killed)
         self._sync_statusbar()
         self._notify_state()
 
     def fork_session(self) -> None:
-        if self.is_turn_running:
+        if self.is_busy:
             return
         forked = self.agent.session.fork()
         try:
             agent = Agent.open(cwd=self.agent.cwd, session=forked, confirm=self._confirm,
-                               mode=self.mode, config=self.config)
+                               mode=self.mode, config=self.config, toolset=self.agent.toolset)
         except SessionError as exc:
             self._add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
             return
         # The conversation on screen is the fork's history verbatim, so the
         # log stays; only the agent underneath changes.
         agent.todos = list(self.agent.todos)
-        self.agent.session.unlock()
-        self.agent = agent
+        killed = self._retire_agent()
+        self._adopt(agent)
         self._add(Content.from_markup("[$text-muted]Forked session $id[/]", id=agent.session.id[:8]))
+        self._report_killed(killed)
         self._sync_statusbar()
         self._notify_state()
 
@@ -377,7 +442,7 @@ class SessionPane(Vertical):
     # same node, and the default group would let a turn cancel the open picker.
     @work(group="picker")
     async def resume_session(self) -> None:
-        if self.is_turn_running:
+        if self.is_busy:
             return
         # A session open in another pane is left out: two agents on one log
         # would interleave their turns into it. The in-process lock cannot
@@ -389,17 +454,17 @@ class SessionPane(Vertical):
             self._add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
             return
         choice = await self.app.push_screen_wait(PickerScreen("Resume session", list(labels)))
-        if choice not in labels or self.is_turn_running:
+        if choice not in labels or self.is_busy:
             self._focus_input()
             return
         try:
             agent = Agent.open(cwd=self.agent.cwd, session=labels[choice], confirm=self._confirm,
-                               mode=self.mode, config=self.config)
-        except SessionError as exc:  # busy in another process, or no persisted system prompt
+                               mode=self.mode, config=self.config, toolset=self.agent.toolset)
+        except SessionError as exc:  # already open elsewhere, or no persisted system prompt
             self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return
-        self.agent.session.unlock()
-        self.agent = agent
+        killed = self._retire_agent()
+        self._adopt(agent)
         self._title = agent.session.first_user_text() or ""
         self._tokens = None
         self.query_one("#log", VerticalScroll).remove_children()
@@ -407,13 +472,14 @@ class SessionPane(Vertical):
         self._queue.clear()
         self._refresh_queued()
         await self._show_resumed()
+        self._report_killed(killed)
         self._sync_statusbar()
         self._notify_state()
         self._focus_input()
 
     @work(exclusive=True, group="compact")
     async def compact(self) -> None:
-        if self.is_turn_running:
+        if self.is_busy:
             self._add(Content.from_markup("[$text-muted]Busy — compact the context after this turn[/]"))
             return
         self._set_status(True, " Compacting context")
@@ -560,13 +626,14 @@ class SessionPane(Vertical):
     def handle_submit(self, event: PromptInput.Submitted) -> None:
         text = event.text
         self.query_one(PromptInput).clear()
-        if self.is_turn_running:
+        if self.is_busy:
             self._queue.append(text)
             self._refresh_queued()
             return
-        self._start_turn(text)
+        self.start_turn(text)
 
-    def _start_turn(self, text: str) -> None:
+    def start_turn(self, text: str) -> None:
+        """Begin a turn on this pane's agent. Only valid while it is idle."""
         if not self._title:
             self._title = text
         self._add_user(text)
@@ -606,7 +673,7 @@ class SessionPane(Vertical):
         self._queue.clear()
         self._refresh_queued()
         if finished:
-            self._start_turn(text)
+            self.start_turn(text)
         else:
             prompt = self.query_one(PromptInput)
             draft = prompt.text
@@ -631,10 +698,10 @@ class SessionPane(Vertical):
         self.new_session()
         self._add(Content.from_markup(
             "[$text-muted]Handed off — previous session: $hint[/]", hint=hint))
-        self._start_turn(prompt)
+        self.start_turn(prompt)
 
     def interrupt(self) -> None:
-        if self.is_turn_running:
+        if self.is_busy:
             self._turn.cancel()
 
     @work(exclusive=True)

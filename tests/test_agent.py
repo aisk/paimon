@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 from paimon import compaction, lockfile, tools
 from paimon.agent import (
     Agent,
+    AgentsNotice,
     CompactionNotice,
     ContextCompactionFailed,
     ReasoningDelta,
@@ -35,7 +36,13 @@ from paimon.agent import (
     replay_events,
 )
 from paimon.config import Config
-from paimon.session import Session, SessionIncompleteError, is_summary_message, summary_message
+from paimon.session import (
+    Session,
+    SessionIncompleteError,
+    is_agents_message,
+    is_summary_message,
+    summary_message,
+)
 
 
 def _config() -> Config:
@@ -58,6 +65,7 @@ class AgentSystemPromptTest(unittest.TestCase):
             self.assertEqual(session.system_prompt(), "snapshot")
             generate.assert_called_once_with(cwd)
 
+            first.session.unlock()  # a session is only ever open once at a time
             with patch("paimon.agent.build_system_prompt") as generate:
                 resumed = Agent.open(cwd=cwd, session=session, config=_config())
 
@@ -583,3 +591,102 @@ class CompactionFailureTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
+    """The four supervised tools as the agent loop sees them."""
+
+    @staticmethod
+    def _agent(cwd: Path, **kwargs) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        return Agent.open(cwd=cwd, session=session, config=_config(), **kwargs)
+
+    async def test_without_a_supervisor_they_refuse_instead_of_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory))
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("spawn_agent", '{"prompt": "go"}')):
+                events = [event async for event in agent.run("do it")]
+
+            end = next(event for event in events if isinstance(event, ToolEnd))
+            self.assertIn("only available in the interactive UI", end.result)
+
+    async def test_a_narrowed_toolset_disables_them_entirely(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            toolset = tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED)
+            agent = self._agent(Path(directory), toolset=toolset)
+            agent.supervisor = _FakeSupervisor()
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("spawn_agent", '{"prompt": "go"}')):
+                events = [event async for event in agent.run("do it")]
+
+            end = next(event for event in events if isinstance(event, ToolEnd))
+            self.assertIn("unknown tool", end.result)
+            names = [schema["function"]["name"] for schema in agent.tool_schemas]
+            self.assertNotIn("spawn_agent", names, "and the model is never offered it")
+
+    async def test_a_call_is_handed_to_the_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory))
+            agent.supervisor = supervisor = _FakeSupervisor()
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("read_agent", '{"agent_id": "a1f2"}')):
+                events = [event async for event in agent.run("do it")]
+
+            self.assertEqual(supervisor.calls, [("read_agent", {"agent_id": "a1f2"})])
+            end = next(event for event in events if isinstance(event, ToolEnd))
+            self.assertEqual(end.result, "handled")
+
+
+class AgentStatusInjectionTest(unittest.IsolatedAsyncioTestCase):
+    """What the agents this session started did reaches the model as history."""
+
+    async def test_a_status_line_opens_the_turn_and_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config())
+            agent.supervisor = _FakeSupervisor(summary="a1f2 finished")
+
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                events = [event async for event in agent.run("what now")]
+
+            notices = [event for event in events if isinstance(event, AgentsNotice)]
+            self.assertEqual([notice.text for notice in notices], ["a1f2 finished"])
+            self.assertTrue(is_agents_message(agent.history[0]),
+                            "it goes in ahead of the user's own message")
+            self.assertFalse(is_agents_message(agent.history[1]))
+
+            # It survives a reload, and replays as a notice rather than as
+            # something the user typed.
+            replayed = replay_events(session.messages())
+            self.assertEqual([type(event) for event in replayed][:2], [AgentsNotice, UserInput])
+
+    async def test_nothing_is_injected_without_news(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config())
+            agent.supervisor = _FakeSupervisor(summary=None)
+
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                events = [event async for event in agent.run("what now")]
+
+            self.assertFalse([event for event in events if isinstance(event, AgentsNotice)])
+            self.assertFalse(any(is_agents_message(message) for message in agent.history))
+
+
+class _FakeSupervisor:
+    def __init__(self, summary=None) -> None:
+        self.summary = summary
+        self.calls: list = []
+
+    def status_summary(self, caller) -> object:
+        return self.summary
+
+    async def handle(self, name: str, args: dict, *, caller) -> str:
+        self.calls.append((name, args))
+        return "handled"

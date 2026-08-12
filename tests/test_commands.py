@@ -203,6 +203,19 @@ class SessionsTest(CommandTestCase):
         self.assertTrue(payload[0]["created_at"])
         self.assertTrue(payload[0]["path"].endswith(".jsonl"))
 
+    def test_subagent_sessions_stay_out_of_the_listing_and_of_continue(self) -> None:
+        """`paimon -c` goes through latest_session, so an unfiltered list would
+        silently resume some agent's session after an afternoon of them."""
+        mine = self._make_session("my work")
+        child = Session.create(Path.cwd(), parent=mine.id)
+        child.append_message(ModelRequest(parts=[UserPromptPart(content="their work")]))
+
+        code, out, err = self._run("sessions", "--json")
+        self.assertEqual([entry["id"] for entry in json.loads(out)], [mine.id])
+        self.assertEqual(commands.latest_session().id, mine.id)
+        # Naming one is still allowed: that is a deliberate act, not a default.
+        self.assertEqual(commands.resolve_session(child.id[:8]).id, child.id)
+
     def test_text_lists_short_ids(self) -> None:
         session = self._make_session("hi")
         code, out, err = self._run("sessions")

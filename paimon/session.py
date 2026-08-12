@@ -21,6 +21,11 @@ from . import lockfile
 # rebuild it, and previews have to recognize it as not-a-user-message.
 SUMMARY_PREFIX = "The conversation before this point was compacted into this checkpoint:\n\n"
 
+# The other synthetic user message: a one-line report on the agents this
+# session started, prepended to a turn so the model learns that one of them
+# finished without anything having to interrupt the user.
+AGENTS_PREFIX = "[agents] "
+
 
 class SessionError(RuntimeError):
     """A session cannot be opened. Callers catch this to report and move on."""
@@ -39,16 +44,52 @@ def summary_message(summary: str) -> ModelRequest:
     return ModelRequest(parts=[UserPromptPart(content=SUMMARY_PREFIX + summary)])
 
 
-def is_summary_message(message: ModelMessage) -> bool:
+def _has_prefixed_user_text(message: ModelMessage, prefix: str) -> bool:
     return (
         isinstance(message, ModelRequest)
         and any(
             isinstance(part, UserPromptPart)
             and isinstance(part.content, str)
-            and part.content.startswith(SUMMARY_PREFIX)
+            and part.content.startswith(prefix)
             for part in message.parts
         )
     )
+
+
+def is_summary_message(message: ModelMessage) -> bool:
+    return _has_prefixed_user_text(message, SUMMARY_PREFIX)
+
+
+def agents_message(summary: str) -> ModelRequest:
+    """The synthetic user message carrying an agent status line.
+
+    A message of its own rather than something glued onto the user's prompt:
+    the first user message is the session's title everywhere it is listed, and
+    a turn assembled from several queued prompts has no single place to glue it
+    onto anyway.
+    """
+    return ModelRequest(parts=[UserPromptPart(content=AGENTS_PREFIX + summary)])
+
+
+def is_agents_message(message: ModelMessage) -> bool:
+    return _has_prefixed_user_text(message, AGENTS_PREFIX)
+
+
+def agents_text(message: ModelMessage) -> str:
+    """The status line of an agents message, without its marker prefix."""
+    for part in getattr(message, "parts", []):
+        if (isinstance(part, UserPromptPart) and isinstance(part.content, str)
+                and part.content.startswith(AGENTS_PREFIX)):
+            return part.content[len(AGENTS_PREFIX):]
+    return ""
+
+
+def is_synthetic_user_text(content: str) -> bool:
+    """Whether a user-prompt string is one paimon wrote rather than the user.
+
+    Previews, titles and "where does a turn start" all have to skip these.
+    """
+    return content.startswith(SUMMARY_PREFIX) or content.startswith(AGENTS_PREFIX)
 
 
 def dump_message(message: ModelMessage) -> dict:
@@ -98,17 +139,28 @@ def resume_hint(session_id: str) -> str:
 class Session:
     """A session backed by an append-only JSONL event log."""
 
-    def __init__(self, path: Path, session_id: str, cwd: Path):
+    def __init__(self, path: Path, session_id: str, cwd: Path, parent: Optional[str] = None):
         self.path = path
         self.id = session_id
         self.cwd = cwd.resolve()
+        # The session that spawned this one, when it belongs to a subagent.
+        # Children share the project directory with the session that started
+        # them, so they are hidden from listings unless asked for.
+        self.parent = parent
 
     def lock(self) -> None:
-        """Mark this session active: only one process may run a session.
+        """Mark this session active: only one agent may run a session.
 
         Listing and previews never lock; the Agent locks on construction.
-        Raises SessionBusyError if another process holds the session.
+        Raises SessionBusyError if the session is already open, here or in
+        another process.
         """
+        # The process-wide lock refcounts, so it says yes to a second Agent in
+        # this same process — which is exactly the case that corrupts a log:
+        # two histories evolving apart while both append to one append-only
+        # file replay as a single interleaved conversation.
+        if lockfile.held(self.path):
+            raise SessionBusyError(f"session {self.id[:8]} is already open in this window")
         if not lockfile.acquire(self.path):
             raise SessionBusyError(f"session {self.id[:8]} is already active in another process")
 
@@ -117,14 +169,17 @@ class Session:
         lockfile.release(self.path)
 
     @classmethod
-    def create(cls, cwd: Path) -> "Session":
+    def create(cls, cwd: Path, parent: Optional[str] = None) -> "Session":
         session_id = str(uuid4())
         directory = _project_dir(cwd)
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        session = cls(directory / f"{timestamp}-{session_id[:8]}.jsonl", session_id, cwd)
-        session.append({"type": "session", "id": session_id,
-                        "cwd": str(session.cwd), "created_at": _now()})
+        session = cls(directory / f"{timestamp}-{session_id[:8]}.jsonl", session_id, cwd, parent)
+        header = {"type": "session", "id": session_id,
+                  "cwd": str(session.cwd), "created_at": _now()}
+        if parent:
+            header["parent"] = parent
+        session.append(header)
         return session
 
     def fork(self) -> "Session":
@@ -138,6 +193,10 @@ class Session:
         path = self.path.parent / f"{timestamp}-{session_id[:8]}.jsonl"
         header = {"type": "session", "id": session_id,
                   "cwd": str(self.cwd), "created_at": _now()}
+        # A fork of a subagent's transcript is still subagent material, so it
+        # inherits the parent and stays out of the listings for the same reason.
+        if self.parent:
+            header["parent"] = self.parent
         lines = [json.dumps(header, ensure_ascii=False, separators=(",", ":"))]
         with self.path.open(encoding="utf-8") as file:
             for line in file:
@@ -154,14 +213,20 @@ class Session:
             os.fsync(fd)
         finally:
             os.close(fd)
-        return Session(path, session_id, self.cwd)
+        return Session(path, session_id, self.cwd, self.parent)
 
     @classmethod
-    def list(cls, cwd: Path) -> list["Session"]:
+    def list(cls, cwd: Path, include_children: bool = False) -> list["Session"]:
         """Sessions that have at least one message, newest first by mtime.
 
         Reads each log only far enough to see the header and a first message,
         so listing stays cheap with many long sessions.
+
+        Sessions started by a subagent are left out by default. They share this
+        project directory with the session that spawned them — the directory is
+        keyed by cwd, and a subagent inherits its parent's — so an afternoon of
+        parallel work would otherwise bury the user's own sessions, and
+        ``paimon -c`` would resume one of them.
         """
         directory = _project_dir(cwd)
         if not directory.is_dir():
@@ -174,8 +239,12 @@ class Session:
             if (header is None or header.get("type") != "session"
                     or not isinstance(header.get("id"), str)):
                 continue
+            parent = header.get("parent")
+            parent = parent if isinstance(parent, str) else None
+            if parent and not include_children:
+                continue
             if any(record.get("type") == "message" for record in records):
-                sessions.append(cls(path, header["id"], cwd))
+                sessions.append(cls(path, header["id"], cwd, parent))
         return sessions
 
     @staticmethod
@@ -254,7 +323,7 @@ class Session:
             for part in message.get("parts") or []:
                 content = part.get("content") if isinstance(part, dict) else None
                 if (isinstance(part, dict) and part.get("part_kind") == "user-prompt"
-                        and isinstance(content, str) and not content.startswith(SUMMARY_PREFIX)):
+                        and isinstance(content, str) and not is_synthetic_user_text(content)):
                     return content
         return None
 

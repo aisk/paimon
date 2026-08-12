@@ -25,6 +25,7 @@ EVENT_SAMPLES = {
     "ModelRetry": (1, 4, 2.0, "HTTP 429"),
     "UserInput": ("hi",),
     "CompactionNotice": (),
+    "AgentsNotice": ("a1f2 finished",),
 }
 
 # Events a renderer may legitimately draw nothing for.

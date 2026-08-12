@@ -11,6 +11,7 @@ captures just the answer.
     {"type": "tool_use", "id": str, "name": str, "args": object}
     {"type": "tool_result", "id": str, "name": str, "result": str, "denied": bool}
     {"type": "todos", "todos": array}
+    {"type": "agents", "text": str}
     {"type": "compacted", "tokens_before": int, "tokens_after": int}
     {"type": "compaction_failed", "error": str}
     {"type": "retry", "attempt": int, "max_attempts": int, "delay": float, "error": str}
@@ -48,6 +49,7 @@ from typing import Optional
 from . import tools
 from .agent import (
     Agent,
+    AgentsNotice,
     ContextCompacted,
     ContextCompactionFailed,
     ModelRetry,
@@ -181,6 +183,9 @@ class TextRenderer:
         elif isinstance(ev, TodosUpdate):
             self._note(tools.render_todos(ev.todos))
 
+        elif isinstance(ev, AgentsNotice):
+            self._note(f"· agents: {ev.text}")
+
         elif isinstance(ev, ContextCompacted):
             self._note(f"· context compacted: {ev.tokens_before:,} → ~{ev.tokens_after:,} tokens")
 
@@ -218,6 +223,7 @@ class JsonRenderer:
         ToolStart: "tool_use",
         ToolEnd: "tool_result",
         TodosUpdate: "todos",
+        AgentsNotice: "agents",
         ContextCompacted: "compacted",
         ContextCompactionFailed: "compaction_failed",
         ModelRetry: "retry",
@@ -264,6 +270,8 @@ class JsonRenderer:
                         "result": ev.result, "denied": ev.denied})
         elif isinstance(ev, TodosUpdate):
             self._emit({"type": name, "todos": ev.todos})
+        elif isinstance(ev, AgentsNotice):
+            self._emit({"type": name, "text": ev.text})
         elif isinstance(ev, ContextCompacted):
             self._emit({"type": name, "tokens_before": ev.tokens_before,
                         "tokens_after": ev.tokens_after})
@@ -440,8 +448,14 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
 
     text = build_prompt(prompt, piped, cwd)
     try:
+        # No agent tools here: -p runs exactly one turn and asyncio.run tears
+        # the loop down the moment it returns, cancelling any agent still
+        # working at whatever point it had reached — including, mid-cleanup,
+        # the kill of a shell command's process group. Offering the model a
+        # tool that cannot be finished is worse than not having it.
         agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
-                           append_system_prompt=append_system_prompt)
+                           append_system_prompt=append_system_prompt,
+                           toolset=tools.without(tools.REGISTRY, tools.SUPERVISED_TOOLS))
     except SessionError as exc:  # busy in another process, or no persisted system prompt
         renderer.begin()
         renderer.finish(subtype="error", error=str(exc))

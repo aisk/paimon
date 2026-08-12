@@ -99,6 +99,8 @@ class ReasoningRoundTripTest(unittest.IsolatedAsyncioTestCase):
                 model_name="glm-5.2", provider_name="zai",
             ))
 
+            # A session may only be open once at a time, here as in a pane.
+            first.session.unlock()
             resumed = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
             with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 _ = [event async for event in resumed.run("continue")]
