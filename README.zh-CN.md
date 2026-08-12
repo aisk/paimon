@@ -28,6 +28,8 @@ uvx paimon
 
 运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，`ls`、`git status` 这类明确只读的命令除外，会直接执行，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建、分叉或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
 
+`Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。tab 栏可以在命令面板里改成停靠在上方、左侧或右侧。
+
 在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
 ## 当作 subagent 使用

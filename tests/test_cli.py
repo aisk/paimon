@@ -129,7 +129,7 @@ class TuiExitTest(CliTestCase):
 
         class FakeApp:
             def __init__(self, opened, **kwargs) -> None:
-                self.agent = opened
+                self.panes = [SimpleNamespace(agent=opened)]
 
             def run(self) -> None:
                 if crash:

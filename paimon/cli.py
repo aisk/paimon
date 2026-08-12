@@ -169,8 +169,10 @@ def main() -> None:
         # Also on the way out of a crash: that is when knowing how to get the
         # conversation back matters most. Skipped under --tui, where the
         # streams belong to textual-serve rather than to a user.
-        if not args.tui and app.agent.history:
-            print(f"resume: {resume_hint(app.agent.session.id)}", file=sys.stderr)
+        if not args.tui:
+            for pane in app.panes:
+                if pane.agent.history:
+                    print(f"resume: {resume_hint(pane.agent.session.id)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

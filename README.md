@@ -28,6 +28,8 @@ The first launch asks for a provider, model, API base and key, and saves them to
 
 While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, except clearly read-only ones like `ls` or `git status`, which run without asking, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider or profile, new, fork or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
 
+`Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. The command palette docks the tabs at the top, the left or the right.
+
 Write `@path/to/file` in a prompt to hand a file to the agent.
 
 ## Using Paimon as a subagent

@@ -15,11 +15,12 @@ from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.message import Message
 from textual.widgets import LoadingIndicator, Static
 from textual.widgets.markdown import MarkdownStream
 from textual.worker import Worker, WorkerState
 
-from . import tools
+from . import lockfile, tools
 from .agent import (
     Agent,
     CompactionNotice,
@@ -190,6 +191,18 @@ class SessionPane(Vertical):
     """A single conversation. A container, deliberately not a Screen: screens
     are mutually exclusive and ``app.query_one`` only sees the active one."""
 
+    class StateChanged(Message):
+        """This pane started or finished a turn, or changed what it shows.
+
+        Worker.StateChanged does not bubble and the turn worker now lives on
+        the pane, so anything app-wide that tracks panes — the tab strip, the
+        status bar — only hears about them through this.
+        """
+
+        def __init__(self, pane: "SessionPane") -> None:
+            self.pane = pane
+            super().__init__()
+
     def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None) -> None:
         super().__init__(id=id)
         self.agent = agent
@@ -197,6 +210,19 @@ class SessionPane(Vertical):
         self.mode = agent.mode
         self._resumed = resumed
         self._turn: Worker | None = None
+        # Tab label, kept here rather than read back from the session file on
+        # every repaint of the strip.
+        self._title = agent.session.first_user_text() or ""
+        # Last context size measured for this session, so redrawing the status
+        # bar for an unrelated reason does not blank the readout.
+        self._tokens: int | None = None
+        # Depth of pending _confirm calls; see needs_confirm.
+        self._confirming = 0
+        # Set by close(): the turn is cancelled and the widgets go away, so
+        # whatever the worker unwinds through must not touch the DOM. Not
+        # named _closing: MessagePump already owns that attribute, and
+        # setting it strands the widget's message loop on teardown.
+        self._pane_closing = False
         # run_turn reports model errors in the log instead of letting them
         # escape the worker (which would exit the app), so the worker still
         # ends up SUCCESS; this is what tells the two apart afterwards.
@@ -220,6 +246,30 @@ class SessionPane(Vertical):
     def is_turn_running(self) -> bool:
         return self._turn is not None and self._turn.is_running
 
+    @property
+    def needs_confirm(self) -> bool:
+        """Whether this pane is blocked on a permission confirmation.
+
+        Counted rather than queried: removing the panel is asynchronous, and
+        the tab badge must clear the moment the answer is in.
+        """
+        return self._confirming > 0
+
+    @property
+    def tab_title(self) -> str:
+        """Short label for the tab strip."""
+        title = " ".join(self._title.split())
+        return title or "new session"
+
+    def _notify_state(self) -> None:
+        self.post_message(self.StateChanged(self))
+
+    def close(self) -> None:
+        """Give up everything this pane owns; the app removes the widget."""
+        self._pane_closing = True
+        self.interrupt()
+        self.agent.session.unlock()
+
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
         status = Horizontal(
@@ -238,7 +288,7 @@ class SessionPane(Vertical):
 
     async def on_mount(self) -> None:
         self.query_one("#log", VerticalScroll).anchor()
-        self._focus_prompt()
+        self._focus_input()
         self._refresh_mode()
         if self._resumed:
             await self._show_resumed()
@@ -261,15 +311,21 @@ class SessionPane(Vertical):
 
     # ---- focus --------------------------------------------------------------
 
-    def _focus_prompt(self) -> None:
-        """Focus this pane's prompt unless another pane is on screen.
+    def _focus_input(self) -> None:
+        """Focus what this pane is waiting on, unless another pane is on screen.
+
+        A pending confirmation wins over the prompt: the prompt is hidden
+        underneath it, and switching to a pane to answer it has to land on the
+        panel or the keys go nowhere.
 
         Widget.focusable only looks at ``visible``, which is unrelated to
         ``display``, so a hidden pane focusing anything really does take the
         keyboard away from the pane the user is typing into.
         """
-        if self.is_current:
-            self.query_one(PromptInput).focus()
+        if not self.is_current:
+            return
+        panels = self.query(ConfirmPanel)
+        (panels.last() if panels else self.query_one(PromptInput)).focus()
 
     # ---- session switching --------------------------------------------------
 
@@ -288,12 +344,15 @@ class SessionPane(Vertical):
                            config=self.config)
         self.agent.session.unlock()
         self.agent = agent
+        self._title = ""
+        self._tokens = None
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._sync_statusbar()
+        self._notify_state()
 
     def fork_session(self) -> None:
         if self.is_turn_running:
@@ -312,6 +371,7 @@ class SessionPane(Vertical):
         self.agent = agent
         self._add(Content.from_markup("[$text-muted]Forked session $id[/]", id=agent.session.id[:8]))
         self._sync_statusbar()
+        self._notify_state()
 
     # The picker gets its own group: run_turn is an exclusive worker on this
     # same node, and the default group would let a turn cancel the open picker.
@@ -319,13 +379,18 @@ class SessionPane(Vertical):
     async def resume_session(self) -> None:
         if self.is_turn_running:
             return
-        labels = {_session_label(session): session for session in Session.list(self.agent.cwd)}
+        # A session open in another pane is left out: two agents on one log
+        # would interleave their turns into it. The in-process lock cannot
+        # refuse them — it refcounts — so the picker has to.
+        labels = {_session_label(session): session
+                  for session in Session.list(self.agent.cwd)
+                  if not lockfile.held(session.path)}
         if not labels:
             self._add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
             return
         choice = await self.app.push_screen_wait(PickerScreen("Resume session", list(labels)))
         if choice not in labels or self.is_turn_running:
-            self._focus_prompt()
+            self._focus_input()
             return
         try:
             agent = Agent.open(cwd=self.agent.cwd, session=labels[choice], confirm=self._confirm,
@@ -335,13 +400,16 @@ class SessionPane(Vertical):
             return
         self.agent.session.unlock()
         self.agent = agent
+        self._title = agent.session.first_user_text() or ""
+        self._tokens = None
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
         self._refresh_queued()
         await self._show_resumed()
         self._sync_statusbar()
-        self._focus_prompt()
+        self._notify_state()
+        self._focus_input()
 
     @work(exclusive=True, group="compact")
     async def compact(self) -> None:
@@ -356,7 +424,7 @@ class SessionPane(Vertical):
             return
         finally:
             self._set_status(False)
-            self._focus_prompt()
+            self._focus_input()
         if result is None:
             self._add(Content.from_markup("[$text-muted]Nothing to compact yet — the context is still short[/]"))
             return
@@ -475,11 +543,15 @@ class SessionPane(Vertical):
         # next keystroke would answer a confirmation they never saw.
         if self.is_current:
             panel.focus()
+        self._confirming += 1
+        self._notify_state()
         try:
             verdict = await future
         finally:
+            self._confirming -= 1
             prompt.display = True
             panel.remove()
+            self._notify_state()
         return verdict == "allow"
 
     # ---- input → turn -------------------------------------------------------
@@ -495,8 +567,11 @@ class SessionPane(Vertical):
         self._start_turn(text)
 
     def _start_turn(self, text: str) -> None:
+        if not self._title:
+            self._title = text
         self._add_user(text)
         self._turn = self.run_turn(text)
+        self._notify_state()
 
     def _refresh_queued(self) -> None:
         widget = self.query_one("#queued", Static)
@@ -518,6 +593,7 @@ class SessionPane(Vertical):
         done = (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED)
         if event.worker is not self._turn or event.state not in done:
             return
+        self._notify_state()
         finished = event.state == WorkerState.SUCCESS and not self._turn_failed
         if self._pending_handoff is not None:
             prompt, self._pending_handoff = self._pending_handoff, None
@@ -619,9 +695,10 @@ class SessionPane(Vertical):
                 else:
                     set_state(None)
         except asyncio.CancelledError:
-            # Quitting the app also cancels this worker, but only after the
-            # DOM is torn down — mounting anything then raises MountError.
-            if self.app.is_running:
+            # Quitting the app, and closing this pane, cancel this worker
+            # while its widgets are going away — mounting anything into them
+            # then raises MountError.
+            if self.app.is_running and not self._pane_closing:
                 self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
             raise
         except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
@@ -629,7 +706,7 @@ class SessionPane(Vertical):
             self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
         finally:
             timer.stop()
-            if self.app.is_running:
+            if self.app.is_running and not self._pane_closing:
                 await renderer.close()
                 set_state(None)
-                self._focus_prompt()
+                self._focus_input()

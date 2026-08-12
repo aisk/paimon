@@ -1,7 +1,28 @@
 /* Styles for PaimonApp. Loaded via PaimonApp.CSS_PATH. */
 
 Screen { background: $background; }
+#panes { height: 1fr; }
 SessionPane { height: 1fr; margin: 1 2 0 2; }
+
+/* ---- pane tabs ---- */
+
+/* Orientation is the dock: a top strip is one row of tabs, a side strip is a
+   column of them. Hidden entirely while a single pane is open. */
+#pane-tabs.-top { dock: top; layout: horizontal; height: 1; padding: 0 2; }
+#pane-tabs.-left { dock: left; layout: vertical; width: 24; padding: 1 1 1 2; }
+#pane-tabs.-right { dock: right; layout: vertical; width: 24; padding: 1 2 1 1; }
+.pane-tab {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+#pane-tabs.-top .pane-tab { width: auto; max-width: 28; }
+#pane-tabs.-left .pane-tab, #pane-tabs.-right .pane-tab { width: 1fr; }
+.pane-tab:hover { color: $text; }
+.pane-tab.-attention { color: $warning; }
+.pane-tab.-active { color: $text; background: $primary 20%; text-style: bold; }
 
 * {
     scrollbar-size-vertical: 1;

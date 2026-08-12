@@ -24,11 +24,12 @@ from textual.worker import WorkerState
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import lockfile
 from paimon.agent import Agent, ReasoningDelta
-from paimon.app import PaimonApp
+from paimon.app import MAX_PANES, PaimonApp
 from paimon.pane import SessionPane, _EventRenderer, _session_label
 from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
 from paimon.session import Session
+from paimon.tabs import PaneTab
 from paimon.ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
 
@@ -743,3 +744,219 @@ class ProfileSwitchTest(AppTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiPaneTest(AppTestCase):
+    """Opening, switching and closing panes."""
+
+    @staticmethod
+    def _log_text(pane: SessionPane) -> str:
+        return " ".join(str(widget.render()) for widget in pane.query_one("#log").children)
+
+    async def test_new_pane_opens_a_second_session_and_shows_the_strip(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            first = app.pane
+            self.assertFalse(app._tabs.display, "one pane needs no strip")
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
+            second = app.pane
+            self.assertEqual(app.panes, [first, second])
+            self.assertNotEqual(second.agent.session.id, first.agent.session.id)
+            self.assertTrue(app._tabs.display)
+            self.assertFalse(first.display, "only the current pane is shown")
+            self.assertTrue(second.display)
+            self.assertIs(app.focused, second.query_one(PromptInput))
+
+    async def test_new_pane_inherits_cwd_and_mode(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("shift+tab")  # read -> edit
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertEqual(app.pane.mode, "edit")
+            self.assertEqual(app.pane.agent.mode, "edit")
+            self.assertEqual(app.pane.agent.cwd, app.panes[0].agent.cwd)
+
+    async def test_cycling_wraps_in_both_directions(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertIs(app.pane, app.panes[2])
+
+            await pilot.press("ctrl+pagedown")
+            self.assertIs(app.pane, app.panes[0])
+            await pilot.press("ctrl+pageup")
+            self.assertIs(app.pane, app.panes[2])
+            await pilot.press("ctrl+pageup")
+            self.assertIs(app.pane, app.panes[1])
+
+    async def test_clicking_a_tab_switches_to_it(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            first = app.pane
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            await pilot.click(app.query_one(f"#tab-{first.id}", PaneTab))
+            await pilot.pause()
+            self.assertIs(app.pane, first)
+            self.assertTrue(first.display)
+
+    async def test_tab_labels_number_the_panes_and_show_their_title(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            app.panes[0]._title = "fix   the parser"
+            app._sync_panes()
+            await pilot.pause()
+            labels = [str(tab.render()) for tab in app.query(PaneTab)]
+            self.assertEqual(labels, ["· 1. fix the parser", "· 2. new session"])
+
+    async def test_closing_a_pane_unlocks_it_and_falls_back_to_a_neighbour(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            first = app.pane
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            closed = app.pane.agent.session.path
+            self.assertTrue(lockfile.held(closed))
+
+            await pilot.press("ctrl+w")
+            await pilot.pause()
+            self.assertFalse(lockfile.held(closed), "a closed pane releases its session")
+            self.assertEqual(app.panes, [first])
+            self.assertIs(app.pane, first)
+            self.assertTrue(first.display)
+            self.assertFalse(app._tabs.display)
+            self.assertEqual([tab.pane for tab in app.query(PaneTab)], [first],
+                             "the strip drops the closed tab")
+
+    async def test_closing_a_pane_mid_turn_leaves_nothing_behind(self) -> None:
+        # The turn is cancelled while its widgets are being removed, so the
+        # worker must unwind without touching them.
+        app = self.make_app()
+        with patch("paimon.agent.build_model",
+                   return_value=stub_model("shell", '{"command": "rm x"}')):
+            async with app.run_test() as pilot:
+                await pilot.press("ctrl+t")
+                await pilot.pause()
+                pane = app.pane
+                pane.handle_submit(PromptInput.Submitted("go"))
+                for _ in range(200):
+                    await pilot.pause()
+                    if pane.needs_confirm:
+                        break
+                else:
+                    raise AssertionError("confirm panel never appeared")
+
+                await pilot.press("ctrl+w")
+                await pilot.pause()
+                self.assertEqual(len(app.panes), 1)
+                self.assertFalse(lockfile.held(pane.agent.session.path))
+                self.assertNotIn("awaiting confirmation",
+                                 str(app.query_one("#statusbar", Static).render()))
+
+    async def test_the_last_pane_stays_open(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+w")
+            await pilot.pause()
+            self.assertEqual(len(app.panes), 1)
+            self.assertIn("last pane stays open", self._log_text(app.pane))
+
+    async def test_pane_count_is_capped(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            for _ in range(MAX_PANES + 1):
+                await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertEqual(len(app.panes), MAX_PANES)
+            self.assertIn(f"Already at {MAX_PANES} panes", self._log_text(app.pane))
+
+
+class PaneAttentionTest(AppTestCase):
+    """A pane waiting for permission is the one thing the user must not miss."""
+
+    async def test_a_confirmation_elsewhere_is_announced_and_reachable(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            first = app.panes[0]
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
+            task = asyncio.ensure_future(first._confirm("shell", {"command": "rm x"}))
+            await pilot.pause()
+            self.assertTrue(first.needs_confirm)
+            self.assertIn("1 awaiting confirmation",
+                          str(app.query_one("#statusbar", Static).render()))
+            tab = app.query_one(f"#tab-{first.id}", PaneTab)
+            self.assertTrue(tab.has_class("-attention"))
+            self.assertTrue(str(tab.render()).startswith("!"))
+
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            self.assertIs(app.pane, first)
+            # The prompt is hidden under the panel, so the panel takes the keys.
+            self.assertIs(app.focused, first.query_one(ConfirmPanel))
+            await pilot.press("enter")
+            self.assertTrue(await task)
+
+            await pilot.pause()
+            self.assertFalse(first.needs_confirm)
+            self.assertNotIn("awaiting confirmation",
+                             str(app.query_one("#statusbar", Static).render()))
+
+    async def test_goto_attention_does_nothing_when_nothing_waits(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            current = app.pane
+            await pilot.press("ctrl+g")
+            self.assertIs(app.pane, current)
+
+
+class TabDockTest(AppTestCase):
+    async def test_move_tabs_redocks_the_strip_and_remembers_it(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            self.assertTrue(app._tabs.has_class("-top"))
+            app.action_move_tabs()
+            await pilot.pause()
+            self.assertIsInstance(app.screen, PickerScreen)
+            app.screen.dismiss("Left")
+            await pilot.pause()
+
+            self.assertTrue(app._tabs.has_class("-left"))
+            self.assertFalse(app._tabs.has_class("-top"))
+            self.assertEqual(Config.load().tab_dock, "left")
+
+    async def test_a_saved_dock_is_applied_on_start(self) -> None:
+        app = self.make_app(config=Config(model="test-model", tab_dock="right"))
+        async with app.run_test():
+            self.assertTrue(app._tabs.has_class("-right"))
+
+
+class PaneSessionLockTest(AppTestCase):
+    async def test_resume_hides_a_session_open_in_another_pane(self) -> None:
+        old = ResumeSessionTest._old_session()
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            app.action_resume_session()
+            await pilot.pause()
+            app.screen.dismiss(_session_label(old))
+            await pilot.pause()
+            self.assertEqual(app.pane.agent.session.id, old.id)
+
+            await pilot.press("ctrl+pageup")
+            app.action_resume_session()
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, PickerScreen,
+                                     "the session is already open in the other pane")
+            self.assertIn("No sessions to resume", MultiPaneTest._log_text(app.pane))
