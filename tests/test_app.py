@@ -17,14 +17,15 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 from textual.worker import WorkerState
 
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import lockfile
 from paimon.agent import Agent, ReasoningDelta
-from paimon.app import PaimonApp, _EventRenderer, _session_label
+from paimon.app import PaimonApp
+from paimon.pane import SessionPane, _EventRenderer, _session_label
 from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
 from paimon.session import Session
@@ -51,7 +52,7 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
 class ConfirmPanelTest(AppTestCase):
     @staticmethod
     async def _open(app: PaimonApp, pilot, tool: str = "shell", args: dict | None = None) -> asyncio.Future:
-        task = asyncio.ensure_future(app._confirm(tool, args or {"command": "echo hi"}))
+        task = asyncio.ensure_future(app.pane._confirm(tool, args or {"command": "echo hi"}))
         await pilot.pause()
         return task
 
@@ -60,13 +61,13 @@ class ConfirmPanelTest(AppTestCase):
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptInput)
             task = await self._open(app, pilot)
-            panel = app.query_one("#confirm-panel", ConfirmPanel)
+            panel = app.query_one(ConfirmPanel)
             self.assertFalse(prompt.display, "prompt hidden while confirming")
             self.assertIs(app.focused, panel)
             await pilot.press("enter")
             self.assertTrue(await task)
             await pilot.pause()
-            self.assertFalse(app.query("#confirm-panel"))
+            self.assertFalse(app.query(ConfirmPanel))
             self.assertTrue(prompt.display)
 
     async def test_escape_denies(self) -> None:
@@ -91,7 +92,7 @@ class ConfirmPanelTest(AppTestCase):
         async with app.run_test() as pilot:
             leftover = ConfirmPanel("shell", {"command": "old"},
                                     asyncio.get_running_loop().create_future())
-            await app.query_one("#workspace", Vertical).mount(leftover)
+            await app.pane.mount(leftover)
             task = await self._open(app, pilot, args={"command": "new"})
             self.assertEqual(len(app.query(ConfirmPanel)), 1)
             await pilot.press("enter")
@@ -104,7 +105,7 @@ class ConfirmPanelTest(AppTestCase):
         with patch("paimon.agent.build_model",
                    return_value=stub_model("shell", '{"command": "rm x"}')):
             async with app.run_test() as pilot:
-                app.handle_submit(PromptInput.Submitted("go"))
+                app.pane.handle_submit(PromptInput.Submitted("go"))
                 for _ in range(200):
                     await pilot.pause()
                     if app.query(ConfirmPanel):
@@ -122,6 +123,64 @@ class ConfirmPanelTest(AppTestCase):
             self.assertIn("fresh one", detail)
             await pilot.press("escape")
             self.assertFalse(await task)
+
+
+class BackgroundPaneTest(AppTestCase):
+    """Guards for panes that are mounted but not on screen.
+
+    Widget.focusable only looks at visibility, which is unrelated to display,
+    so a hidden pane really can take the keyboard away from the visible one —
+    and answer, with the user's next keystroke, a confirmation they never saw.
+    """
+
+    async def _background_pane(self, app: PaimonApp) -> SessionPane:
+        pane = SessionPane(Agent.open(config=app.config), id="pane-2")
+        self.addCleanup(pane.agent.session.unlock)
+        await app.mount(pane)
+        pane.display = False
+        return pane
+
+    async def test_confirming_in_a_hidden_pane_leaves_focus_alone(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            other = await self._background_pane(app)
+            prompt = app.pane.query_one(PromptInput)
+            task = asyncio.ensure_future(other._confirm("shell", {"command": "rm x"}))
+            await pilot.pause()
+
+            self.assertEqual(len(other.query(ConfirmPanel)), 1, "the panel is up in its own pane")
+            self.assertIs(app.focused, prompt, "the visible pane keeps the keyboard")
+            await pilot.press("y")
+            self.assertFalse(task.done(), "keystrokes must not answer an unseen confirmation")
+            self.assertEqual(prompt.text, "y")
+
+            other.query_one(ConfirmPanel)._resolve("deny")
+            self.assertFalse(await task)
+
+    async def test_a_confirmation_elsewhere_survives_a_new_one(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            other = await self._background_pane(app)
+            waiting = asyncio.ensure_future(other._confirm("shell", {"command": "rm x"}))
+            await pilot.pause()
+            mine = await ConfirmPanelTest._open(app, pilot)
+
+            self.assertEqual(len(other.query(ConfirmPanel)), 1, "the sweep is pane-scoped")
+            await pilot.press("enter")
+            self.assertTrue(await mine)
+            self.assertFalse(waiting.done())
+
+            other.query_one(ConfirmPanel)._resolve("deny")
+            self.assertFalse(await waiting)
+
+    async def test_stray_typing_stays_in_the_visible_pane(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            other = await self._background_pane(app)
+            app.pane.query_one("#log", VerticalScroll).focus()
+            await pilot.press("h", "i")
+            self.assertEqual(app.pane.query_one(PromptInput).text, "hi")
+            self.assertEqual(other.query_one(PromptInput).text, "")
 
 
 class StrayTypingTest(AppTestCase):
@@ -149,34 +208,34 @@ class ModeCycleTest(AppTestCase):
     async def test_shift_tab_cycles_mode_and_updates_indicators(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            self.assertEqual(app.mode, "read")
+            self.assertEqual(app.pane.mode, "read")
             prompt = app.query_one(PromptInput)
             self.assertEqual(prompt.border_title, " read ")
 
             await pilot.press("shift+tab")
-            self.assertEqual(app.mode, "edit")
-            self.assertEqual(app.agent.mode, "edit")
+            self.assertEqual(app.pane.mode, "edit")
+            self.assertEqual(app.pane.agent.mode, "edit")
             self.assertEqual(prompt.border_title, " edit ")
             self.assertIn("edit mode", str(app.query_one("#statusbar", Static).render()))
 
             await pilot.press("shift+tab", "shift+tab")
-            self.assertEqual(app.mode, "read")
+            self.assertEqual(app.pane.mode, "read")
 
     async def test_new_session_keeps_current_mode(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             await pilot.press("shift+tab")
             app.action_new_session()
-            self.assertEqual(app.agent.mode, "edit")
+            self.assertEqual(app.pane.agent.mode, "edit")
 
     async def test_shift_tab_while_confirm_panel_open_keeps_pending_future(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            task = asyncio.ensure_future(app._confirm("shell", {"command": "echo hi"}))
+            task = asyncio.ensure_future(app.pane._confirm("shell", {"command": "echo hi"}))
             await pilot.pause()
             await pilot.press("shift+tab")
-            self.assertEqual(app.mode, "edit")
-            self.assertTrue(app.query("#confirm-panel"), "panel survives a mode switch")
+            self.assertEqual(app.pane.mode, "edit")
+            self.assertTrue(app.query(ConfirmPanel), "panel survives a mode switch")
             await pilot.press("enter")
             self.assertTrue(await task)
 
@@ -202,8 +261,8 @@ class ResumeSessionTest(AppTestCase):
             self.assertIsInstance(app.screen, PickerScreen)
             app.screen.dismiss(_session_label(old))
             await pilot.pause()
-            self.assertEqual(app.agent.session.id, old.id)
-            self.assertEqual(app.agent.mode, "edit")
+            self.assertEqual(app.pane.agent.session.id, old.id)
+            self.assertEqual(app.pane.agent.mode, "edit")
             self.assertTrue(app.query(UserMessage), "history re-rendered")
             self.assertIn("Resumed session", self._log_text(app))
 
@@ -211,12 +270,12 @@ class ResumeSessionTest(AppTestCase):
         self._old_session()
         app = self.make_app()
         async with app.run_test() as pilot:
-            before = app.agent
-            app._turn = SimpleNamespace(is_running=True)
+            before = app.pane.agent
+            app.pane._turn = SimpleNamespace(is_running=True)
             app.action_resume_session()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
-            self.assertIs(app.agent, before)
+            self.assertIs(app.pane.agent, before)
 
     async def test_no_sessions_shows_notice(self) -> None:
         app = self.make_app()
@@ -231,7 +290,7 @@ class ResumeSessionTest(AppTestCase):
         app = self.make_app(session=old)
         async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertEqual(app.agent.session.id, old.id)
+            self.assertEqual(app.pane.agent.session.id, old.id)
             self.assertTrue(app.query(UserMessage))
             self.assertIn("Resumed session", self._log_text(app))
 
@@ -263,13 +322,13 @@ class ForkSessionTest(AppTestCase):
             await pilot.pause()
             app.action_fork_session()
             await pilot.pause()
-            self.assertNotEqual(app.agent.session.id, old.id)
-            self.assertEqual(app.agent.history, old.messages())
+            self.assertNotEqual(app.pane.agent.session.id, old.id)
+            self.assertEqual(app.pane.agent.history, old.messages())
             self.assertTrue(app.query(UserMessage), "log survives the fork")
             log_text = " ".join(str(w.render()) for w in app.query_one("#log").children)
             self.assertIn("Forked session", log_text)
             self.assertNotIn(str(old.path.resolve()), lockfile._held)
-            self.assertIn(str(app.agent.session.path.resolve()), lockfile._held)
+            self.assertIn(str(app.pane.agent.session.path.resolve()), lockfile._held)
 
     async def test_source_session_stays_resumable(self) -> None:
         old = ResumeSessionTest._old_session()
@@ -279,17 +338,17 @@ class ForkSessionTest(AppTestCase):
             app.action_fork_session()
             await pilot.pause()
             resumed = Agent.open(session=old)
-            self.assertEqual(resumed.history, app.agent.history)
+            self.assertEqual(resumed.history, app.pane.agent.history)
             resumed.session.unlock()
 
     async def test_noop_while_turn_is_running(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            before = app.agent
-            app._turn = SimpleNamespace(is_running=True)
+            before = app.pane.agent
+            app.pane._turn = SimpleNamespace(is_running=True)
             app.action_fork_session()
             await pilot.pause()
-            self.assertIs(app.agent, before)
+            self.assertIs(app.pane.agent, before)
 
 
 class SessionLabelTest(AppTestCase):
@@ -310,15 +369,17 @@ class StatusLineTest(AppTestCase):
         async with app.run_test() as pilot:
             status = app.query_one("#response-status", Horizontal)
             self.assertFalse(status.display, "status hidden when idle")
-            ids = [child.id for child in app.query_one("#workspace").children]
-            self.assertEqual(ids, ["log", "response-status", "queued", "prompt", "statusbar"])
+            ids = [child.id for child in app.pane.children]
+            self.assertEqual(ids, ["log", "response-status", "queued", "prompt"])
+            # the status bar is app-wide, so it sits outside the pane
+            self.assertEqual(app.query_one("#statusbar", Static).parent, app.screen)
 
-            app._set_status(True, " Counting mora… 3s")
+            app.pane._set_status(True, " Counting mora… 3s")
             await pilot.pause()
             self.assertTrue(status.display)
             self.assertIn("3s", str(status.query_one(".status-label", Static).render()))
 
-            app._set_status(False)
+            app.pane._set_status(False)
             await pilot.pause()
             self.assertFalse(status.display)
 
@@ -332,15 +393,15 @@ class TodoPanelTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             log = app.query_one("#log", VerticalScroll)
-            app._show_todos(self._plan("in_progress", "pending"))
-            app._show_todos(self._plan("completed", "in_progress"))
+            app.pane._show_todos(self._plan("in_progress", "pending"))
+            app.pane._show_todos(self._plan("completed", "in_progress"))
             await pilot.pause()
             panels = app.query(".todos")
             self.assertEqual(len(panels), 1, "consecutive revisions share one panel")
             self.assertIn("1/2", str(panels.first().render()))
 
-            app._add_tool_result("output")
-            app._show_todos(self._plan("completed", "completed"))
+            app.pane._add_tool_result("output")
+            app.pane._show_todos(self._plan("completed", "completed"))
             await pilot.pause()
             panels = app.query(".todos")
             self.assertEqual(len(panels), 2, "the earlier plan is left as a snapshot")
@@ -351,11 +412,11 @@ class TodoPanelTest(AppTestCase):
     async def test_clearing_removes_the_panel(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            app._show_todos(self._plan("pending"))
-            app._show_todos([])
+            app.pane._show_todos(self._plan("pending"))
+            app.pane._show_todos([])
             await pilot.pause()
             self.assertEqual(len(app.query(".todos")), 0)
-            self.assertIsNone(app._todo_panel)
+            self.assertIsNone(app.pane._todo_panel)
 
 
 class EventCoverageTest(AppTestCase):
@@ -368,7 +429,7 @@ class EventCoverageTest(AppTestCase):
     async def test_every_event_puts_something_in_the_log(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app)
+            renderer = _EventRenderer(app.pane)
             log = app.query_one("#log", VerticalScroll)
             for event in agent_events():
                 name = type(event).__name__
@@ -385,7 +446,7 @@ class ReasoningDisplayTest(AppTestCase):
     async def test_reasoning_rendered_when_enabled(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app)
+            renderer = _EventRenderer(app.pane)
             await renderer.handle(ReasoningDelta("thinking hard"))
             await pilot.pause()
             widgets = app.query(".reasoning")
@@ -395,7 +456,7 @@ class ReasoningDisplayTest(AppTestCase):
     async def test_reasoning_folded_by_default(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app)
+            renderer = _EventRenderer(app.pane)
             await renderer.handle(ReasoningDelta("line one\nline two\nline three"))
             await pilot.pause()
             body = str(app.query(".reasoning").first().render())
@@ -405,7 +466,7 @@ class ReasoningDisplayTest(AppTestCase):
     async def test_live_reasoning_folds_when_the_block_ends(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app)
+            renderer = _EventRenderer(app.pane)
             await renderer.handle(ReasoningDelta("line one\nline two"))
             await pilot.pause()
             widget = app.query(".reasoning").first()
@@ -434,29 +495,29 @@ class QueueTest(AppTestCase):
             self.assertFalse(prompt.disabled, "prompt stays enabled during turns")
 
             # prompts submitted while a (fake) turn runs are queued and shown
-            app._turn = SimpleNamespace(is_running=True)
-            app.handle_submit(PromptInput.Submitted("first message"))
-            app.handle_submit(PromptInput.Submitted("second message"))
+            app.pane._turn = SimpleNamespace(is_running=True)
+            app.pane.handle_submit(PromptInput.Submitted("first message"))
+            app.pane.handle_submit(PromptInput.Submitted("second message"))
             await pilot.pause()
-            self.assertEqual(app._queue, ["first message", "second message"])
+            self.assertEqual(app.pane._queue, ["first message", "second message"])
             self.assertTrue(queued.display)
 
             # a finished turn flushes the queue into the next turn
             started: list[str] = []
-            app._start_turn = started.append
-            app.on_worker_state_changed(SimpleNamespace(worker=app._turn, state=WorkerState.SUCCESS))
+            app.pane._start_turn = started.append
+            app.pane.on_worker_state_changed(SimpleNamespace(worker=app.pane._turn, state=WorkerState.SUCCESS))
             await pilot.pause()
             self.assertEqual(started, ["first message\n\nsecond message"])
-            self.assertFalse(app._queue)
+            self.assertFalse(app.pane._queue)
             self.assertFalse(queued.display)
 
             # an interrupted turn hands the queue back to the input instead
-            app.handle_submit(PromptInput.Submitted("queued later"))
+            app.pane.handle_submit(PromptInput.Submitted("queued later"))
             prompt.load_text("half-typed draft")
-            app.on_worker_state_changed(SimpleNamespace(worker=app._turn, state=WorkerState.CANCELLED))
+            app.pane.on_worker_state_changed(SimpleNamespace(worker=app.pane._turn, state=WorkerState.CANCELLED))
             await pilot.pause()
             self.assertEqual(prompt.text, "queued later\nhalf-typed draft")
-            self.assertFalse(app._queue)
+            self.assertFalse(app.pane._queue)
             self.assertEqual(started, ["first message\n\nsecond message"], "cancel must not auto-submit")
 
 
@@ -475,32 +536,32 @@ class FailedTurnQueueTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             with patch("paimon.agent.build_model", return_value=self._failing_model()):
-                app._start_turn("go")
+                app.pane._start_turn("go")
                 for _ in range(200):
                     await pilot.pause()
-                    if app._turn is not None and not app._turn.is_running:
+                    if app.pane._turn is not None and not app.pane._turn.is_running:
                         break
-            self.assertTrue(app._turn_failed)
-            self.assertEqual(app._turn.state, WorkerState.SUCCESS,
+            self.assertTrue(app.pane._turn_failed)
+            self.assertEqual(app.pane._turn.state, WorkerState.SUCCESS,
                              "the error is shown in the log, so the worker itself succeeds")
 
     async def test_queue_returns_to_the_input_after_an_error(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptInput)
-            app._turn = SimpleNamespace(is_running=True)
-            app.handle_submit(PromptInput.Submitted("queued while it ran"))
+            app.pane._turn = SimpleNamespace(is_running=True)
+            app.pane.handle_submit(PromptInput.Submitted("queued while it ran"))
             await pilot.pause()
 
             started: list[str] = []
-            app._start_turn = started.append
-            app._turn_failed = True
-            app.on_worker_state_changed(SimpleNamespace(worker=app._turn, state=WorkerState.SUCCESS))
+            app.pane._start_turn = started.append
+            app.pane._turn_failed = True
+            app.pane.on_worker_state_changed(SimpleNamespace(worker=app.pane._turn, state=WorkerState.SUCCESS))
             await pilot.pause()
 
             self.assertFalse(started, "a failed turn must not fire the queue at the model")
             self.assertEqual(prompt.text, "queued while it ran")
-            self.assertFalse(app._queue)
+            self.assertFalse(app.pane._queue)
 
 
 class AgentCwdTest(AppTestCase):
@@ -512,13 +573,13 @@ class AgentCwdTest(AppTestCase):
             elsewhere = Path(directory).resolve()
             app = self.make_app()
             async with app.run_test():
-                app.agent.cwd = elsewhere
+                app.pane.agent.cwd = elsewhere
 
                 app.action_new_session()
-                self.assertEqual(app.agent.cwd, elsewhere)
+                self.assertEqual(app.pane.agent.cwd, elsewhere)
 
                 app.action_fork_session()
-                self.assertEqual(app.agent.cwd, elsewhere)
+                self.assertEqual(app.pane.agent.cwd, elsewhere)
 
 
 class HandoffTest(AppTestCase):
@@ -538,15 +599,15 @@ class HandoffTest(AppTestCase):
 
     async def test_approved_handoff_switches_to_a_new_session(self) -> None:
         app = self.make_app(mode="yolo")
-        old = app.agent.session
+        old = app.pane.agent.session
         with patch("paimon.agent.build_model",
                    return_value=stub_model("start_new_session", '{"prompt": "carry on"}')):
             async with app.run_test() as pilot:
-                app.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for(pilot, lambda: app.query("#confirm-panel"))
+                app.pane.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
                 await pilot.press("enter")
-                await self._wait_for(pilot, lambda: app.agent.session.id != old.id
-                                     and app._turn is not None and not app._turn.is_running)
+                await self._wait_for(pilot, lambda: app.pane.agent.session.id != old.id
+                                     and app.pane._turn is not None and not app.pane._turn.is_running)
 
                 log = self._log_text(app)
                 self.assertIn("Started new session", log)
@@ -554,61 +615,61 @@ class HandoffTest(AppTestCase):
                 self.assertIn(old.id[:8], log, "resume hint names the old session")
                 self.assertIn("carry on", log, "handoff prompt submitted as the first message")
                 self.assertTrue(old.path.exists())
-                self.assertIsNone(app._pending_handoff)
+                self.assertIsNone(app.pane._pending_handoff)
 
     async def test_denied_handoff_keeps_the_session(self) -> None:
         app = self.make_app(mode="yolo")
-        old_id = app.agent.session.id
+        old_id = app.pane.agent.session.id
         with patch("paimon.agent.build_model",
                    return_value=stub_model("start_new_session", '{"prompt": "carry on"}')):
             async with app.run_test() as pilot:
-                app.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for(pilot, lambda: app.query("#confirm-panel"))
+                app.pane.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
                 await pilot.press("escape")
-                await self._wait_for(pilot, lambda: app._turn is not None
-                                     and not app._turn.is_running)
+                await self._wait_for(pilot, lambda: app.pane._turn is not None
+                                     and not app.pane._turn.is_running)
 
-                self.assertEqual(app.agent.session.id, old_id)
-                self.assertIsNone(app._pending_handoff)
+                self.assertEqual(app.pane.agent.session.id, old_id)
+                self.assertIsNone(app.pane._pending_handoff)
                 self.assertTrue(app.query(AssistantMessage), "turn continued after the denial")
 
     async def test_queued_messages_return_to_input_on_handoff(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             worker = SimpleNamespace(is_running=True)
-            app._turn = worker
-            app.handle_submit(PromptInput.Submitted("for the old context"))
+            app.pane._turn = worker
+            app.pane.handle_submit(PromptInput.Submitted("for the old context"))
             worker.is_running = False
-            app._pending_handoff = "next phase"
+            app.pane._pending_handoff = "next phase"
             started: list[str] = []
-            app._start_turn = started.append
-            old_id = app.agent.session.id
+            app.pane._start_turn = started.append
+            old_id = app.pane.agent.session.id
 
-            app.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.SUCCESS))
+            app.pane.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.SUCCESS))
             await pilot.pause()
 
             self.assertEqual(started, ["next phase"])
-            self.assertNotEqual(app.agent.session.id, old_id)
+            self.assertNotEqual(app.pane.agent.session.id, old_id)
             self.assertEqual(app.query_one(PromptInput).text, "for the old context")
-            self.assertFalse(app._queue)
-            self.assertIsNone(app._pending_handoff)
+            self.assertFalse(app.pane._queue)
+            self.assertIsNone(app.pane._pending_handoff)
 
     async def test_failed_turn_clears_pending_handoff_without_switching(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             worker = SimpleNamespace(is_running=False)
-            app._turn = worker
-            app._pending_handoff = "next phase"
+            app.pane._turn = worker
+            app.pane._pending_handoff = "next phase"
             started: list[str] = []
-            app._start_turn = started.append
-            old_id = app.agent.session.id
+            app.pane._start_turn = started.append
+            old_id = app.pane.agent.session.id
 
-            app.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.ERROR))
+            app.pane.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.ERROR))
             await pilot.pause()
 
-            self.assertIsNone(app._pending_handoff)
+            self.assertIsNone(app.pane._pending_handoff)
             self.assertFalse(started)
-            self.assertEqual(app.agent.session.id, old_id)
+            self.assertEqual(app.pane.agent.session.id, old_id)
 
 
 class ProfileSwitchTest(AppTestCase):
@@ -629,7 +690,7 @@ class ProfileSwitchTest(AppTestCase):
             await pilot.pause()
             self.assertEqual(app.config.profile, "work")
             self.assertEqual(app.config.model, "test:work")
-            self.assertIs(app.agent.config, app.config)
+            self.assertIs(app.pane.agent.config, app.config)
             self.assertIn("profile work", str(app.query_one("#statusbar", Static).render()))
 
     async def test_unconfigured_profile_opens_login_and_cancel_reverts(self) -> None:
@@ -646,12 +707,12 @@ class ProfileSwitchTest(AppTestCase):
             await pilot.pause()
             self.assertEqual(app.config.profile, "default")
             self.assertEqual(app.config.model, "test-model")
-            self.assertIs(app.agent.config, app.config)
+            self.assertIs(app.pane.agent.config, app.config)
 
     async def test_noop_while_turn_is_running(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            app._turn = SimpleNamespace(is_running=True)
+            app.pane._turn = SimpleNamespace(is_running=True)
             app.action_switch_profile()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
@@ -661,7 +722,7 @@ class ProfileSwitchTest(AppTestCase):
         """Login rewrites the model every running turn re-reads at each step."""
         app = self.make_app()
         async with app.run_test() as pilot:
-            app._turn = SimpleNamespace(is_running=True)
+            app.pane._turn = SimpleNamespace(is_running=True)
             app.action_login()
             await pilot.pause()
             self.assertEqual(self._login_screens(app), [])

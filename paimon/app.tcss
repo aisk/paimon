@@ -1,7 +1,7 @@
 /* Styles for PaimonApp. Loaded via PaimonApp.CSS_PATH. */
 
 Screen { background: $background; }
-#workspace { height: 1fr; margin: 1 2; }
+SessionPane { height: 1fr; margin: 1 2 0 2; }
 
 * {
     scrollbar-size-vertical: 1;
@@ -52,18 +52,18 @@ Screen { background: $background; }
     background: transparent;
 }
 #prompt:focus { border: round $primary; background: transparent; }
-#statusbar { height: 1; padding: 0 1; color: $text-muted; }
+#statusbar { height: 1; margin: 0 2 1 2; padding: 0 1; color: $text-muted; }
 
 /* ---- permission confirmation ---- */
 
-#confirm-panel {
+.confirm-panel {
     height: auto;
     margin-top: 1;
     padding: 1 2;
     border: round $warning;
     background: transparent;
 }
-#confirm-panel:focus { border: round $warning; }
+.confirm-panel:focus { border: round $warning; }
 #confirm-detail { height: auto; max-height: 12; margin-top: 1; color: $text-muted; }
 #confirm-options { height: auto; margin-top: 1; }
 

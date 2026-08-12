@@ -11,6 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Markdown, Static, TextArea
 
 from .diff import render_diff
@@ -192,7 +193,9 @@ class ConfirmPanel(Vertical, can_focus=True):
     ]
 
     def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]") -> None:
-        super().__init__(id="confirm-panel")
+        # No ID: several panes can have a panel up at once, and a shared ID
+        # would make an app-wide query resolve to whichever one is first.
+        super().__init__(classes="confirm-panel")
         self.tool_name = tool_name
         self.args = args
         self._future = future
@@ -209,8 +212,9 @@ class ConfirmPanel(Vertical, can_focus=True):
         yield Static(id="confirm-options")
 
     def on_mount(self) -> None:
+        # Focusing is the caller's job: a panel in a background pane must not
+        # take the keyboard, and focusable() only looks at visibility.
         self._render_options()
-        self.focus()
 
     def _render_options(self) -> None:
         lines = []
@@ -251,8 +255,10 @@ class ConfirmPanel(Vertical, can_focus=True):
         return text if len(text) <= limit else text[:limit] + " …"
 
     def _diff_width(self) -> int:
-        # workspace margins + panel padding + border eat ~10 cells
-        return max(60, self.app.size.width - 10)
+        # pane margins + panel padding + border eat ~10 cells. Measured on the
+        # host pane, which is narrower than the terminal once tabs are docked.
+        host = self.parent if isinstance(self.parent, Widget) else self.app
+        return max(60, host.size.width - 10)
 
     def _detail(self) -> RenderableType:
         args = self.args
