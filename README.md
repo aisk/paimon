@@ -32,6 +32,8 @@ While it runs: `Shift+Tab` switches how much the agent may do on its own (**read
 
 Paimon can open panes itself: ask for two independent things and it starts a second agent in its own tab, with the same tools, working directory and permission mode. Its permission prompts appear in that tab, so `Ctrl+G` is how you unblock it. Those sessions belong to the one that started them, so they stay out of `paimon sessions` and end when it does.
 
+It can also leave a command running in a tab of its own, for a dev server, a watcher or a long build that would otherwise hold up a turn. It asks first, every time, whatever the mode says about read-only commands. The tab streams the output and stops the command when you close it or quit. Programs that buffer their output when it is not going to a terminal print in blocks there rather than line by line; that is what a pipe costs, and Paimon does not emulate a terminal.
+
 Write `@path/to/file` in a prompt to hand a file to the agent.
 
 ## Using Paimon as a subagent

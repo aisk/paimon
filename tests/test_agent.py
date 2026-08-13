@@ -610,7 +610,7 @@ class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
                 events = [event async for event in agent.run("do it")]
 
             end = next(event for event in events if isinstance(event, ToolEnd))
-            self.assertIn("only available in the interactive UI", end.result)
+            self.assertIn("only works in the interactive UI", end.result)
 
     async def test_a_narrowed_toolset_disables_them_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

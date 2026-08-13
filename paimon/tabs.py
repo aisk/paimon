@@ -194,7 +194,7 @@ class PaneTabs(Container):
         self._current = current
         self._redraw()
         if self._timer is not None:
-            if any(pane.is_turn_running for pane in panes):
+            if any(pane.is_running for pane in panes):
                 self._timer.resume()
             else:
                 self._timer.pause()
@@ -238,6 +238,6 @@ class PaneTabs(Container):
     def _marker(self, pane) -> str:
         if pane.needs_confirm:
             return _ATTENTION
-        if pane.is_turn_running:
+        if pane.is_running:
             return _SPINNER[self._frame % len(_SPINNER)]
         return _IDLE

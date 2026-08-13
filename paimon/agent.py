@@ -446,12 +446,7 @@ class Agent:
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
-        needs_confirm = tools.gate(call.tool_name, args, self.mode, self.cwd,
-                                   self.toolset, ctx=self.tool_context) == "confirm"
-        allowed = not needs_confirm or (
-            await self.confirm(call.tool_name, args) if self.confirm else False
-        )
-        if not allowed:
+        if not await self._permitted(call.tool_name, args):
             slot.content = "User denied this operation."
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
@@ -462,18 +457,38 @@ class Agent:
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
         yield SessionHandoff(prompt_text)
 
+    async def _permitted(self, name: str, args: dict) -> bool:
+        """Gate a tool the loop runs itself, the way run_tool gates the rest.
+
+        The enforcement point for everything in _AGENT_HANDLED: without a
+        confirm hook a call that needs one is denied, so a headless agent
+        cannot walk around the permission mode here either.
+        """
+        if tools.gate(name, args, self.mode, self.cwd, self.toolset,
+                      safe_commands=self.config.safe_commands,
+                      ctx=self.tool_context) != "confirm":
+            return True
+        return await self.confirm(name, args) if self.confirm else False
+
     async def _run_supervised(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
                               persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
-        """spawn_agent / send_to_agent / read_agent / wait_for_agent.
+        """The agent tools and the background-task tools.
 
-        They act on the pool of agents the UI is running, which no stateless
-        tool function can reach, and the supervisor is the one thing that knows
-        whether a given agent is busy — so they are dispatched from here.
+        They act on the pool of agents and commands the UI is running, which no
+        stateless tool function can reach, and the supervisor is the one thing
+        that knows whether a given agent is busy — so they are dispatched from
+        here. Most of them are not gated at all (they only reach other panes
+        this same agent owns); run_background is, because it starts a process.
         """
         yield ToolStart(call.tool_call_id, call.tool_name, args)
         if self.supervisor is None:
-            slot.content = ("Error: agents are only available in the interactive UI; "
-                            "do this work yourself.")
+            slot.content = ("Error: this only works in the interactive UI; "
+                            "do the work yourself instead.")
+        elif not await self._permitted(call.tool_name, args):
+            slot.content = "User denied this operation."
+            persist()
+            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
+            return
         else:
             slot.content = await self.supervisor.handle(call.tool_name, args, caller=self)
         persist()
@@ -486,6 +501,9 @@ class Agent:
         "send_to_agent": _run_supervised,
         "read_agent": _run_supervised,
         "wait_for_agent": _run_supervised,
+        "run_background": _run_supervised,
+        "read_task": _run_supervised,
+        "kill_task": _run_supervised,
     }
 
     async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[AgentEvent]:

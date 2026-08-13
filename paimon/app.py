@@ -2,7 +2,8 @@
 
 The app is a container for panes: it owns the config, the theme, the command
 palette, the global bindings and the status bar. Everything belonging to one
-conversation lives in ``SessionPane``.
+conversation lives in ``SessionPane``, and everything belonging to one
+background command in ``TaskPane``.
 """
 
 from textual import events, work
@@ -15,14 +16,16 @@ from . import compaction, tools
 from .agent import Agent
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .login import LoginScreen, PickerScreen, PromptScreen
-from .pane import SessionPane
+from .pane import Pane, SessionPane
 from .session import SessionError
 from .supervisor import Supervisor, SupervisorError
 from .tabs import DOCKS, PaneTabs
+from .taskpane import TaskPane
 
-# Every pane holds a live agent and its context, so panes cost model requests
-# and memory, not just a row in the strip. A soft cap keeps a runaway loop of
-# "one more session" from taking the app down with it.
+# Every pane holds a live agent and its context, or a live process, so panes
+# cost model requests, memory and file descriptors, not just a row in the
+# strip. A soft cap keeps a runaway loop of "one more session" from taking the
+# app down with it.
 MAX_PANES = 8
 
 
@@ -86,7 +89,8 @@ class PaimonApp(App):
         # Agents live in panes, so the supervisor borrows the app to open and
         # close them; everything else about them it owns itself.
         self._supervisor = Supervisor(launch=self._launch_agent, close=self._close_agent,
-                                      limit=MAX_PANES)
+                                      launch_task=self._launch_task,
+                                      close_task=self._close_agent, limit=MAX_PANES)
         pane = SessionPane(agent, resumed=resumed, id="pane-1", supervisor=self._supervisor)
         self._panes = [pane]
         self._current = pane
@@ -101,13 +105,32 @@ class PaimonApp(App):
     # ---- panes --------------------------------------------------------------
 
     @property
-    def pane(self) -> SessionPane:
-        """The pane on screen."""
+    def pane(self) -> Pane:
+        """The pane on screen. A conversation, or a background command."""
         return self._current
 
     @property
-    def panes(self) -> list[SessionPane]:
+    def panes(self) -> list[Pane]:
         return list(self._panes)
+
+    @property
+    def sessions(self) -> list[SessionPane]:
+        """The panes that hold a conversation. Not every pane does."""
+        return [pane for pane in self._panes if isinstance(pane, SessionPane)]
+
+    def _session(self) -> SessionPane | None:
+        """The conversation a global action applies to.
+
+        The current pane when it is one, and otherwise the first conversation
+        there is: the palette and the key bindings stay usable while a task's
+        output is on screen, rather than silently doing nothing. None only in
+        the moment between the last conversation closing and its replacement
+        being mounted.
+        """
+        if isinstance(self._current, SessionPane):
+            return self._current
+        sessions = self.sessions
+        return sessions[0] if sessions else None
 
     def _sync_panes(self) -> None:
         """Redraw everything that shows more than one pane at a time."""
@@ -120,13 +143,13 @@ class PaimonApp(App):
                 self._tabs.display and self._tabs.dock_side == "top", "-tabs-top")
         self.refresh_statusbar()
 
-    def _switch_to(self, pane: SessionPane) -> None:
+    def _switch_to(self, pane: Pane) -> None:
         self._current = pane
         self._switcher.current = pane.id
         self._sync_panes()
         pane._focus_input()
 
-    def on_session_pane_state_changed(self, event: SessionPane.StateChanged) -> None:
+    def on_pane_state_changed(self, event: Pane.StateChanged) -> None:
         """A pane started or finished something the strip or the bar shows."""
         event.stop()
         # Worker.StateChanged does not bubble, so this message is also the only
@@ -140,14 +163,17 @@ class PaimonApp(App):
         self._switch_to(event.pane)
 
     async def action_new_pane(self) -> None:
+        source = self._session()
+        if source is None:
+            return
         if len(self._panes) >= MAX_PANES:
-            self.pane._add(Content.from_markup(
+            self.pane.notice(Content.from_markup(
                 "[$text-warning]Already at $max panes[/]", max=str(MAX_PANES)))
             return
         try:
-            agent = Agent.open(cwd=self.pane.agent.cwd, mode=self.pane.mode, config=self.config)
+            agent = Agent.open(cwd=source.cwd, mode=source.mode, config=self.config)
         except SessionError as exc:
-            self.pane._add(Content.from_markup(
+            self.pane.notice(Content.from_markup(
                 "[$text-error b]Cannot open a pane:[/] $body", body=str(exc)))
             return
         pane = self._make_pane(agent)
@@ -167,12 +193,12 @@ class PaimonApp(App):
 
     async def action_close_pane(self) -> None:
         if len(self._panes) == 1:
-            self.pane._add(Content.from_markup(
+            self.pane.notice(Content.from_markup(
                 "[$text-muted]The last pane stays open — Ctrl+C quits[/]"))
             return
         await self._drop_pane(self._current)
 
-    async def _drop_pane(self, pane: SessionPane) -> None:
+    async def _drop_pane(self, pane: Pane) -> None:
         """Close a pane and take it off the screen. The one path out."""
         if pane not in self._panes:
             return
@@ -193,9 +219,9 @@ class PaimonApp(App):
         else:
             self._sync_panes()
 
-    async def _replace_last_pane(self, closed: SessionPane) -> None:
+    async def _replace_last_pane(self, closed: Pane) -> None:
         try:
-            agent = Agent.open(cwd=closed.agent.cwd, mode=closed.mode, config=self.config)
+            agent = Agent.open(cwd=closed.cwd, mode=closed.mode, config=self.config)
         except SessionError:
             self.exit()  # nothing left to show, and no session to show it in
             return
@@ -212,9 +238,13 @@ class PaimonApp(App):
         """
         if len(self._panes) >= MAX_PANES:
             raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
-        owner = next((pane for pane in self._panes if pane.agent is parent), self.pane)
+        # Only conversations have an agent, so a task's pane is never asked
+        # about one; the fallback is for an agent whose own pane has gone.
+        owner = next((pane for pane in self.sessions if pane.agent is parent), None)
+        if owner is None and (owner := self._session()) is None:
+            raise SupervisorError("there is no conversation to start an agent from")
         agent = Agent.open(
-            cwd=owner.agent.cwd, mode=owner.mode, config=self.config, model_override=model,
+            cwd=owner.cwd, mode=owner.mode, config=self.config, model_override=model,
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
             parent=owner.agent.session.id,
@@ -233,9 +263,32 @@ class PaimonApp(App):
         self._sync_panes()
         return pane
 
-    def _close_agent(self, pane: SessionPane) -> None:
-        """The supervisor killed an agent: take its pane down with it."""
-        pane.close()  # cancel the turn and release the session now
+    async def _launch_task(self, task_id: str, command, description: str) -> TaskPane:
+        """Open a background pane for a command a session asked to run.
+
+        Hidden and unfocused for the same reason a spawned agent's pane is: the
+        user asked for a command, not for their keyboard to move.
+        """
+        if len(self._panes) >= MAX_PANES:
+            raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
+        owner = self._session()
+        if owner is None:
+            raise SupervisorError("there is no conversation to attach a task to")
+        pane = TaskPane(task_id, command, description, cwd=owner.cwd, mode=owner.mode,
+                        id=f"pane-{self._next_pane}")
+        self._next_pane += 1
+        self._panes.append(pane)
+        try:
+            await self._switcher.add_content(pane)
+        except BaseException:
+            self._panes.remove(pane)
+            raise
+        self._sync_panes()
+        return pane
+
+    def _close_agent(self, pane: Pane) -> None:
+        """The supervisor killed an agent or a task: take its pane down too."""
+        pane.close()  # cancel the turn, release the session, stop the command
         self.call_later(self._drop_pane, pane)
 
     def _step_pane(self, step: int) -> None:
@@ -292,6 +345,17 @@ class PaimonApp(App):
         elif self._pick_session:
             self.action_resume_session()
 
+    def on_unmount(self) -> None:
+        """Hand back what outlives the process, on every way out.
+
+        A background command is in its own process group, so nothing kills it
+        for us: without this it is reparented to init and keeps running after
+        paimon is gone. Sessions are unlocked here for symmetry, and because
+        the app can be torn down and rebuilt inside one process.
+        """
+        for pane in self._panes:
+            pane.shutdown()
+
     def on_key(self, event: events.Key) -> None:
         """Keys that reached the app were claimed by no pane.
 
@@ -306,28 +370,37 @@ class PaimonApp(App):
     # The palette and the key bindings live on the app, but every one of these
     # acts on a single conversation, so they only route to the current pane.
 
+    # A task's pane has no session, no mode and no turn, so each of these is
+    # routed to a conversation rather than to whatever is on screen.
+
     def action_new_session(self) -> None:
-        self.pane.new_session()
+        if (pane := self._session()) is not None:
+            pane.new_session()
 
     def action_fork_session(self) -> None:
-        self.pane.fork_session()
+        if (pane := self._session()) is not None:
+            pane.fork_session()
 
     def action_resume_session(self) -> None:
-        self.pane.resume_session()
+        if (pane := self._session()) is not None:
+            pane.resume_session()
 
     def action_compact(self) -> None:
-        self.pane.compact()
+        if (pane := self._session()) is not None:
+            pane.compact()
 
     def action_cycle_mode(self) -> None:
-        self.pane.cycle_mode()
+        if (pane := self._session()) is not None:
+            pane.cycle_mode()
 
     def action_interrupt(self) -> None:
-        self.pane.interrupt()
+        if isinstance(self.pane, SessionPane):
+            self.pane.interrupt()
 
     def action_toggle_reasoning(self) -> None:
         self.config.save(show_reasoning=not self.config.show_reasoning)
         state = "streamed live" if self.config.show_reasoning else "folded"
-        self.pane._add(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
+        self.pane.notice(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
 
     # ---- login --------------------------------------------------------------
 
@@ -343,19 +416,19 @@ class PaimonApp(App):
 
     def action_login(self) -> None:
         if self._config_is_busy():
-            self.pane._add(Content.from_markup("[$text-muted]Busy — log in after this turn[/]"))
+            self.pane.notice(Content.from_markup("[$text-muted]Busy — log in after this turn[/]"))
             return
 
         def _done(completed: bool | None) -> None:
             if completed:
-                self.pane._add(
+                self.pane.notice(
                     Content.from_markup(
                         "[$text-success b]Logged in.[/]  [$text-muted]$model[/]",
                         model=self.config.model or "",
                     )
                 )
             elif not self.config.model:
-                self.pane._add(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
+                self.pane.notice(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
                 self.exit()
             self.refresh_statusbar()
             self.pane._focus_input()
@@ -369,13 +442,13 @@ class PaimonApp(App):
     def _apply_config(self, config: Config) -> None:
         """Config is process-wide, so every pane's agent moves with it."""
         self.config = config
-        for pane in self.panes:
+        for pane in self.sessions:
             pane.agent.config = config
 
     @work
     async def action_switch_profile(self) -> None:
         if self._config_is_busy():
-            self.pane._add(Content.from_markup("[$text-muted]Busy — switch profiles after this turn[/]"))
+            self.pane.notice(Content.from_markup("[$text-muted]Busy — switch profiles after this turn[/]"))
             return
         current = self.config.profile
         labels = {f"{name} (current)" if name == current else name: name
@@ -393,7 +466,7 @@ class PaimonApp(App):
         try:
             switched = Config.load(name)
         except ValueError as exc:
-            self.pane._add(Content.from_markup("[$text-error b]Cannot switch:[/] $body", body=str(exc)))
+            self.pane.notice(Content.from_markup("[$text-error b]Cannot switch:[/] $body", body=str(exc)))
             self.pane._focus_input()
             return
         previous_config = self.config
@@ -402,12 +475,12 @@ class PaimonApp(App):
             completed = await self.push_screen_wait(LoginScreen())
             if not completed:
                 self._apply_config(previous_config)
-                self.pane._add(Content.from_markup("[$text-muted]Profile switch cancelled[/]"))
+                self.pane.notice(Content.from_markup("[$text-muted]Profile switch cancelled[/]"))
                 self.pane._focus_input()
                 return
         if self.config.theme in self.available_themes:
             self.theme = self.config.theme
-        self.pane._add(Content.from_markup(
+        self.pane.notice(Content.from_markup(
             "[$text-success b]Profile:[/] $name  [$text-muted]$model[/]",
             name=name, model=self.config.model or ""))
         self.refresh_statusbar()
@@ -417,12 +490,28 @@ class PaimonApp(App):
 
     def refresh_statusbar(self, tokens: int | None = None) -> None:
         pane = self.pane
+        if isinstance(pane, SessionPane):
+            parts = self._session_status(pane, tokens)
+        else:
+            parts = [f"task {pane.task_id}", pane.status_text, pane.command.command]
+        # A pane blocked on a confirmation the user cannot see blocks whatever
+        # is waiting on it, so the count follows them to every other pane.
+        waiting = sum(1 for other in self._panes if other is not pane and other.needs_confirm)
+        # Assembled rather than marked up: model names and session ids are not
+        # markup and must not be parsed as any.
+        line = Content("  ·  ".join(parts))
+        if waiting:
+            line = line.append_text("  ·  ").append_text(
+                f"{waiting} awaiting confirmation (ctrl+g)", "$text-warning")
+        self.query_one("#statusbar", Static).update(line)
+
+    def _session_status(self, pane: SessionPane, tokens: int | None) -> list[str]:
         # The agent's model, not the config's: a pane may override it.
         parts = [f"{pane.mode} mode", pane.agent.model_name or "no model",
                  f"session {pane.agent.session.id[:8]}"]
         if self.config.profile != DEFAULT_PROFILE:
             parts.insert(1, f"profile {self.config.profile}")
-        # The last measurement stands until a new one arrives: the bar is now
+        # The last measurement stands until a new one arrives: the bar is
         # redrawn whenever any pane changes state, not only after a turn.
         if tokens is None:
             tokens = pane._tokens
@@ -440,20 +529,13 @@ class PaimonApp(App):
                              "(auto-compaction off: unknown context window)")
         if pane._tps is not None:
             parts.append(f"{pane._tps:.0f} tps")
-        # A pane blocked on a confirmation the user cannot see blocks whatever
-        # is waiting on it, so the count follows them to every other pane.
-        waiting = sum(1 for other in self._panes if other is not pane and other.needs_confirm)
-        # Assembled rather than marked up: model names and session ids are not
-        # markup and must not be parsed as any.
-        line = Content("  ·  ".join(parts))
-        if waiting:
-            line = line.append_text("  ·  ").append_text(
-                f"{waiting} awaiting confirmation (ctrl+g)", "$text-warning")
-        self.query_one("#statusbar", Static).update(line)
+        return parts
 
     @work(exclusive=True, group="statusbar")
     async def update_statusbar_tokens(self) -> None:
         pane = self.pane
+        if not isinstance(pane, SessionPane):
+            return
         tokens = await pane.agent.count_context_tokens()
         # The pane may have been swapped out while the count ran on a thread.
         if pane is self.pane:

@@ -170,7 +170,7 @@ def main() -> None:
         # conversation back matters most. Skipped under --tui, where the
         # streams belong to textual-serve rather than to a user.
         if not args.tui:
-            for pane in app.panes:
+            for pane in app.sessions:
                 if pane.agent.history:
                     print(f"resume: {resume_hint(pane.agent.session.id)}", file=sys.stderr)
 

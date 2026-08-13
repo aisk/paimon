@@ -7,16 +7,53 @@ not a debugging strategy.
 
 import asyncio
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 
-from paimon.supervisor import AgentState, Supervisor, SupervisorError
+from paimon.supervisor import AgentState, Supervisor, SupervisorError, TaskState
+from paimon.tools import _TaskOutput
+
+
+class FakeCaller:
+    """Stands in for the Agent that starts things.
+
+    The pool only ever reads its identity — cursors and ownership are keyed on
+    it — and, for a background command, where it works.
+    """
+
+    def __init__(self, cwd: Path = Path(".")) -> None:
+        self.cwd = cwd
 
 
 class FakeAgent:
     def __init__(self) -> None:
         self.history: list = []
         self.supervisor = None
+        self.cwd = Path(".")
+
+
+class FakeCommand:
+    """A tools.BackgroundCommand, minus the process."""
+
+    def __init__(self, command: str = "sleep 30") -> None:
+        self.command = command
+        self.output = _TaskOutput()
+        self.exit_code = None
+        self.killed = False
+
+    @property
+    def running(self) -> bool:
+        return self.exit_code is None
+
+    def kill(self) -> None:
+        self.killed = True
+        self.exit_code = -15
+
+    def exit(self, code: int = 0) -> None:
+        self.exit_code = code
 
 
 class FakeRunner:
@@ -48,8 +85,9 @@ class FakeRunner:
 class SupervisorTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.runners: list[FakeRunner] = []
-        self.closed: list[FakeRunner] = []
-        self.parent = object()
+        self.task_runners: list = []
+        self.closed: list = []
+        self.parent = FakeCaller()
 
     def make(self, limit: int = 4, launch=None) -> Supervisor:
         async def default_launch(agent_id, parent, model):
@@ -59,8 +97,25 @@ class SupervisorTestCase(unittest.IsolatedAsyncioTestCase):
             self.runners.append(runner)
             return runner
 
+        async def launch_task(task_id, command, description):
+            runner = SimpleNamespace(task_id=task_id, command=command,
+                                     description=description)
+            self.task_runners.append(runner)
+            return runner
+
         return Supervisor(launch=launch or default_launch,
-                          close=self.closed.append, limit=limit)
+                          close=self.closed.append, limit=limit,
+                          launch_task=launch_task, close_task=self.closed.append)
+
+    async def start_task(self, supervisor, command: str = "npm run dev",
+                         description: str = "dev server", parent=None) -> tuple:
+        """A task backed by a fake command, so no process is ever started."""
+        running = FakeCommand(command)
+        with patch("paimon.supervisor.start_background",
+                   new=AsyncMock(return_value=running)):
+            task_id = await supervisor.start_task(
+                command, description, parent=parent or self.parent, cwd=Path("."))
+        return task_id, running
 
 
 class SpawnTest(SupervisorTestCase):
@@ -295,6 +350,107 @@ class StatusSummaryTest(SupervisorTestCase):
         await supervisor.spawn("go", parent=object())
         self.runners[0].finish()
         self.assertIsNone(supervisor.status_summary(self.parent))
+
+
+class BackgroundTaskTest(SupervisorTestCase):
+    """Background commands: started, read incrementally, stopped."""
+
+    async def test_a_task_opens_a_pane_and_is_read_from_the_start(self) -> None:
+        supervisor = self.make()
+        task_id, running = await self.start_task(supervisor)
+        running.output.append(b"listening on 3000\n")
+
+        self.assertEqual(supervisor.task_states(), {task_id: TaskState.RUNNING})
+        self.assertEqual(self.task_runners[0].task_id, task_id)
+        view = supervisor.read_task(task_id, caller=self.parent)
+        self.assertIn("listening on 3000", view.text)
+        self.assertEqual(supervisor.read_task(task_id, caller=self.parent).text, "",
+                         "a second read only gets what is new")
+
+    async def test_reading_all_starts_over(self) -> None:
+        supervisor = self.make()
+        task_id, running = await self.start_task(supervisor)
+        running.output.append(b"first\n")
+        supervisor.read_task(task_id, caller=self.parent)
+        running.output.append(b"second\n")
+
+        view = supervisor.read_task(task_id, caller=self.parent, mode="all")
+        self.assertIn("first", view.text)
+        self.assertIn("second", view.text)
+
+    async def test_an_exit_code_is_reported_and_the_output_survives(self) -> None:
+        supervisor = self.make()
+        task_id, running = await self.start_task(supervisor)
+        running.output.append(b"boom\n")
+        running.exit(2)
+
+        answer = await supervisor.handle("read_task", {"task_id": task_id}, caller=self.parent)
+        self.assertIn("exited, code 2", answer)
+        self.assertIn("boom", answer)
+
+    async def test_another_caller_gets_nothing(self) -> None:
+        supervisor = self.make()
+        task_id, _ = await self.start_task(supervisor)
+
+        view = supervisor.read_task(task_id, caller=object())
+        self.assertIs(view.state, TaskState.UNKNOWN)
+        self.assertFalse(supervisor.kill_task(task_id, caller=object()))
+
+    async def test_killing_stops_the_command_and_closes_its_pane(self) -> None:
+        supervisor = self.make()
+        task_id, running = await self.start_task(supervisor)
+        running.output.append(b"partial\n")
+
+        answer = await supervisor.handle("kill_task", {"task_id": task_id}, caller=self.parent)
+        self.assertIn("Stopped", answer)
+        self.assertTrue(running.killed)
+        self.assertEqual(self.closed, [self.task_runners[0]])
+        view = supervisor.read_task(task_id, caller=self.parent, mode="all")
+        self.assertIs(view.state, TaskState.KILLED)
+        self.assertIn("partial", view.text, "what it printed is still readable")
+
+    async def test_a_closed_pane_stops_the_command(self) -> None:
+        supervisor = self.make()
+        task_id, running = await self.start_task(supervisor)
+
+        supervisor.released(self.task_runners[0])
+        self.assertTrue(running.killed)
+        self.assertEqual(self.closed, [], "the pane closed itself; it is not closed again")
+
+    async def test_changing_the_session_stops_agents_and_tasks_alike(self) -> None:
+        supervisor = self.make()
+        agent_id = await supervisor.spawn("look at the parser", parent=self.parent)
+        task_id, running = await self.start_task(supervisor)
+
+        killed = supervisor.kill_children(self.parent)
+        self.assertEqual(sorted(killed), sorted([agent_id, task_id]))
+        self.assertTrue(running.killed)
+        self.assertEqual(supervisor.task_states(), {})
+
+    async def test_tasks_and_agents_share_the_pane_budget(self) -> None:
+        supervisor = self.make(limit=2)
+        await supervisor.spawn("one", parent=self.parent)
+        await self.start_task(supervisor)
+
+        with self.assertRaises(SupervisorError):
+            await self.start_task(supervisor)
+        result = await supervisor.handle(
+            "run_background", {"command": "sleep 1", "description": "x"}, caller=self.parent)
+        self.assertIn("limit 2", result, "the model is told why, not raised at")
+
+    async def test_a_stale_id_is_an_error_not_an_exception(self) -> None:
+        supervisor = self.make()
+        answer = await supervisor.handle("read_task", {"task_id": "beef"}, caller=self.parent)
+        self.assertIn("no background task beef", answer)
+
+    async def test_what_became_of_a_task_opens_the_next_turn(self) -> None:
+        supervisor = self.make()
+        task_id, running = await self.start_task(supervisor)
+        self.assertIsNone(supervisor.status_summary(self.parent), "still running is not news")
+
+        running.exit(1)
+        self.assertEqual(supervisor.status_summary(self.parent), f"{task_id} exited (code 1)")
+        self.assertIsNone(supervisor.status_summary(self.parent), "said once, not every turn")
 
 
 if __name__ == "__main__":

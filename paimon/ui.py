@@ -264,6 +264,14 @@ class ConfirmPanel(Vertical, can_focus=True):
         args = self.args
         if self.tool_name == "shell":
             return Content(self._clip(str(args.get("command") or "")))
+        if self.tool_name == "run_background":
+            # What makes this one different from shell is that saying yes
+            # leaves something running, so the panel leads with that.
+            return Content.from_markup(
+                "[$text-muted]Runs in its own tab until it exits or you close it:[/]\n\n"
+                "$command\n\n[$text-muted]$description[/]",
+                command=self._clip(str(args.get("command") or "")),
+                description=self._clip(str(args.get("description") or ""), 200))
         if self.tool_name == "write_file":
             path = str(args.get("path") or "")
             content = self._clip(str(args.get("content") or ""))

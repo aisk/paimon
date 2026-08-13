@@ -12,6 +12,7 @@ from paimon.tools import (
     MAX_OUTPUT,
     MODES,
     ToolContext,
+    _TaskOutput,
     _glob,
     _inside,
     _shell,
@@ -19,6 +20,8 @@ from paimon.tools import (
     run_tool,
     safe_command,
     shell_output_dir,
+    start_background,
+    tail_text,
 )
 
 
@@ -482,6 +485,120 @@ class GlobSandboxTest(unittest.TestCase):
             free = _glob({"pattern": "*.py"}, cwd, sandboxed=False)
             self.assertIn("a.py", free)
             self.assertIn("b.py", free)
+
+
+class BackgroundCommandTest(unittest.IsolatedAsyncioTestCase):
+    """A command that outlives the turn: it streams, it ends, it can be stopped."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    async def _start(self, command: str):
+        running = await start_background(command, self.cwd)
+        self.addCleanup(running.terminate_now)
+        return running
+
+    async def _wait(self, predicate, message: str) -> None:
+        for _ in range(200):
+            if predicate():
+                return
+            await asyncio.sleep(0.05)
+        self.fail(message)
+
+    async def test_output_arrives_before_the_command_ends(self) -> None:
+        running = await self._start("printf 'first\\n'; sleep 30")
+        await self._wait(lambda: running.output.total_bytes, "nothing was read from the pipe")
+
+        data, cursor, dropped = running.output.since(0)
+        self.assertEqual(data, b"first\n")
+        self.assertEqual((cursor, dropped), (6, 0))
+        self.assertTrue(running.running, "the command has not exited")
+        self.assertEqual(running.output.since(cursor)[0], b"",
+                         "a second read sees only what is new")
+
+    async def test_it_ends_with_an_exit_code(self) -> None:
+        running = await self._start("printf 'done\\n'; exit 3")
+        await self._wait(lambda: not running.running, "the command never finished")
+
+        self.assertEqual(running.exit_code, 3)
+        self.assertFalse(running.killed)
+        self.assertEqual(running.output.since(0)[0], b"done\n")
+
+    async def test_kill_stops_the_whole_group(self) -> None:
+        running = await self._start("sleep 30 & echo pid $!; trap '' TERM; sleep 30")
+        await self._wait(lambda: running.output.total_bytes, "no pid was printed")
+        pid = int(re.search(rb"pid (\d+)", running.output.since(0)[0]).group(1))
+        self.addCleanup(self._reap, pid)
+
+        with patch("paimon.tools._KILL_GRACE", 0.05), patch("paimon.tools._KILL_TIMEOUT", 0.5):
+            running.kill()
+            await self._wait(lambda: not running.running, "the command survived being killed")
+            await self._wait(lambda: self._gone(pid),
+                             f"backgrounded descendant {pid} outlived the kill")
+        self.assertTrue(running.killed)
+
+    @staticmethod
+    def _reap(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    @staticmethod
+    def _reap(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    @staticmethod
+    def _gone(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        return False
+
+    async def test_a_reader_that_fell_behind_is_told_what_it_missed(self) -> None:
+        output = _TaskOutput(limit=16)
+        output.append(b"0123456789")
+        output.append(b"abcdefghij")
+
+        data, cursor, dropped = output.since(0)
+        self.assertEqual(dropped, 4, "the oldest bytes are gone, not silently skipped")
+        self.assertEqual(data, b"456789abcdefghij")
+        self.assertEqual(cursor, 20)
+
+    async def test_the_model_only_ever_gets_the_tail(self) -> None:
+        text = tail_text(b"x" * 100 + b"end", limit=10)
+        self.assertTrue(text.endswith("xxxxxxxend"))
+        self.assertIn("dropped", text.splitlines()[0])
+
+
+class BackgroundGateTest(unittest.TestCase):
+    """run_background is confirmed even when the command itself looks harmless."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    def test_a_safe_looking_command_still_confirms(self) -> None:
+        args = {"command": "ls -la", "description": "listing"}
+        self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
+        self.assertEqual(gate("run_background", args, "read", self.cwd), "confirm",
+                         "nothing that keeps running is waved through")
+        self.assertEqual(gate("run_background", args, "edit", self.cwd), "confirm")
+
+    def test_yolo_still_means_yolo(self) -> None:
+        self.assertEqual(
+            gate("run_background", {"command": "npm run dev"}, "yolo", self.cwd), "allow")
+
+    def test_reading_and_stopping_a_task_are_not_gated(self) -> None:
+        for name in ("read_task", "kill_task"):
+            self.assertEqual(gate(name, {"task_id": "a1f2"}, "read", self.cwd), "allow")
 
 
 if __name__ == "__main__":

@@ -193,21 +193,69 @@ class _EventRenderer:
         self._reasoning_buf = ""
 
 
-class SessionPane(Vertical):
-    """A single conversation. A container, deliberately not a Screen: screens
-    are mutually exclusive and ``app.query_one`` only sees the active one."""
+class Pane(Vertical):
+    """What the app and the tab strip may assume about any pane.
+
+    Two kinds share the strip: a conversation (``SessionPane``) and a
+    background command (``TaskPane``). Everything app-wide — switching,
+    closing, the tab label, the status bar — goes through this class, and only
+    the session-specific actions look at the concrete type.
+
+    A container, deliberately not a Screen: screens are mutually exclusive and
+    ``app.query_one`` only ever sees the active one.
+    """
 
     class StateChanged(Message):
-        """This pane started or finished a turn, or changed what it shows.
+        """This pane started or finished something the strip or the bar shows.
 
-        Worker.StateChanged does not bubble and the turn worker now lives on
-        the pane, so anything app-wide that tracks panes — the tab strip, the
-        status bar — only hears about them through this.
+        Worker.StateChanged does not bubble and the turn worker lives on the
+        pane, so anything app-wide that tracks panes only hears about them
+        through this.
         """
 
-        def __init__(self, pane: "SessionPane") -> None:
+        def __init__(self, pane: "Pane") -> None:
             self.pane = pane
             super().__init__()
+
+    # The defaults are the quiet ones, so a kind of pane only has to state
+    # what is true of it. Subclasses carry two attributes besides: ``cwd`` and
+    # ``mode``, which is what a pane opened in place of this one inherits.
+    needs_confirm = False
+    is_busy = False
+    is_running = False
+
+    @property
+    def is_current(self) -> bool:
+        """Whether this is the pane the user is looking at."""
+        return self.app.pane is self
+
+    @property
+    def tab_title(self) -> str:
+        """Short label for the tab strip."""
+        raise NotImplementedError
+
+    def _notify_state(self) -> None:
+        self.post_message(self.StateChanged(self))
+
+    def notice(self, renderable) -> None:
+        """Show a line of app news in this pane's log."""
+        raise NotImplementedError
+
+    def _focus_input(self) -> None:
+        """Focus whatever this pane is waiting on, if it is the one on screen."""
+
+    def close(self) -> None:
+        """Give up everything this pane owns; the app removes the widget."""
+
+    def shutdown(self) -> None:
+        """The app is exiting. Release what the OS would not release for us."""
+
+    def on_key(self, event: events.Key) -> None:
+        """Panes that take typing claim keys here; the rest let them pass."""
+
+
+class SessionPane(Pane):
+    """A single conversation: an agent, its rendered log and its prompt."""
 
     def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None,
                  supervisor=None, agent_id: str | None = None) -> None:
@@ -250,12 +298,12 @@ class SessionPane(Vertical):
         return self.agent.config
 
     @property
-    def is_current(self) -> bool:
-        """Whether this is the pane the user is looking at."""
-        return self.app.pane is self
+    def cwd(self):
+        """Where this conversation works. Panes opened from it inherit it."""
+        return self.agent.cwd
 
     @property
-    def is_turn_running(self) -> bool:
+    def is_running(self) -> bool:
         """Whether a turn is streaming right now. For display only."""
         return self._turn is not None and self._turn.is_running
 
@@ -291,8 +339,8 @@ class SessionPane(Vertical):
         title = title or "new session"
         return f"{self.agent_id} {title}" if self.agent_id else title
 
-    def _notify_state(self) -> None:
-        self.post_message(self.StateChanged(self))
+    def notice(self, renderable) -> None:
+        self._add(renderable)
 
     def close(self) -> None:
         """Give up everything this pane owns; the app removes the widget.
@@ -306,6 +354,18 @@ class SessionPane(Vertical):
         self._pane_closing = True
         self.interrupt()
         self._retire_agent()
+
+    def shutdown(self) -> None:
+        """Release the session on the way out.
+
+        The lock would go with the process anyway, but only after every pane's
+        turn has been cancelled by the shutdown; doing it here keeps "a pane
+        holds its session for exactly as long as it is open" true even when the
+        app is torn down and rebuilt inside one process.
+        """
+        if not self._pane_closing:
+            self._pane_closing = True
+            self.agent.session.unlock()
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")

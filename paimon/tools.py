@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import shlex
+import shutil
 import signal
 import time
 from dataclasses import dataclass, field
@@ -60,8 +61,8 @@ class Tool:
     the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
     "write" is auto-approved inside cwd in edit mode, "execute" needs
     confirmation outside yolo except for commands safe_command() recognizes as
-    read-only, "none" is never gated, "always" needs confirmation even in yolo
-    mode.
+    read-only, "background" is "execute" with no such exception, "none" is
+    never gated, "always" needs confirmation even in yolo mode.
     """
 
     schema: dict
@@ -423,6 +424,13 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
         if safe_commands and safe_command(str(args.get("command") or ""), cwd):
             return "allow"
         return "confirm"
+    if tool.access == "background":
+        # No safe_command exception here. That list is about what a command
+        # reads and writes, and a process that never ends on its own is not
+        # harmless just because it only reads: "tail -f" is on the deny side of
+        # it precisely because it runs until the timeout — and a background
+        # command has no timeout to run into.
+        return "confirm"
     # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
     resolved = _resolve(str(args.get("path") or ""), cwd)
     inside = _inside(resolved, cwd)
@@ -757,6 +765,34 @@ def _stop_reading(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
+async def _drain(reader: asyncio.Task, tail) -> None:
+    """Take what the pipe still holds now that the command itself has exited.
+
+    Re-armed while bytes keep arriving, so a descendant in the middle of
+    writing is not cut off mid-sentence, and never for long.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _DRAIN_TOTAL
+    while not reader.done():
+        seen = tail.total_bytes
+        try:
+            await asyncio.wait_for(asyncio.shield(reader), timeout=_DRAIN_GRACE)
+        except asyncio.TimeoutError:
+            if tail.total_bytes == seen or loop.time() >= deadline:
+                return
+
+
+async def _stop_reader(reader: asyncio.Task, proc: asyncio.subprocess.Process) -> None:
+    """End the pump task, closing the pipe if a descendant still holds it open."""
+    if not reader.done():
+        reader.cancel()
+        _stop_reading(proc)
+    try:
+        await reader
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup only
+        pass
+
+
 async def _collect(proc: asyncio.subprocess.Process, tail: _OutputTail) -> None:
     """Read output until the command exits, then drain what is still in flight.
 
@@ -768,26 +804,9 @@ async def _collect(proc: asyncio.subprocess.Process, tail: _OutputTail) -> None:
     reader = asyncio.create_task(_pump(proc.stdout, tail))
     try:
         await asyncio.wait_for(proc.wait(), timeout=_COMMAND_TIMEOUT)
-        # The command is gone. Give the pipe a moment to hand over what it
-        # still holds, re-armed while bytes keep arriving so a descendant in
-        # the middle of writing is not cut off mid-sentence.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _DRAIN_TOTAL
-        while not reader.done():
-            seen = tail.total_bytes
-            try:
-                await asyncio.wait_for(asyncio.shield(reader), timeout=_DRAIN_GRACE)
-            except asyncio.TimeoutError:
-                if tail.total_bytes == seen or loop.time() >= deadline:
-                    break
+        await _drain(reader, tail)
     finally:
-        if not reader.done():
-            reader.cancel()
-            _stop_reading(proc)
-        try:
-            await reader
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup only
-            pass
+        await _stop_reader(reader, proc)
 
 
 async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> str:
@@ -829,6 +848,153 @@ async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> st
     # The status follows the output instead of replacing it: a timeout or a
     # non-zero exit is exactly when what the command managed to print matters.
     return f"{out}\n{status}" if out.strip() else status
+
+
+# ---- background commands ---------------------------------------------------
+#
+# A command that outlives the turn that started it: no timeout, no result, just
+# a buffer its own tab renders and its agent reads. Deliberately not a PTY —
+# there is no keyboard and no terminal emulation, which is also why output can
+# arrive in blocks (see _line_buffered).
+
+# What a background command keeps in memory. Larger than the shell tool's
+# budget because this is a live view the user scrolls, while only the tail of
+# it is ever handed to the model.
+_TASK_BUFFER_BYTES = 256 * 1024
+
+
+class _TaskOutput:
+    """A background command's output, read incrementally by several readers.
+
+    Bounded: the oldest bytes go once the buffer is full. Cursors are global
+    byte offsets rather than buffer indexes, so a reader that fell behind the
+    trimming is told how much it missed instead of being handed the wrong
+    bytes.
+    """
+
+    def __init__(self, limit: int = _TASK_BUFFER_BYTES) -> None:
+        self._buffer = bytearray()
+        self._limit = limit
+        self.total_bytes = 0
+
+    @property
+    def start(self) -> int:
+        """Offset of the oldest byte still retained."""
+        return self.total_bytes - len(self._buffer)
+
+    def append(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        self.total_bytes += len(chunk)
+        self._buffer += chunk
+        if len(self._buffer) > self._limit:
+            del self._buffer[: len(self._buffer) - self._limit]
+
+    def since(self, offset: int) -> tuple[bytes, int, int]:
+        """Output after ``offset``, as (bytes, new cursor, bytes dropped).
+
+        Bytes, not text: a chunk boundary falls wherever the pipe said it did,
+        and decoding one that splits a character would put a replacement mark
+        in the middle of the output every time. Callers hold the fragment back
+        instead.
+        """
+        offset = max(0, min(offset, self.total_bytes))
+        dropped = max(0, self.start - offset)
+        return bytes(self._buffer[offset + dropped - self.start:]), self.total_bytes, dropped
+
+
+def _line_buffered(command: str) -> str:
+    """``command`` wrapped so its libc stdio flushes per line, where it can be.
+
+    A background command's stdout is a pipe, so libc buffers it in blocks and a
+    tab can sit empty for minutes under a chatty build before everything
+    arrives at once. stdbuf works through LD_PRELOAD, which descendants
+    inherit; it does nothing for Go or Rust programs, or on musl. This is a
+    mitigation, not a fix — output arriving late is what a pipe instead of a
+    terminal costs.
+    """
+    if not shutil.which("stdbuf"):
+        return command
+    return f"stdbuf -oL -eL sh -c {shlex.quote(command)}"
+
+
+class BackgroundCommand:
+    """One command running past the end of the turn that started it."""
+
+    def __init__(self, command: str, proc: asyncio.subprocess.Process, pgid: int) -> None:
+        self.command = command
+        self.output = _TaskOutput()
+        self.exit_code: Optional[int] = None
+        self.killed = False
+        self._proc = proc
+        self._pgid = pgid
+        self._reading = asyncio.ensure_future(self._read())
+
+    @property
+    def running(self) -> bool:
+        return self.exit_code is None
+
+    async def _read(self) -> None:
+        reader = asyncio.create_task(_pump(self._proc.stdout, self.output))
+        try:
+            await self._proc.wait()
+            await _drain(reader, self.output)
+        finally:
+            await _stop_reader(reader, self._proc)
+            self.exit_code = self._proc.returncode
+
+    def kill(self) -> None:
+        """Stop the whole process group. Returns at once; reaping runs on.
+
+        Callers are all in places that cannot wait — a pane closing, a session
+        being swapped out — and the escalation from SIGTERM to SIGKILL takes
+        seconds of waiting the UI does not have.
+        """
+        if self.killed or not self.running:
+            return
+        self.killed = True
+        asyncio.ensure_future(_kill_tree(self._proc, self._pgid))
+
+    def terminate_now(self) -> None:
+        """Signal the group without awaiting anything, on the way out.
+
+        The app is exiting: nothing here will be reaped, and a group left
+        unsignalled is reparented to init and keeps running. SIGKILL follows
+        SIGTERM immediately rather than after a grace period, because there is
+        no loop left to come back and finish the job.
+        """
+        self.killed = True
+        if self._proc.returncode is None:
+            _signal_group(self._pgid, signal.SIGTERM, self._proc)
+            _signal_group(self._pgid, signal.SIGKILL, self._proc)
+
+
+async def start_background(command: str, cwd: Path) -> BackgroundCommand:
+    """Start ``command`` detached from the turn, in its own process group."""
+    proc = await asyncio.create_subprocess_shell(
+        _line_buffered(command),
+        cwd=str(cwd),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+        # Python is the one interpreter that can be told to stop block
+        # buffering from the outside, and the one this agent starts most.
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    return BackgroundCommand(command, proc, proc.pid)
+
+
+def tail_text(data: bytes, dropped: int = 0, limit: int = _SHELL_MAX_BYTES) -> str:
+    """Output for the model: the end of it, with a note about what was cut."""
+    trimmed = len(data) - limit
+    if trimmed > 0:
+        data = data[-limit:]
+        dropped += trimmed
+    text = data.decode("utf-8", errors="replace")
+    if dropped > 0:
+        text = f"[{_format_size(dropped)} of earlier output dropped]\n{text}"
+    return text
 
 
 async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
@@ -1151,16 +1317,110 @@ REGISTRY: dict[str, Tool] = {
             },
         },
     ),
+    # Background tasks, handled by the agent loop for the same reason: the pool
+    # of running commands and the tab each one streams into belong to the UI.
+    #
+    # run_background is written as "background" rather than "execute" so the
+    # safe_command allowance can never apply to it, and never left to default
+    # to "none", which would hand the model an unconfirmed, untimed, turn-
+    # outliving way to run any command at all. read_task and kill_task only
+    # touch tasks this same agent started, so they are not gated.
+    "run_background": Tool(
+        run=None,
+        access="background",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "run_background",
+                "description": (
+                    "Start a long-running command in its own tab and return a task id, "
+                    "instead of waiting for it like the shell tool does. Use it for things "
+                    "that are meant to keep running — a dev server, a file watcher, a long "
+                    "build or test suite — and use shell for anything that finishes on its "
+                    "own within a couple of minutes. The command gets no terminal and no "
+                    "input, so it must be non-interactive; output may arrive in blocks "
+                    "rather than line by line, because a pipe is not a terminal. Nothing "
+                    "reaches you on its own: call read_task for new output, and kill_task "
+                    "when you are done with it."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "description": {
+                            "type": "string",
+                            "description": "A few words naming the task; it labels the tab.",
+                        },
+                    },
+                    "required": ["command", "description"],
+                },
+            },
+        },
+    ),
+    "read_task": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "read_task",
+                "description": (
+                    "Read what a background task has printed since you last read it, "
+                    "together with whether it is still running and its exit code if it is "
+                    "not. Only the tail is returned when there is a lot of it."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string"},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["new", "all"],
+                            "description": "'new' (default) since your last read, or 'all'.",
+                        },
+                    },
+                    "required": ["task_id"],
+                },
+            },
+        },
+    ),
+    "kill_task": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "kill_task",
+                "description": (
+                    "Stop a background task and everything it started. Its output stays "
+                    "readable afterwards. Stop tasks you no longer need: they keep running "
+                    "and keep a tab open until the app exits."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"task_id": {"type": "string"}},
+                    "required": ["task_id"],
+                },
+            },
+        },
+    ),
 }
 
 # Tools that only mean anything with the UI supervising a pool of panes: the
 # agent loop refuses them without a supervisor, and headless leaves them out of
-# its toolset entirely rather than offering the model something that cannot work.
-SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "read_agent", "wait_for_agent")
+# its toolset entirely rather than offering the model something that cannot
+# work. A background task is in the list for a second reason: headless runs one
+# turn under asyncio.run, which cancels everything still alive on the way out,
+# so a task started there would be a process group nobody ever kills.
+SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "read_agent", "wait_for_agent",
+                    "run_background", "read_task", "kill_task")
 
-# What a spawned agent must not be given: spawning (depth stays 1) and the
-# handoff, which would swap the session out from under the id its parent holds.
-SUBAGENT_DENIED = ("spawn_agent", "start_new_session")
+# What a spawned agent must not be given: spawning (depth stays 1), the
+# handoff, which would swap the session out from under the id its parent holds,
+# and background tasks, which are the same depth-1 rule — only the conversation
+# the user is actually in gets to leave processes running behind it.
+SUBAGENT_DENIED = ("spawn_agent", "start_new_session",
+                   "run_background", "read_task", "kill_task")
 
 
 def without(registry: dict[str, Tool], names) -> dict[str, Tool]:

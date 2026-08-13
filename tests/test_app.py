@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 import unittest
 from datetime import datetime
@@ -18,7 +19,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import FunctionModel
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Static
+from textual.widgets import RichLog, Static
 from textual.worker import WorkerState
 
 from helpers import SILENT_EVENTS, agent_events, stub_model
@@ -30,6 +31,7 @@ from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
 from paimon.session import Session, is_agents_message
 from paimon.tabs import PaneTab
+from paimon.taskpane import TaskPane
 from paimon.ui import AssistantMessage, ConfirmPanel, PromptInput, ToolResult, UserMessage
 
 
@@ -1080,6 +1082,8 @@ class SpawnAgentTest(AppTestCase):
                 self.assertNotIn("spawn_agent", child.agent.toolset, "depth stays 1")
                 self.assertNotIn("start_new_session", child.agent.toolset,
                                  "a handoff would swap the session out from under its id")
+                self.assertNotIn("run_background", child.agent.toolset,
+                                 "only the conversation the user is in leaves processes behind")
                 self.assertIn("read_agent", child.agent.toolset)
 
     async def test_the_new_session_is_a_child_and_stays_out_of_the_listings(self) -> None:
@@ -1165,3 +1169,179 @@ class SpawnAgentTest(AppTestCase):
                 self.assertTrue(any(is_agents_message(message)
                                     for message in parent.agent.history),
                                 "the model only learns of it through the history")
+
+
+class BackgroundTaskTest(AppTestCase):
+    """run_background in the UI: a process with a tab and no keyboard."""
+
+    COMMAND = "printf 'pid %s\\n' $$; sleep 30"
+
+    def _model(self, command: str | None = None) -> FunctionModel:
+        return stub_model("run_background", json.dumps(
+            {"command": command or self.COMMAND, "description": "dev server"}))
+
+    @staticmethod
+    async def _wait_for(pilot, condition) -> None:
+        """Like SpawnAgentTest's, but it lets real time pass.
+
+        A task pane collects its output on an interval, so a condition that
+        depends on one has to be given the wall clock, not just message-loop
+        round trips.
+        """
+        for _ in range(200):
+            await pilot.pause()
+            if condition():
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError("condition not reached")
+
+    @staticmethod
+    def _pid(pane: TaskPane) -> int:
+        match = re.search(r"pid (\d+)", pane.command.output.since(0)[0].decode())
+        assert match, "the command never printed its pid"
+        return int(match.group(1))
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    async def _start(self, app: PaimonApp, pilot) -> TaskPane:
+        app.pane.handle_submit(PromptInput.Submitted("run the dev server"))
+        await self._wait_for(pilot, lambda: len(app.panes) == 2)
+        pane = app.panes[1]
+        await self._wait_for(pilot, lambda: pane.command.output.total_bytes > 0)
+        self.addCleanup(pane.command.terminate_now)
+        return pane
+
+    async def test_the_command_runs_in_a_background_tab(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                task = await self._start(app, pilot)
+
+                self.assertIsInstance(task, TaskPane)
+                self.assertIs(app.pane, parent, "starting a task does not switch panes")
+                self.assertFalse(task.display)
+                self.assertIs(app.focused, parent.query_one(PromptInput),
+                              "a pane the user did not open takes no keys")
+                self.assertIn(f"{task.task_id} dev server",
+                              MultiPaneTest._tab_text(app, task))
+                self.assertIn(task.task_id, MultiPaneTest._log_text(parent),
+                              "the parent is told the id it has to use")
+                self.assertTrue(task.is_running)
+
+    async def test_its_output_reaches_the_agent_and_the_tab_it_opens(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                task = await self._start(app, pilot)
+
+                answer = await app._supervisor.handle(
+                    "read_task", {"task_id": task.task_id}, caller=parent.agent)
+                self.assertIn("pid", answer)
+                self.assertIn("running", answer)
+                self.assertNotIn("pid", self._log_text(task),
+                                 "a hidden tab writes nothing; RichLog would defer it all")
+
+                app._switch_to(task)
+                await self._wait_for(pilot, lambda: "pid" in self._log_text(task))
+                self.assertIn(self.COMMAND.split(";")[0].strip(), self._log_text(task),
+                              "the tab opens with the command it is running")
+
+    @staticmethod
+    def _log_text(pane: TaskPane) -> str:
+        return "\n".join(strip.text for strip in pane.query_one("#log", RichLog).lines)
+
+    async def test_the_status_bar_follows_the_task(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                task = await self._start(app, pilot)
+                app._switch_to(task)
+                await pilot.pause()
+
+                bar = str(app.query_one("#statusbar", Static).render())
+                self.assertIn(f"task {task.task_id}", bar)
+                self.assertIn("running", bar)
+
+    async def test_closing_the_tab_stops_the_command(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                task = await self._start(app, pilot)
+                pid = self._pid(task)
+                app._switch_to(task)
+
+                await pilot.press("ctrl+w")
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
+                await self._wait_for(pilot, lambda: not self._alive(pid))
+                self.assertTrue(task.command.killed)
+
+    async def test_quitting_does_not_leave_the_process_group_behind(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                task = await self._start(app, pilot)
+                pid = self._pid(task)
+                self.assertTrue(self._alive(pid))
+
+            for _ in range(100):
+                if not self._alive(pid):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                self.fail(f"{pid} outlived the app that started it")
+
+    async def test_an_exit_ends_the_tab_without_closing_it(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model",
+                   return_value=self._model("printf 'built\\n'; exit 1")):
+            async with app.run_test() as pilot:
+                task = await self._start(app, pilot)
+                await self._wait_for(pilot, lambda: not task.is_running)
+
+                self.assertEqual(len(app.panes), 2, "the tab stays, so the output can be read")
+                self.assertEqual(task.status_text, "exited (code 1)")
+                app._switch_to(task)
+                await self._wait_for(pilot, lambda: "built" in self._log_text(task))
+                self.assertIn("exited (code 1)",
+                              str(app.query_one("#statusbar", Static).render()))
+
+    async def test_an_agent_can_still_be_started_alongside_a_task(self) -> None:
+        # Only a conversation has an agent, and finding the one that asked
+        # walks the pane list, task panes included.
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                await self._start(app, pilot)
+
+                answer = await app._supervisor.handle(
+                    "spawn_agent", {"prompt": "check the parser"}, caller=parent.agent)
+                await self._wait_for(pilot, lambda: len(app.panes) == 3)
+                self.assertIn("Started agent", answer)
+                self.assertEqual(app.panes[2].agent.cwd, parent.agent.cwd)
+
+    async def test_a_denied_confirmation_starts_nothing(self) -> None:
+        app = self.make_app(mode="read")
+        with patch("paimon.agent.build_model", return_value=self._model("ls -la")):
+            async with app.run_test() as pilot:
+                app.pane.handle_submit(PromptInput.Submitted("run it"))
+                await self._wait_for(pilot, lambda: bool(app.query(ConfirmPanel)))
+                self.assertIn("Runs in its own tab",
+                              str(app.query_one(ConfirmPanel).query_one("#confirm-detail")
+                                  .children[0].render()))
+
+                await pilot.press("escape")
+                await self._wait_for(pilot, lambda: not app.pane.is_busy)
+                self.assertEqual(len(app.panes), 1, "a safe-looking command is confirmed too")
+
+
+if __name__ == "__main__":
+    unittest.main()
