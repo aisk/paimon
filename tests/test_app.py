@@ -753,6 +753,13 @@ class MultiPaneTest(AppTestCase):
     def _log_text(pane: SessionPane) -> str:
         return " ".join(str(widget.render()) for widget in pane.query_one("#log").children)
 
+    @staticmethod
+    def _tab_text(app, pane: SessionPane) -> str:
+        """A tab's drawn text with its frame and padding taken back out."""
+        tab = app.query_one(f"#tab-{pane.id}", PaneTab)
+        lines = str(tab.render()).splitlines()
+        return " ".join(line.strip("╭╮╰╯├┤┴│─ ") for line in lines).strip()
+
     async def test_new_pane_opens_a_second_session_and_shows_the_strip(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
@@ -813,8 +820,8 @@ class MultiPaneTest(AppTestCase):
             app.panes[0]._title = "fix   the parser"
             app._sync_panes()
             await pilot.pause()
-            labels = [str(tab.render()) for tab in app.query(PaneTab)]
-            self.assertEqual(labels, ["· 1. fix the parser", "· 2. new session"])
+            labels = [self._tab_text(app, pane) for pane in app.panes]
+            self.assertEqual(labels, ["1 fix the parser", "2 new session"])
 
     async def test_closing_a_pane_unlocks_it_and_falls_back_to_a_neighbour(self) -> None:
         app = self.make_app()
@@ -895,7 +902,7 @@ class PaneAttentionTest(AppTestCase):
                           str(app.query_one("#statusbar", Static).render()))
             tab = app.query_one(f"#tab-{first.id}", PaneTab)
             self.assertTrue(tab.has_class("-attention"))
-            self.assertTrue(str(tab.render()).startswith("!"))
+            self.assertIn("!", str(tab.render()))
 
             await pilot.press("ctrl+g")
             await pilot.pause()
@@ -939,6 +946,71 @@ class TabDockTest(AppTestCase):
         app = self.make_app(config=Config(model="test-model", tab_dock="right"))
         async with app.run_test():
             self.assertTrue(app._tabs.has_class("-right"))
+
+    async def test_only_a_visible_top_strip_takes_the_panes_top_margin(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            self.assertFalse(app.screen.has_class("-tabs-top"),
+                             "one pane means no strip and no rule to sit under")
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertTrue(app.screen.has_class("-tabs-top"))
+
+            app.action_move_tabs()
+            await pilot.pause()
+            app.screen.dismiss("Left")
+            await pilot.pause()
+            self.assertFalse(app.screen.has_class("-tabs-top"),
+                             "a side strip leaves the margin alone")
+
+
+class TabDrawingTest(AppTestCase):
+    """The frames the tabs draw for themselves."""
+
+    async def _strip(self, app, pilot, panes: int = 2) -> list:
+        for _ in range(panes - 1):
+            await pilot.press("ctrl+t")
+        await pilot.pause()
+        return [str(app.query_one(f"#tab-{pane.id}", PaneTab).render()).splitlines()
+                for pane in app.panes]
+
+    async def test_the_current_tab_is_framed_and_meets_the_rule(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            first, second = await self._strip(app, pilot)
+            self.assertEqual(len(first), 3)
+            self.assertEqual(len(second), 3)
+            # The second pane is the current one.
+            self.assertTrue(second[0].startswith("╭") and second[0].endswith("╮"))
+            self.assertTrue(second[2].startswith("┴") and second[2].endswith("┴"))
+            self.assertEqual(first[2], "─" * len(first[2]),
+                             "an idle tab contributes plain rule")
+            self.assertEqual(len(first[2]), len(second[2]),
+                             "every top tab is the same width, so the rule lines up")
+
+    async def test_side_tabs_frame_only_the_current_pane(self) -> None:
+        app = self.make_app(config=Config(model="test-model", tab_dock="left"))
+        async with app.run_test() as pilot:
+            first, second = await self._strip(app, pilot)
+            self.assertEqual(len(first), 1, "an idle side tab is a single row")
+            self.assertEqual([len(row) for row in second], [28, 28, 28])
+            self.assertTrue(second[0].startswith("╭") and second[0].endswith("┤"))
+            self.assertTrue(second[2].startswith("╰") and second[2].endswith("┤"))
+            self.assertTrue(first[0].endswith("│"), "the separator runs past every tab")
+
+    async def test_the_fill_stays_last_so_the_rule_reaches_the_edge(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._strip(app, pilot, panes=3)
+            self.assertIs(app._tabs.children[-1], app._tabs._fill)
+
+    async def test_tabs_shrink_so_all_eight_fit(self) -> None:
+        app = self.make_app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            rows = await self._strip(app, pilot, panes=8)
+            widths = [len(row[1]) for row in rows]
+            self.assertEqual(len(set(widths)), 1, "all tabs share one width")
+            self.assertLessEqual(sum(widths), 76, "the whole strip fits the terminal")
 
 
 class PaneSessionLockTest(AppTestCase):
@@ -997,8 +1069,8 @@ class SpawnAgentTest(AppTestCase):
                 self.assertEqual(child.mode, parent.mode)
                 self.assertIn(child.agent_id, MultiPaneTest._log_text(parent),
                               "the parent is told the id it has to use")
-                self.assertTrue(app.query_one(f"#tab-{child.id}", PaneTab)
-                                .render().plain.endswith(f"{child.agent_id} check the parser"))
+                self.assertIn(f"{child.agent_id} check the parser",
+                              MultiPaneTest._tab_text(app, child))
 
     async def test_the_new_agent_cannot_spawn_or_hand_off(self) -> None:
         app = self.make_app(mode="yolo")

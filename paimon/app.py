@@ -112,6 +112,12 @@ class PaimonApp(App):
     def _sync_panes(self) -> None:
         """Redraw everything that shows more than one pane at a time."""
         self._tabs.sync(self._panes, self._current)
+        # A visible top strip ends in a rule, which is all the separation the
+        # conversation needs; the pane drops its own top margin so the tabs
+        # cost two rows rather than four.
+        if self.is_mounted:
+            self.screen.set_class(
+                self._tabs.display and self._tabs.dock_side == "top", "-tabs-top")
         self.refresh_statusbar()
 
     def _switch_to(self, pane: SessionPane) -> None:
@@ -265,6 +271,7 @@ class PaimonApp(App):
             return
         dock = choice.lower()
         self._tabs.set_dock(dock)
+        self._sync_panes()
         self.config.save(tab_dock=dock)
         self.pane._focus_input()
 
