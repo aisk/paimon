@@ -25,6 +25,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
+from .llm import user_agent
 from .session import is_agents_message, summary_message
 
 
@@ -215,7 +216,7 @@ Use these sections:
                 SystemPromptPart(content="You create context checkpoint summaries for an AI coding agent."),
                 UserPromptPart(content=prompt),
             ])],
-            model_settings={"max_tokens": 2_048},
+            model_settings={"max_tokens": 2_048, "extra_headers": {"User-Agent": user_agent()}},
             model_request_parameters=ModelRequestParameters(allow_text_output=True),
         )
     summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))

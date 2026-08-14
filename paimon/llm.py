@@ -12,10 +12,23 @@ those lazily and raises ImportError for the rest.
 """
 
 import inspect
+import platform
+from functools import cache
+from importlib import metadata
 from typing import Optional
 
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.providers import infer_provider_class
+
+
+@cache
+def user_agent() -> str:
+    """The User-Agent sent with LLM requests, replacing pydantic-ai's default."""
+    try:
+        version = metadata.version("paimon")
+    except metadata.PackageNotFoundError:
+        version = "dev"
+    return f"paimon/{version} (Python {platform.python_version()}; {platform.system()} {platform.machine()})"
 
 
 def provider_class(provider_name: str):
