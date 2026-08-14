@@ -472,13 +472,13 @@ class Agent:
 
     async def _run_supervised(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
                               persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
-        """The agent tools and the background-task tools.
+        """The job tools: starting agents and commands, and reporting on both.
 
-        They act on the pool of agents and commands the UI is running, which no
-        stateless tool function can reach, and the supervisor is the one thing
-        that knows whether a given agent is busy — so they are dispatched from
-        here. Most of them are not gated at all (they only reach other panes
-        this same agent owns); run_background is, because it starts a process.
+        They act on the pool of jobs the UI is running, which no stateless tool
+        function can reach, and the supervisor is the one thing that knows
+        whether a given job is busy \u2014 so they are dispatched from here. Most of
+        them are not gated at all (they only reach jobs this same agent
+        started); run_background is, because it starts a process.
         """
         yield ToolStart(call.tool_call_id, call.tool_name, args)
         if self.supervisor is None:
@@ -499,11 +499,10 @@ class Agent:
         "start_new_session": _run_start_new_session,
         "spawn_agent": _run_supervised,
         "send_to_agent": _run_supervised,
-        "read_agent": _run_supervised,
-        "wait_for_agent": _run_supervised,
         "run_background": _run_supervised,
-        "read_task": _run_supervised,
-        "kill_task": _run_supervised,
+        "read_job": _run_supervised,
+        "wait_for_job": _run_supervised,
+        "stop_job": _run_supervised,
     }
 
     async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[AgentEvent]:
@@ -517,7 +516,7 @@ class Agent:
         # Agents this session started report in here, at the top of the next
         # turn, rather than by interrupting whatever the user is typing. It has
         # to be a persisted message: an event the model never sees would defeat
-        # the point, which is to get it to call read_agent.
+        # the point, which is to get it to call read_job.
         summary = self.supervisor.status_summary(self) if self.supervisor is not None else None
         if summary:
             self._append_message(agents_message(summary))

@@ -1,20 +1,18 @@
-"""The agent pool, driven without a terminal.
+"""The job pool, driven without a terminal.
 
-Everything here runs against a fake runner: delivery, cursors and cleanup are
-where concurrency bugs live, and reproducing those by clicking around a TUI is
-not a debugging strategy.
+Everything here runs against real jobs over a fake agent and a fake command:
+ownership, delivery, cursors and cleanup are where concurrency bugs live, and
+reproducing those by clicking around a TUI is not a debugging strategy.
 """
 
-import asyncio
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from paimon.jobs import AgentJob, CommandJob, State
+from paimon.supervisor import Supervisor, SupervisorError
 
-from paimon.supervisor import AgentState, Supervisor, SupervisorError, TaskState
-from paimon.tools import _TaskOutput
+from test_jobs import FakeAgent, FakeCommand, settle
 
 
 class FakeCaller:
@@ -28,105 +26,59 @@ class FakeCaller:
         self.cwd = cwd
 
 
-class FakeAgent:
-    def __init__(self) -> None:
-        self.history: list = []
-        self.supervisor = None
-        self.cwd = Path(".")
-
-
-class FakeCommand:
-    """A tools.BackgroundCommand, minus the process."""
-
-    def __init__(self, command: str = "sleep 30") -> None:
-        self.command = command
-        self.output = _TaskOutput()
-        self.exit_code = None
-        self.killed = False
-
-    @property
-    def running(self) -> bool:
-        return self.exit_code is None
-
-    def kill(self) -> None:
-        self.killed = True
-        self.exit_code = -15
-
-    def exit(self, code: int = 0) -> None:
-        self.exit_code = code
-
-
-class FakeRunner:
-    """A SessionPane's contract, minus the pane."""
-
-    def __init__(self) -> None:
-        self.agent = FakeAgent()
-        self.busy = False
-        self.needs_confirm = False
-        self.turn_failed = False
-        self.prompts: list[str] = []
-        self.closed = False
-
-    @property
-    def is_busy(self) -> bool:
-        return self.busy
-
-    def start_turn(self, text: str) -> None:
-        assert not self.busy, "a second turn on a busy agent would cancel the first"
-        self.prompts.append(text)
-        self.busy = True
-
-    def finish(self, answer: str = "done") -> None:
-        self.agent.history.append(ModelResponse(parts=[
-            ThinkingPart(content="secret reasoning"), TextPart(content=answer)]))
-        self.busy = False
-
-
 class SupervisorTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.runners: list[FakeRunner] = []
-        self.task_runners: list = []
+        self.jobs: list[AgentJob] = []
+        self.tasks: list[CommandJob] = []
         self.closed: list = []
         self.parent = FakeCaller()
 
     def make(self, limit: int = 4, launch=None) -> Supervisor:
-        async def default_launch(agent_id, parent, model):
-            runner = FakeRunner()
-            runner.agent_id = agent_id
-            runner.model = model
-            self.runners.append(runner)
-            return runner
+        async def default_launch(job_id, parent, model):
+            job = AgentJob(job_id, FakeAgent(), parent=parent)
+            job.model = model  # only so a test can see what was asked for
+            self.jobs.append(job)
+            job.start()
+            return job
 
-        async def launch_task(task_id, command, description):
-            runner = SimpleNamespace(task_id=task_id, command=command,
-                                     description=description)
-            self.task_runners.append(runner)
-            return runner
+        async def launch_task(job_id, command, description):
+            job = CommandJob(job_id, command, description, parent=self.parent)
+            self.tasks.append(job)
+            job.start()
+            return job
 
-        return Supervisor(launch=launch or default_launch,
-                          close=self.closed.append, limit=limit,
-                          launch_task=launch_task, close_task=self.closed.append)
+        return Supervisor(launch=launch or default_launch, close=self.closed.append,
+                          limit=limit, launch_task=launch_task)
+
+    async def finish(self, index: int = 0, answer: str = "done") -> None:
+        """Let the agent's current turn reach its end."""
+        agent = self.jobs[index].agent
+        await settle()
+        agent.answer = answer
+        agent.finish()
+        await settle()
 
     async def start_task(self, supervisor, command: str = "npm run dev",
                          description: str = "dev server", parent=None) -> tuple:
-        """A task backed by a fake command, so no process is ever started."""
+        """A command backed by a fake process, so nothing is ever started."""
         running = FakeCommand(command)
         with patch("paimon.supervisor.start_background",
                    new=AsyncMock(return_value=running)):
-            task_id = await supervisor.start_task(
+            job_id = await supervisor.start_task(
                 command, description, parent=parent or self.parent, cwd=Path("."))
-        return task_id, running
+        return job_id, running
 
 
 class SpawnTest(SupervisorTestCase):
     async def test_spawn_starts_a_turn_and_reports_running(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("look at the parser", parent=self.parent, model="x:y")
+        job_id = await supervisor.spawn("look at the parser", parent=self.parent, model="x:y")
+        await settle()
 
-        runner = self.runners[0]
-        self.assertEqual(runner.prompts, ["look at the parser"])
-        self.assertEqual(runner.model, "x:y")
-        self.assertEqual(supervisor.states(), {agent_id: AgentState.RUNNING})
+        job = self.jobs[0]
+        self.assertEqual(job.agent.prompts, ["look at the parser"])
+        self.assertEqual(job.model, "x:y")
+        self.assertEqual(supervisor.states(), {job_id: State.RUNNING})
 
     async def test_the_limit_refuses_instead_of_queueing(self) -> None:
         supervisor = self.make(limit=2)
@@ -135,23 +87,35 @@ class SpawnTest(SupervisorTestCase):
 
         with self.assertRaises(SupervisorError):
             await supervisor.spawn("three", parent=self.parent)
-        self.assertEqual(len(self.runners), 2)
+        self.assertEqual(len(self.jobs), 2)
 
-    async def test_a_killed_agent_frees_its_slot(self) -> None:
+    async def test_a_stopped_agent_frees_its_slot(self) -> None:
         supervisor = self.make(limit=1)
         first = await supervisor.spawn("one", parent=self.parent)
-        supervisor.kill(first)
+        supervisor.stop(first)
         await supervisor.spawn("two", parent=self.parent)
-        self.assertEqual(len(self.runners), 2)
+        self.assertEqual(len(self.jobs), 2)
+
+    async def test_a_user_opened_pane_counts_against_the_budget(self) -> None:
+        """It holds a pane and an agent like any other, but nothing may read it."""
+        supervisor = self.make(limit=2)
+        mine = AgentJob(supervisor.new_id(), FakeAgent())
+        supervisor.register(mine)
+        await supervisor.spawn("one", parent=self.parent)
+
+        with self.assertRaises(SupervisorError):
+            await supervisor.spawn("two", parent=self.parent)
+        self.assertIsNone(supervisor.read(mine.job_id, caller=self.parent),
+                          "an unowned job is invisible to every caller")
 
     async def test_an_empty_prompt_is_refused_before_a_pane_is_opened(self) -> None:
         supervisor = self.make()
         with self.assertRaises(SupervisorError):
             await supervisor.spawn("   ", parent=self.parent)
-        self.assertEqual(self.runners, [])
+        self.assertEqual(self.jobs, [])
 
     async def test_a_failed_launch_is_reported_not_raised(self) -> None:
-        async def launch(agent_id, parent, model):
+        async def launch(job_id, parent, model):
             raise RuntimeError("no pane for you")
 
         supervisor = self.make(launch=launch)
@@ -163,130 +127,151 @@ class SpawnTest(SupervisorTestCase):
 class DeliveryTest(SupervisorTestCase):
     async def test_a_busy_agent_queues_and_gets_one_prompt_per_turn(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("first", parent=self.parent)
-        runner = self.runners[0]
+        job_id = await supervisor.spawn("first", parent=self.parent)
+        agent = self.jobs[0].agent
+        await settle()
 
-        first = await supervisor.send(agent_id, "second", caller=self.parent)
-        second = await supervisor.send(agent_id, "third", caller=self.parent)
+        first = supervisor.send(job_id, "second", caller=self.parent)
+        second = supervisor.send(job_id, "third", caller=self.parent)
         self.assertTrue(first.queued and second.queued)
-        self.assertEqual(runner.prompts, ["first"])
+        self.assertEqual(agent.prompts, ["first"])
 
-        runner.finish()
-        supervisor.pump()
-        self.assertEqual(runner.prompts, ["first", "second"],
+        await self.finish()
+        self.assertEqual(agent.prompts, ["first", "second"],
                          "queued prompts stay separate turns")
-        self.assertEqual(supervisor.states()[agent_id], AgentState.RUNNING,
+        self.assertEqual(supervisor.states()[job_id], State.RUNNING,
                          "an agent with a full inbox is not idle")
 
-        runner.finish()
-        supervisor.pump()
-        self.assertEqual(runner.prompts, ["first", "second", "third"])
+        await self.finish()
+        self.assertEqual(agent.prompts, ["first", "second", "third"])
 
     async def test_an_idle_agent_starts_the_turn_at_once(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("first", parent=self.parent)
-        self.runners[0].finish()
+        job_id = await supervisor.spawn("first", parent=self.parent)
+        await self.finish()
 
-        delivery = await supervisor.send(agent_id, "again", caller=self.parent)
+        delivery = supervisor.send(job_id, "again", caller=self.parent)
+        await settle()
         self.assertFalse(delivery.queued)
-        self.assertEqual(self.runners[0].prompts, ["first", "again"])
+        self.assertEqual(self.jobs[0].agent.prompts, ["first", "again"])
 
     async def test_sending_to_a_stranger_is_refused(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("first", parent=self.parent)
+        job_id = await supervisor.spawn("first", parent=self.parent)
 
-        delivery = await supervisor.send(agent_id, "hello", caller=object())
+        delivery = supervisor.send(job_id, "hello", caller=object())
         self.assertFalse(delivery.accepted)
-        self.assertIs(delivery.state, AgentState.UNKNOWN)
+        self.assertIs(delivery.state, State.UNKNOWN)
+
+    async def test_a_background_command_takes_no_instructions(self) -> None:
+        supervisor = self.make()
+        job_id, _ = await self.start_task(supervisor)
+
+        answer = await supervisor.handle(
+            "send_to_agent", {"job_id": job_id, "prompt": "stop"}, caller=self.parent)
+        self.assertIn("background command", answer)
+        self.assertIn("read_job", answer)
 
 
 class ReadTest(SupervisorTestCase):
     async def test_each_caller_reads_only_what_is_new_to_it(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
-        runner = self.runners[0]
-        runner.finish("first answer")
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish(answer="first answer")
 
-        self.assertEqual(supervisor.read(agent_id, caller=self.parent).text, "first answer")
-        self.assertEqual(supervisor.read(agent_id, caller=self.parent).text, "",
+        self.assertEqual(supervisor.read(job_id, caller=self.parent).text, "first answer")
+        self.assertEqual(supervisor.read(job_id, caller=self.parent).text, "",
                          "nothing new since the last read")
 
-        runner.finish("second answer")
-        view = supervisor.read(agent_id, caller=self.parent)
+        supervisor.send(job_id, "again", caller=self.parent)
+        await self.finish(answer="second answer")
+        view = supervisor.read(job_id, caller=self.parent)
         self.assertEqual(view.text, "second answer")
         self.assertFalse(view.complete)
 
-        everything = supervisor.read(agent_id, caller=self.parent, mode="all")
+        everything = supervisor.read(job_id, caller=self.parent, mode="all")
         self.assertEqual(everything.text, "first answer\n\nsecond answer")
         self.assertTrue(everything.complete)
 
     async def test_reasoning_never_comes_back(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
-        self.runners[0].finish("just the answer")
-        self.assertNotIn("secret reasoning", supervisor.read(agent_id, caller=self.parent).text)
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish(answer="just the answer")
+        self.assertNotIn("secret reasoning", supervisor.read(job_id, caller=self.parent).text)
 
     async def test_a_stale_id_answers_instead_of_raising(self) -> None:
         supervisor = self.make()
-        result = await supervisor.handle("read_agent", {"agent_id": "beef"}, caller=self.parent)
-        self.assertIn("no agent beef", result)
+        result = await supervisor.handle("read_job", {"job_id": "beef"}, caller=self.parent)
+        self.assertIn("beef", result)
+        self.assertIn("Error", result)
 
-    async def test_a_killed_agents_output_is_still_readable(self) -> None:
+    async def test_a_stopped_agents_output_is_still_readable(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
-        self.runners[0].finish("what it managed")
-        supervisor.released(self.runners[0])
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish(answer="what it managed")
+        supervisor.released(self.jobs[0])
 
-        view = supervisor.read(agent_id, caller=self.parent, mode="all")
-        self.assertIs(view.state, AgentState.KILLED)
+        view = supervisor.read(job_id, caller=self.parent, mode="all")
+        self.assertIs(view.state, State.KILLED)
         self.assertEqual(view.text, "what it managed")
 
 
 class WaitTest(SupervisorTestCase):
     async def test_waiting_returns_when_the_turn_ends(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
+        job_id = await supervisor.spawn("go", parent=self.parent)
 
         async def finish_soon() -> None:
-            await asyncio.sleep(0)
-            self.runners[0].finish()
-            supervisor.pump()
+            await settle(2)
+            self.jobs[0].agent.finish()
 
+        import asyncio
         asyncio.ensure_future(finish_soon())
-        self.assertIs(await supervisor.wait(agent_id, caller=self.parent, timeout=5),
-                      AgentState.IDLE)
+        self.assertIs(await supervisor.wait(job_id, caller=self.parent, timeout=5),
+                      State.IDLE)
 
     async def test_a_wait_always_comes_back(self) -> None:
-        """Without this the caller hangs on an agent nobody is looking at."""
+        """Without this the caller hangs on a job nobody is looking at."""
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
-        self.assertIs(await supervisor.wait(agent_id, caller=self.parent, timeout=0.01),
-                      AgentState.RUNNING)
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        self.assertIs(await supervisor.wait(job_id, caller=self.parent, timeout=0.01),
+                      State.RUNNING)
+
+    async def test_waiting_on_a_strangers_job_is_not_a_wait_at_all(self) -> None:
+        supervisor = self.make()
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        self.assertIs(await supervisor.wait(job_id, caller=object(), timeout=5),
+                      State.UNKNOWN)
 
     async def test_a_pending_confirmation_ends_the_wait_early(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await settle()
+        self.jobs[0].mark_blocked(True)
 
-        async def block_soon() -> None:
-            await asyncio.sleep(0)
-            self.runners[0].needs_confirm = True
-            supervisor.pump()
-
-        asyncio.ensure_future(block_soon())
-        state = await supervisor.wait(agent_id, caller=self.parent, timeout=5)
-        self.assertIs(state, AgentState.NEEDS_CONFIRM)
-        answer = await supervisor.handle("wait_for_agent", {"agent_id": agent_id, "timeout": 5},
+        state = await supervisor.wait(job_id, caller=self.parent, timeout=5)
+        self.assertIs(state, State.NEEDS_CONFIRM)
+        answer = await supervisor.handle("wait_for_job", {"job_id": job_id, "timeout": 5},
                                          caller=self.parent)
         self.assertIn("confirm", answer)
 
+    async def test_a_background_command_can_be_waited_for(self) -> None:
+        supervisor = self.make()
+        job_id, running = await self.start_task(supervisor)
+        running.exit(0)
+
+        answer = await supervisor.handle("wait_for_job", {"job_id": job_id, "timeout": 5},
+                                         caller=self.parent)
+        self.assertIn("done", answer)
+
     async def test_the_timeout_is_clamped(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
-        self.runners[0].finish()
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish()
         # A missing or absurd timeout must not become "forever".
         for value in (None, "nonsense", -1, 10 ** 9):
             answer = await supervisor.handle(
-                "wait_for_agent", {"agent_id": agent_id, "timeout": value}, caller=self.parent)
+                "wait_for_job", {"job_id": job_id, "timeout": value}, caller=self.parent)
             self.assertIn("idle", answer)
 
 
@@ -303,44 +288,66 @@ class CleanupTest(SupervisorTestCase):
         self.assertEqual(sorted(killed), sorted([first, second]))
         self.assertEqual(len(self.closed), 2)
         self.assertEqual(list(supervisor.states()), [third], "another pane's agent is untouched")
-        gone = await supervisor.handle("read_agent", {"agent_id": first}, caller=self.parent)
-        self.assertIn("no agent", gone)
+        gone = await supervisor.handle("read_job", {"job_id": first}, caller=self.parent)
+        self.assertIn("Error", gone)
 
-    async def test_a_killed_agent_stops_taking_deliveries(self) -> None:
+    async def test_a_stopped_agent_stops_taking_deliveries(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
-        supervisor.kill(agent_id)
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await settle()
+        supervisor.stop(job_id)
 
-        delivery = await supervisor.send(agent_id, "more", caller=self.parent)
+        delivery = supervisor.send(job_id, "more", caller=self.parent)
+        await settle()
         self.assertFalse(delivery.accepted)
-        self.assertIs(delivery.state, AgentState.KILLED)
-        self.assertEqual(self.runners[0].prompts, ["go"])
+        self.assertIs(delivery.state, State.KILLED)
+        self.assertEqual(self.jobs[0].agent.prompts, ["go"])
+
+    async def test_the_model_can_stop_an_agent_it_started(self) -> None:
+        """The one thing it could not do before: call off a runaway subagent."""
+        supervisor = self.make()
+        job_id = await supervisor.spawn("go the wrong way", parent=self.parent)
+        await self.finish(answer="halfway there")
+
+        answer = await supervisor.handle("stop_job", {"job_id": job_id}, caller=self.parent)
+        self.assertIn("Stopped", answer)
+        self.assertEqual(self.closed, [self.jobs[0]])
+        view = supervisor.read(job_id, caller=self.parent, mode="all")
+        self.assertIs(view.state, State.KILLED)
+        self.assertEqual(view.text, "halfway there")
+
+    async def test_a_stranger_cannot_stop_anything(self) -> None:
+        supervisor = self.make()
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        self.assertFalse(supervisor.stop(job_id, caller=object()))
+        self.assertEqual(self.closed, [])
 
 
 class StatusSummaryTest(SupervisorTestCase):
     async def test_news_is_reported_once_per_change(self) -> None:
         supervisor = self.make()
-        agent_id = await supervisor.spawn("go", parent=self.parent)
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await settle()
 
         self.assertIsNone(supervisor.status_summary(self.parent), "still running is not news")
 
-        self.runners[0].finish()
-        self.assertEqual(supervisor.status_summary(self.parent), f"{agent_id} finished")
+        await self.finish()
+        self.assertEqual(supervisor.status_summary(self.parent), f"{job_id} finished")
         self.assertIsNone(supervisor.status_summary(self.parent), "said once, not every turn")
 
-        await supervisor.send(agent_id, "more", caller=self.parent)
+        supervisor.send(job_id, "more", caller=self.parent)
         self.assertIsNone(supervisor.status_summary(self.parent))
-        self.runners[0].finish()
-        self.assertEqual(supervisor.status_summary(self.parent), f"{agent_id} finished")
+        await self.finish()
+        self.assertEqual(supervisor.status_summary(self.parent), f"{job_id} finished")
 
     async def test_a_failure_and_a_pending_confirmation_are_reported(self) -> None:
         supervisor = self.make()
         first = await supervisor.spawn("one", parent=self.parent)
         second = await supervisor.spawn("two", parent=self.parent)
 
-        self.runners[0].busy = False
-        self.runners[0].turn_failed = True
-        self.runners[1].needs_confirm = True
+        self.jobs[0].agent.fail = "the model said no"
+        await self.finish(0)
+        self.jobs[1].mark_blocked(True)
 
         self.assertEqual(supervisor.status_summary(self.parent),
                          f"{first} failed · {second} needs confirmation")
@@ -348,89 +355,90 @@ class StatusSummaryTest(SupervisorTestCase):
     async def test_only_the_parents_own_agents_are_reported(self) -> None:
         supervisor = self.make()
         await supervisor.spawn("go", parent=object())
-        self.runners[0].finish()
+        await self.finish()
         self.assertIsNone(supervisor.status_summary(self.parent))
 
 
-class BackgroundTaskTest(SupervisorTestCase):
-    """Background commands: started, read incrementally, stopped."""
+class BackgroundCommandTest(SupervisorTestCase):
+    """Background commands: started, read incrementally, waited for, stopped."""
 
-    async def test_a_task_opens_a_pane_and_is_read_from_the_start(self) -> None:
+    async def test_a_command_opens_a_pane_and_is_read_from_the_start(self) -> None:
         supervisor = self.make()
-        task_id, running = await self.start_task(supervisor)
+        job_id, running = await self.start_task(supervisor)
         running.output.append(b"listening on 3000\n")
 
-        self.assertEqual(supervisor.task_states(), {task_id: TaskState.RUNNING})
-        self.assertEqual(self.task_runners[0].task_id, task_id)
-        view = supervisor.read_task(task_id, caller=self.parent)
+        self.assertEqual(supervisor.states(), {job_id: State.RUNNING})
+        self.assertEqual(self.tasks[0].job_id, job_id)
+        view = supervisor.read(job_id, caller=self.parent)
         self.assertIn("listening on 3000", view.text)
-        self.assertEqual(supervisor.read_task(task_id, caller=self.parent).text, "",
+        self.assertEqual(supervisor.read(job_id, caller=self.parent).text, "",
                          "a second read only gets what is new")
 
     async def test_reading_all_starts_over(self) -> None:
         supervisor = self.make()
-        task_id, running = await self.start_task(supervisor)
+        job_id, running = await self.start_task(supervisor)
         running.output.append(b"first\n")
-        supervisor.read_task(task_id, caller=self.parent)
+        supervisor.read(job_id, caller=self.parent)
         running.output.append(b"second\n")
 
-        view = supervisor.read_task(task_id, caller=self.parent, mode="all")
+        view = supervisor.read(job_id, caller=self.parent, mode="all")
         self.assertIn("first", view.text)
         self.assertIn("second", view.text)
 
     async def test_an_exit_code_is_reported_and_the_output_survives(self) -> None:
         supervisor = self.make()
-        task_id, running = await self.start_task(supervisor)
+        job_id, running = await self.start_task(supervisor)
         running.output.append(b"boom\n")
         running.exit(2)
+        await settle()
 
-        answer = await supervisor.handle("read_task", {"task_id": task_id}, caller=self.parent)
+        answer = await supervisor.handle("read_job", {"job_id": job_id}, caller=self.parent)
         self.assertIn("exited, code 2", answer)
         self.assertIn("boom", answer)
 
     async def test_another_caller_gets_nothing(self) -> None:
         supervisor = self.make()
-        task_id, _ = await self.start_task(supervisor)
+        job_id, _ = await self.start_task(supervisor)
 
-        view = supervisor.read_task(task_id, caller=object())
-        self.assertIs(view.state, TaskState.UNKNOWN)
-        self.assertFalse(supervisor.kill_task(task_id, caller=object()))
+        self.assertIsNone(supervisor.read(job_id, caller=object()))
+        self.assertFalse(supervisor.stop(job_id, caller=object()))
 
-    async def test_killing_stops_the_command_and_closes_its_pane(self) -> None:
+    async def test_stopping_kills_the_command_and_closes_its_pane(self) -> None:
         supervisor = self.make()
-        task_id, running = await self.start_task(supervisor)
+        job_id, running = await self.start_task(supervisor)
         running.output.append(b"partial\n")
 
-        answer = await supervisor.handle("kill_task", {"task_id": task_id}, caller=self.parent)
+        answer = await supervisor.handle("stop_job", {"job_id": job_id}, caller=self.parent)
         self.assertIn("Stopped", answer)
         self.assertTrue(running.killed)
-        self.assertEqual(self.closed, [self.task_runners[0]])
-        view = supervisor.read_task(task_id, caller=self.parent, mode="all")
-        self.assertIs(view.state, TaskState.KILLED)
+        self.assertEqual(self.closed, [self.tasks[0]])
+        view = supervisor.read(job_id, caller=self.parent, mode="all")
+        self.assertIs(view.state, State.KILLED)
         self.assertIn("partial", view.text, "what it printed is still readable")
 
     async def test_a_closed_pane_stops_the_command(self) -> None:
         supervisor = self.make()
-        task_id, running = await self.start_task(supervisor)
+        _, running = await self.start_task(supervisor)
 
-        supervisor.released(self.task_runners[0])
+        supervisor.released(self.tasks[0])
         self.assertTrue(running.killed)
         self.assertEqual(self.closed, [], "the pane closed itself; it is not closed again")
 
-    async def test_changing_the_session_stops_agents_and_tasks_alike(self) -> None:
+    async def test_changing_the_session_stops_agents_and_commands_alike(self) -> None:
         supervisor = self.make()
         agent_id = await supervisor.spawn("look at the parser", parent=self.parent)
-        task_id, running = await self.start_task(supervisor)
+        job_id, running = await self.start_task(supervisor)
 
         killed = supervisor.kill_children(self.parent)
-        self.assertEqual(sorted(killed), sorted([agent_id, task_id]))
+        self.assertEqual(sorted(killed), sorted([agent_id, job_id]))
         self.assertTrue(running.killed)
-        self.assertEqual(supervisor.task_states(), {})
+        self.assertEqual(supervisor.states(), {})
 
-    async def test_tasks_and_agents_share_the_pane_budget(self) -> None:
+    async def test_commands_and_agents_share_the_pane_budget_and_the_id_space(self) -> None:
         supervisor = self.make(limit=2)
-        await supervisor.spawn("one", parent=self.parent)
-        await self.start_task(supervisor)
+        agent_id = await supervisor.spawn("one", parent=self.parent)
+        job_id, _ = await self.start_task(supervisor)
+        self.assertNotEqual(agent_id, job_id)
 
         with self.assertRaises(SupervisorError):
             await self.start_task(supervisor)
@@ -440,16 +448,18 @@ class BackgroundTaskTest(SupervisorTestCase):
 
     async def test_a_stale_id_is_an_error_not_an_exception(self) -> None:
         supervisor = self.make()
-        answer = await supervisor.handle("read_task", {"task_id": "beef"}, caller=self.parent)
-        self.assertIn("no background task beef", answer)
+        answer = await supervisor.handle("read_job", {"job_id": "beef"}, caller=self.parent)
+        self.assertIn("Error", answer)
+        self.assertIn("beef", answer)
 
-    async def test_what_became_of_a_task_opens_the_next_turn(self) -> None:
+    async def test_what_became_of_a_command_opens_the_next_turn(self) -> None:
         supervisor = self.make()
-        task_id, running = await self.start_task(supervisor)
+        job_id, running = await self.start_task(supervisor)
         self.assertIsNone(supervisor.status_summary(self.parent), "still running is not news")
 
         running.exit(1)
-        self.assertEqual(supervisor.status_summary(self.parent), f"{task_id} exited (code 1)")
+        await settle()
+        self.assertEqual(supervisor.status_summary(self.parent), f"{job_id} exited (code 1)")
         self.assertIsNone(supervisor.status_summary(self.parent), "said once, not every turn")
 
 

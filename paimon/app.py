@@ -18,6 +18,7 @@ from .config import DEFAULT_PROFILE, Config, list_profiles
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .pane import Pane, SessionPane
 from .session import SessionError
+from .jobs import CommandJob, Job
 from .supervisor import Supervisor, SupervisorError
 from .tabs import DOCKS, PaneTabs
 from .taskpane import TaskPane
@@ -88,10 +89,10 @@ class PaimonApp(App):
         self.config = agent.config
         # Agents live in panes, so the supervisor borrows the app to open and
         # close them; everything else about them it owns itself.
-        self._supervisor = Supervisor(launch=self._launch_agent, close=self._close_agent,
-                                      launch_task=self._launch_task,
-                                      close_task=self._close_agent, limit=MAX_PANES)
-        pane = SessionPane(agent, resumed=resumed, id="pane-1", supervisor=self._supervisor)
+        self._supervisor = Supervisor(launch=self._launch_agent, close=self._close_job,
+                                      launch_task=self._launch_task, limit=MAX_PANES)
+        pane = SessionPane(agent, job_id=self._supervisor.new_id(), resumed=resumed,
+                           id="pane-1", supervisor=self._supervisor)
         self._panes = [pane]
         self._current = pane
         self._next_pane = 2
@@ -152,11 +153,10 @@ class PaimonApp(App):
     def on_pane_state_changed(self, event: Pane.StateChanged) -> None:
         """A pane started or finished something the strip or the bar shows."""
         event.stop()
-        # Worker.StateChanged does not bubble, so this message is also the only
-        # signal the supervisor gets that an agent has gone idle and can be
-        # handed the next thing waiting in its inbox.
-        self._supervisor.pump()
-        self._sync_panes()
+        # A job's driver posts this as it unwinds too, which on the way out is
+        # after the screen it would redraw has already been pruned.
+        if self.screen_stack:
+            self._sync_panes()
 
     def on_pane_tabs_selected(self, event: PaneTabs.Selected) -> None:
         event.stop()
@@ -183,10 +183,10 @@ class PaimonApp(App):
         await self._switcher.add_content(pane, set_current=True)
         self._sync_panes()
 
-    def _make_pane(self, agent: Agent, *, agent_id: str | None = None) -> SessionPane:
+    def _make_pane(self, agent: Agent, *, parent=None) -> SessionPane:
         """Register a pane for an agent. The caller mounts it."""
-        pane = SessionPane(agent, id=f"pane-{self._next_pane}",
-                           supervisor=self._supervisor, agent_id=agent_id)
+        pane = SessionPane(agent, job_id=self._supervisor.new_id(), parent=parent,
+                           id=f"pane-{self._next_pane}", supervisor=self._supervisor)
         self._next_pane += 1
         self._panes.append(pane)
         return pane
@@ -204,9 +204,9 @@ class PaimonApp(App):
             return
         index = self._panes.index(pane)
         pane.close()
-        # An agent whose pane is gone is over, but what it wrote stays
+        # A job whose pane is gone is over, but what it produced stays
         # readable: whoever started it may still be about to ask.
-        self._supervisor.released(pane)
+        self._supervisor.released(pane.job)
         self._panes.remove(pane)
         if not self._panes:
             # Closing a pane stops the agents it started, so the last two can
@@ -229,7 +229,7 @@ class PaimonApp(App):
 
     # ---- agents -------------------------------------------------------------
 
-    async def _launch_agent(self, agent_id: str, parent, model: str | None) -> SessionPane:
+    async def _launch_agent(self, job_id: str, parent, model: str | None) -> Job:
         """Open a background pane for an agent another pane asked for.
 
         It is mounted hidden and never focused: a pane the user did not open
@@ -250,7 +250,10 @@ class PaimonApp(App):
             parent=owner.agent.session.id,
             toolset=tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED),
         )
-        pane = self._make_pane(agent, agent_id=agent_id)
+        pane = SessionPane(agent, job_id=job_id, parent=parent,
+                           id=f"pane-{self._next_pane}", supervisor=self._supervisor)
+        self._next_pane += 1
+        self._panes.append(pane)
         try:
             await self._switcher.add_content(pane)
         except BaseException:
@@ -261,9 +264,9 @@ class PaimonApp(App):
             agent.session.unlock()
             raise
         self._sync_panes()
-        return pane
+        return pane.job
 
-    async def _launch_task(self, task_id: str, command, description: str) -> TaskPane:
+    async def _launch_task(self, job_id: str, command, description: str) -> Job:
         """Open a background pane for a command a session asked to run.
 
         Hidden and unfocused for the same reason a spawned agent's pane is: the
@@ -273,9 +276,9 @@ class PaimonApp(App):
             raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
         owner = self._session()
         if owner is None:
-            raise SupervisorError("there is no conversation to attach a task to")
-        pane = TaskPane(task_id, command, description, cwd=owner.cwd, mode=owner.mode,
-                        id=f"pane-{self._next_pane}")
+            raise SupervisorError("there is no conversation to attach a command to")
+        job = CommandJob(job_id, command, description, parent=owner.agent)
+        pane = TaskPane(job, cwd=owner.cwd, mode=owner.mode, id=f"pane-{self._next_pane}")
         self._next_pane += 1
         self._panes.append(pane)
         try:
@@ -283,11 +286,15 @@ class PaimonApp(App):
         except BaseException:
             self._panes.remove(pane)
             raise
+        job.start()
         self._sync_panes()
-        return pane
+        return job
 
-    def _close_agent(self, pane: Pane) -> None:
-        """The supervisor killed an agent or a task: take its pane down too."""
+    def _close_job(self, job: Job) -> None:
+        """The supervisor stopped a job: take the pane showing it down too."""
+        pane = next((pane for pane in self._panes if pane.job is job), None)
+        if pane is None:
+            return
         pane.close()  # cancel the turn, release the session, stop the command
         self.call_later(self._drop_pane, pane)
 
@@ -489,11 +496,16 @@ class PaimonApp(App):
     # ---- status bar ---------------------------------------------------------
 
     def refresh_statusbar(self, tokens: int | None = None) -> None:
+        # A redraw queued behind a closing pane can arrive after the screen it
+        # would draw on has been pruned, on the way out. Nothing to draw then.
+        bars = self.query("#statusbar")
+        if not bars:
+            return
         pane = self.pane
         if isinstance(pane, SessionPane):
             parts = self._session_status(pane, tokens)
         else:
-            parts = [f"task {pane.task_id}", pane.status_text, pane.command.command]
+            parts = [f"task {pane.job.job_id}", pane.status_text, pane.command.command]
         # A pane blocked on a confirmation the user cannot see blocks whatever
         # is waiting on it, so the count follows them to every other pane.
         waiting = sum(1 for other in self._panes if other is not pane and other.needs_confirm)
@@ -503,7 +515,7 @@ class PaimonApp(App):
         if waiting:
             line = line.append_text("  ·  ").append_text(
                 f"{waiting} awaiting confirmation (ctrl+g)", "$text-warning")
-        self.query_one("#statusbar", Static).update(line)
+        bars.first(Static).update(line)
 
     def _session_status(self, pane: SessionPane, tokens: int | None) -> list[str]:
         # The agent's model, not the config's: a pane may override it.

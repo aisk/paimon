@@ -631,10 +631,10 @@ class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
             agent = self._agent(Path(directory))
             agent.supervisor = supervisor = _FakeSupervisor()
             with patch("paimon.agent.build_model",
-                       return_value=stub_model("read_agent", '{"agent_id": "a1f2"}')):
+                       return_value=stub_model("read_job", '{"job_id": "a1f2"}')):
                 events = [event async for event in agent.run("do it")]
 
-            self.assertEqual(supervisor.calls, [("read_agent", {"agent_id": "a1f2"})])
+            self.assertEqual(supervisor.calls, [("read_job", {"job_id": "a1f2"})])
             end = next(event for event in events if isinstance(event, ToolEnd))
             self.assertEqual(end.result, "handled")
 

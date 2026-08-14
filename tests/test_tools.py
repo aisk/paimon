@@ -596,9 +596,9 @@ class BackgroundGateTest(unittest.TestCase):
         self.assertEqual(
             gate("run_background", {"command": "npm run dev"}, "yolo", self.cwd), "allow")
 
-    def test_reading_and_stopping_a_task_are_not_gated(self) -> None:
-        for name in ("read_task", "kill_task"):
-            self.assertEqual(gate(name, {"task_id": "a1f2"}, "read", self.cwd), "allow")
+    def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
+        for name in ("read_job", "wait_for_job", "stop_job"):
+            self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
 
 
 if __name__ == "__main__":

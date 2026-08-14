@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from pydantic_ai.messages import (
@@ -20,12 +19,11 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import FunctionModel
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import RichLog, Static
-from textual.worker import WorkerState
-
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import lockfile
 from paimon.agent import Agent, ReasoningDelta
 from paimon.app import MAX_PANES, PaimonApp
+from paimon.jobs import AgentJob, Outcome, Result
 from paimon.pane import SessionPane, _EventRenderer, _session_label
 from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
@@ -128,6 +126,31 @@ class ConfirmPanelTest(AppTestCase):
             self.assertFalse(await task)
 
 
+class _HeldTurn:
+    """A stand-in for the task a real turn runs in."""
+
+    def done(self) -> bool:
+        return False
+
+    def cancel(self) -> None:
+        pass
+
+
+def hold_turn(pane) -> None:
+    """Make a pane look busy without a model behind it.
+
+    The driver is parked on its inbox, so a stand-in for the turn task is all
+    is_busy needs; submitting a prompt would really run one.
+    """
+    pane.job._turn = _HeldTurn()
+
+
+async def end_turn(pane, outcome: Outcome = Outcome.OK, error: str = "") -> None:
+    """Finish the held turn the way the driver would."""
+    pane.job._turn = None
+    await pane._end_turn(Result(outcome, error=error))
+
+
 class BackgroundPaneTest(AppTestCase):
     """Guards for panes that are mounted but not on screen.
 
@@ -137,7 +160,7 @@ class BackgroundPaneTest(AppTestCase):
     """
 
     async def _background_pane(self, app: PaimonApp) -> SessionPane:
-        pane = SessionPane(Agent.open(config=app.config), id="pane-2")
+        pane = SessionPane(Agent.open(config=app.config), job_id="bg01", id="pane-2")
         self.addCleanup(pane.agent.session.unlock)
         await app.mount(pane)
         pane.display = False
@@ -274,7 +297,7 @@ class ResumeSessionTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             before = app.pane.agent
-            app.pane._turn = SimpleNamespace(is_running=True, is_finished=False)
+            hold_turn(app.pane)
             app.action_resume_session()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
@@ -348,7 +371,7 @@ class ForkSessionTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             before = app.pane.agent
-            app.pane._turn = SimpleNamespace(is_running=True, is_finished=False)
+            hold_turn(app.pane)
             app.action_fork_session()
             await pilot.pause()
             self.assertIs(app.pane.agent, before)
@@ -498,7 +521,7 @@ class QueueTest(AppTestCase):
             self.assertFalse(prompt.disabled, "prompt stays enabled during turns")
 
             # prompts submitted while a (fake) turn runs are queued and shown
-            app.pane._turn = SimpleNamespace(is_running=True, is_finished=False)
+            hold_turn(app.pane)
             app.pane.handle_submit(PromptInput.Submitted("first message"))
             app.pane.handle_submit(PromptInput.Submitted("second message"))
             await pilot.pause()
@@ -507,21 +530,68 @@ class QueueTest(AppTestCase):
 
             # a finished turn flushes the queue into the next turn
             started: list[str] = []
-            app.pane.start_turn = started.append
-            app.pane.on_worker_state_changed(SimpleNamespace(worker=app.pane._turn, state=WorkerState.SUCCESS))
+            app.pane.job.submit = started.append
+            await end_turn(app.pane)
             await pilot.pause()
             self.assertEqual(started, ["first message\n\nsecond message"])
             self.assertFalse(app.pane._queue)
             self.assertFalse(queued.display)
 
             # an interrupted turn hands the queue back to the input instead
+            hold_turn(app.pane)
             app.pane.handle_submit(PromptInput.Submitted("queued later"))
             prompt.load_text("half-typed draft")
-            app.pane.on_worker_state_changed(SimpleNamespace(worker=app.pane._turn, state=WorkerState.CANCELLED))
+            await end_turn(app.pane, Outcome.INTERRUPTED)
             await pilot.pause()
             self.assertEqual(prompt.text, "queued later\nhalf-typed draft")
             self.assertFalse(app.pane._queue)
             self.assertEqual(started, ["first message\n\nsecond message"], "cancel must not auto-submit")
+
+
+class InterruptTest(AppTestCase):
+    """Escape stops the turn in flight and leaves the conversation usable.
+
+    Worth its own test because interrupting is no longer a Textual worker
+    being cancelled: the pane asks its job, which cancels the task one turn
+    runs in while the driver behind it stays parked on its inbox, ready for
+    the next prompt.
+    """
+
+    @staticmethod
+    def _endless_model() -> FunctionModel:
+        async def stream(messages, info):
+            await asyncio.sleep(30)
+            yield "never gets here"  # pragma: no cover
+
+        return FunctionModel(stream_function=stream)
+
+    @staticmethod
+    async def _wait_for(pilot, condition) -> None:
+        for _ in range(200):
+            await pilot.pause()
+            if condition():
+                return
+        raise AssertionError("condition not reached")
+
+    async def test_escape_stops_the_turn_and_the_pane_still_works(self) -> None:
+        app = self.make_app()
+        with patch("paimon.agent.build_model", return_value=self._endless_model()):
+            async with app.run_test() as pilot:
+                app.pane.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: app.pane.is_busy)
+
+                await pilot.press("escape")
+                await self._wait_for(pilot, lambda: not app.pane.is_busy)
+                self.assertIs(app.pane.job.result.outcome, Outcome.INTERRUPTED)
+                self.assertIn("Paimon stopped", MultiPaneTest._log_text(app.pane))
+
+                # The driver survived, so the pane takes the next prompt.
+                app.pane.handle_submit(PromptInput.Submitted("again"))
+                await self._wait_for(pilot, lambda: app.pane.is_busy)
+                self.assertIn("again", MultiPaneTest._log_text(app.pane),
+                              "the second prompt is rendered from the job's own event")
+                app.pane.interrupt()
+                await self._wait_for(pilot, lambda: not app.pane.is_busy)
 
 
 class FailedTurnQueueTest(AppTestCase):
@@ -535,31 +605,30 @@ class FailedTurnQueueTest(AppTestCase):
 
         return FunctionModel(stream_function=stream)
 
-    async def test_run_turn_marks_a_model_error(self) -> None:
+    async def test_a_model_error_is_logged_rather_than_raised_at_the_app(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             with patch("paimon.agent.build_model", return_value=self._failing_model()):
-                app.pane.start_turn("go")
+                app.pane.job.submit("go")
                 for _ in range(200):
                     await pilot.pause()
-                    if app.pane._turn is not None and not app.pane._turn.is_running:
+                    if not app.pane.is_busy:
                         break
-            self.assertTrue(app.pane._turn_failed)
-            self.assertEqual(app.pane._turn.state, WorkerState.SUCCESS,
-                             "the error is shown in the log, so the worker itself succeeds")
+            self.assertIs(app.pane.job.result.outcome, Outcome.FAILED)
+            self.assertIn("provider failed", MultiPaneTest._log_text(app.pane),
+                          "the error is shown in the log, not raised out of the driver")
 
     async def test_queue_returns_to_the_input_after_an_error(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptInput)
-            app.pane._turn = SimpleNamespace(is_running=True, is_finished=False)
+            hold_turn(app.pane)
             app.pane.handle_submit(PromptInput.Submitted("queued while it ran"))
             await pilot.pause()
 
             started: list[str] = []
-            app.pane.start_turn = started.append
-            app.pane._turn_failed = True
-            app.pane.on_worker_state_changed(SimpleNamespace(worker=app.pane._turn, state=WorkerState.SUCCESS))
+            app.pane.job.submit = started.append
+            await end_turn(app.pane, Outcome.FAILED, error="provider failed")
             await pilot.pause()
 
             self.assertFalse(started, "a failed turn must not fire the queue at the model")
@@ -610,7 +679,7 @@ class HandoffTest(AppTestCase):
                 await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
                 await pilot.press("enter")
                 await self._wait_for(pilot, lambda: app.pane.agent.session.id != old.id
-                                     and app.pane._turn is not None and not app.pane._turn.is_running)
+                                     and not app.pane.is_busy)
 
                 log = self._log_text(app)
                 self.assertIn("Started new session", log)
@@ -629,8 +698,7 @@ class HandoffTest(AppTestCase):
                 app.pane.handle_submit(PromptInput.Submitted("go"))
                 await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
                 await pilot.press("escape")
-                await self._wait_for(pilot, lambda: app.pane._turn is not None
-                                     and not app.pane._turn.is_running)
+                await self._wait_for(pilot, lambda: not app.pane.is_busy)
 
                 self.assertEqual(app.pane.agent.session.id, old_id)
                 self.assertIsNone(app.pane._pending_handoff)
@@ -639,17 +707,18 @@ class HandoffTest(AppTestCase):
     async def test_queued_messages_return_to_input_on_handoff(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            worker = SimpleNamespace(is_running=True, is_finished=False)
-            app.pane._turn = worker
+            hold_turn(app.pane)
             app.pane.handle_submit(PromptInput.Submitted("for the old context"))
-            worker.is_running, worker.is_finished = False, True
             app.pane._pending_handoff = "next phase"
-            started: list[str] = []
-            app.pane.start_turn = started.append
             old_id = app.pane.agent.session.id
 
-            app.pane.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.SUCCESS))
-            await pilot.pause()
+            # Patched on the class, not the instance: the handoff opens a new
+            # session, and with it the new job the prompt actually lands in.
+            started: list[str] = []
+            with patch.object(AgentJob, "submit",
+                              lambda self, text: started.append(text) or True):
+                await end_turn(app.pane)
+                await pilot.pause()
 
             self.assertEqual(started, ["next phase"])
             self.assertNotEqual(app.pane.agent.session.id, old_id)
@@ -660,14 +729,12 @@ class HandoffTest(AppTestCase):
     async def test_failed_turn_clears_pending_handoff_without_switching(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            worker = SimpleNamespace(is_running=False, is_finished=True)
-            app.pane._turn = worker
             app.pane._pending_handoff = "next phase"
             started: list[str] = []
-            app.pane.start_turn = started.append
+            app.pane.job.submit = started.append
             old_id = app.pane.agent.session.id
 
-            app.pane.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.ERROR))
+            await end_turn(app.pane, Outcome.FAILED, error="provider failed")
             await pilot.pause()
 
             self.assertIsNone(app.pane._pending_handoff)
@@ -715,7 +782,7 @@ class ProfileSwitchTest(AppTestCase):
     async def test_noop_while_turn_is_running(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            app.pane._turn = SimpleNamespace(is_running=True, is_finished=False)
+            hold_turn(app.pane)
             app.action_switch_profile()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
@@ -725,7 +792,7 @@ class ProfileSwitchTest(AppTestCase):
         """Login rewrites the model every running turn re-reads at each step."""
         app = self.make_app()
         async with app.run_test() as pilot:
-            app.pane._turn = SimpleNamespace(is_running=True, is_finished=False)
+            hold_turn(app.pane)
             app.action_login()
             await pilot.pause()
             self.assertEqual(self._login_screens(app), [])
@@ -1069,9 +1136,9 @@ class SpawnAgentTest(AppTestCase):
                 self.assertIs(app.focused, prompt, "a pane the user did not open takes no keys")
                 self.assertEqual(child.agent.cwd, parent.agent.cwd)
                 self.assertEqual(child.mode, parent.mode)
-                self.assertIn(child.agent_id, MultiPaneTest._log_text(parent),
+                self.assertIn(child.job.job_id, MultiPaneTest._log_text(parent),
                               "the parent is told the id it has to use")
-                self.assertIn(f"{child.agent_id} check the parser",
+                self.assertIn(f"{child.job.job_id} check the parser",
                               MultiPaneTest._tab_text(app, child))
 
     async def test_the_new_agent_cannot_spawn_or_hand_off(self) -> None:
@@ -1084,7 +1151,9 @@ class SpawnAgentTest(AppTestCase):
                                  "a handoff would swap the session out from under its id")
                 self.assertNotIn("run_background", child.agent.toolset,
                                  "only the conversation the user is in leaves processes behind")
-                self.assertIn("read_agent", child.agent.toolset)
+                for name in ("read_job", "wait_for_job", "stop_job", "send_to_agent"):
+                    self.assertNotIn(name, child.agent.toolset,
+                                     "it can start nothing, so it has nothing to look at")
 
     async def test_the_new_session_is_a_child_and_stays_out_of_the_listings(self) -> None:
         app = self.make_app(mode="yolo")
@@ -1105,7 +1174,7 @@ class SpawnAgentTest(AppTestCase):
             async with app.run_test() as pilot:
                 parent = app.pane
                 child = await self._spawn(app, pilot)
-                agent_id, path = child.agent_id, child.agent.session.path
+                agent_id, path = child.job.job_id, child.agent.session.path
                 await self._wait_for(pilot, lambda: not parent.is_busy)
 
                 parent.new_session()
@@ -1130,7 +1199,7 @@ class SpawnAgentTest(AppTestCase):
                 await pilot.pause()
 
                 answer = await app._supervisor.handle(
-                    "read_agent", {"agent_id": child.agent_id, "mode": "all"},
+                    "read_job", {"job_id": child.job.job_id, "mode": "all"},
                     caller=parent.agent)
                 self.assertIn("killed", answer)
                 self.assertIn("done", answer, "what it managed to say survives its pane")
@@ -1164,7 +1233,7 @@ class SpawnAgentTest(AppTestCase):
                 parent.handle_submit(PromptInput.Submitted("anything new?"))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
 
-                self.assertIn(f"Agents: {child.agent_id} finished",
+                self.assertIn(f"Agents: {child.job.job_id} finished",
                               MultiPaneTest._log_text(parent))
                 self.assertTrue(any(is_agents_message(message)
                                     for message in parent.agent.history),
@@ -1229,9 +1298,9 @@ class BackgroundTaskTest(AppTestCase):
                 self.assertFalse(task.display)
                 self.assertIs(app.focused, parent.query_one(PromptInput),
                               "a pane the user did not open takes no keys")
-                self.assertIn(f"{task.task_id} dev server",
+                self.assertIn(f"{task.job.job_id} dev server",
                               MultiPaneTest._tab_text(app, task))
-                self.assertIn(task.task_id, MultiPaneTest._log_text(parent),
+                self.assertIn(task.job.job_id, MultiPaneTest._log_text(parent),
                               "the parent is told the id it has to use")
                 self.assertTrue(task.is_running)
 
@@ -1243,7 +1312,7 @@ class BackgroundTaskTest(AppTestCase):
                 task = await self._start(app, pilot)
 
                 answer = await app._supervisor.handle(
-                    "read_task", {"task_id": task.task_id}, caller=parent.agent)
+                    "read_job", {"job_id": task.job.job_id}, caller=parent.agent)
                 self.assertIn("pid", answer)
                 self.assertIn("running", answer)
                 self.assertNotIn("pid", self._log_text(task),
@@ -1267,7 +1336,7 @@ class BackgroundTaskTest(AppTestCase):
                 await pilot.pause()
 
                 bar = str(app.query_one("#statusbar", Static).render())
-                self.assertIn(f"task {task.task_id}", bar)
+                self.assertIn(f"task {task.job.job_id}", bar)
                 self.assertIn("running", bar)
 
     async def test_closing_the_tab_stops_the_command(self) -> None:

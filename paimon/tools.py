@@ -32,7 +32,7 @@ MODES = ("read", "edit", "yolo")
 
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
-# Bounds for wait_for_agent. A wait that cannot expire is a deadlock waiting to
+# Bounds for wait_for_job. A wait that cannot expire is a deadlock waiting to
 # happen: the agent being waited on may be blocked on a permission prompt in a
 # tab nobody is looking at, and the caller has to get control back to say so.
 DEFAULT_WAIT_TIMEOUT = 60.0
@@ -943,6 +943,16 @@ class BackgroundCommand:
             await _stop_reader(reader, self._proc)
             self.exit_code = self._proc.returncode
 
+    async def wait(self) -> Optional[int]:
+        """Block until the command has exited and its output has been drained.
+
+        Shielded, because whoever waits is liable to be cancelled — a job being
+        killed, the app going down — and cancelling the read would abandon
+        whatever the pipe still held.
+        """
+        await asyncio.shield(self._reading)
+        return self.exit_code
+
     def kill(self) -> None:
         """Stop the whole process group. Returns at once; reaping runs on.
 
@@ -1187,15 +1197,17 @@ REGISTRY: dict[str, Tool] = {
             },
         },
     ),
-    # The four below are stateful in the same way: they act on the pool of
-    # agents this process is running, which only the UI owns, so the agent loop
-    # hands them to its supervisor instead of running them here.
+    # The rest of the registry is stateful in the same way: every one of them
+    # acts on the pool of jobs this process is running, which only the UI owns,
+    # so the agent loop hands them to its supervisor instead of running them
+    # here.
     #
-    # access is written out rather than left to default to "none" so the choice
-    # is on the record: none of the four touches the filesystem or spawns a
-    # process on its own, and everything a started agent goes on to do is gated
-    # in that agent's own tab under the mode it inherited. Adding a tool here
-    # that does reach outside the process needs its own access class.
+    # access is written out rather than left to default so the choice is on the
+    # record: all of them but run_background are "none" because they touch
+    # neither the filesystem nor a process of their own, and everything a
+    # started agent goes on to do is gated in that agent's own tab under the
+    # mode it inherited. Adding a tool here that does reach outside the process
+    # needs its own access class, the way run_background has one.
     "spawn_agent": Tool(
         run=None,
         access="none",
@@ -1212,9 +1224,10 @@ REGISTRY: dict[str, Tool] = {
                     "the goal, the key file paths, the decisions already made and what to "
                     "report back, because the new agent has no memory of this conversation "
                     "and cannot ask you anything. Nothing it produces reaches you on its own: "
-                    "call read_agent to collect it, and wait_for_agent to wait for it. It "
-                    "cannot spawn agents of its own. Permission prompts for its tools appear "
-                    "in its tab, so it can sit blocked until the user answers them."
+                    "call read_job to collect it, wait_for_job to wait for it, and stop_job "
+                    "if it is going the wrong way. It cannot spawn agents of its own. "
+                    "Permission prompts for its tools appear in its tab, so it can sit "
+                    "blocked until the user answers them."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1244,87 +1257,28 @@ REGISTRY: dict[str, Tool] = {
                     "Send a follow-up instruction to an agent you started. It runs as that "
                     "agent's next turn; if it is busy the message is queued and delivered "
                     "when the current turn ends. Like the spawn prompt it has to stand on "
-                    "its own — the agent cannot see this conversation."
+                    "its own \u2014 the agent cannot see this conversation. Only agents take "
+                    "instructions; a background command cannot be sent anything."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "agent_id": {"type": "string"},
+                        "job_id": {
+                            "type": "string",
+                            "description": "The id of an agent you started.",
+                        },
                         "prompt": {"type": "string"},
                     },
-                    "required": ["agent_id", "prompt"],
+                    "required": ["job_id", "prompt"],
                 },
             },
         },
     ),
-    "read_agent": Tool(
-        run=None,
-        access="none",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "read_agent",
-                "description": (
-                    "Read what an agent has written since you last read it (mode 'new', the "
-                    "default) or its whole answer so far (mode 'all'), together with its "
-                    "state. Only its assistant text comes back — not its thinking and not its "
-                    "tool output — so ask it in the spawn prompt to end with the summary you "
-                    "need."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {"type": "string"},
-                        "mode": {
-                            "type": "string",
-                            "enum": ["new", "all"],
-                            "description": "'new' (default) since your last read, or 'all'.",
-                        },
-                    },
-                    "required": ["agent_id"],
-                },
-            },
-        },
-    ),
-    "wait_for_agent": Tool(
-        run=None,
-        access="none",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "wait_for_agent",
-                "description": (
-                    "Wait until an agent is no longer running, then return its state. This "
-                    "never blocks forever: when the timeout runs out it returns 'running', "
-                    "and it returns early with 'needs_confirm' when the agent is stuck on a "
-                    "permission prompt in its own tab — say so, because only the user can "
-                    "clear that. Read its output with read_agent afterwards."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {"type": "string"},
-                        "timeout": {
-                            "type": "number",
-                            "description": (
-                                f"Seconds to wait (optional, default {DEFAULT_WAIT_TIMEOUT:g}, "
-                                f"maximum {MAX_WAIT_TIMEOUT:g})."
-                            ),
-                        },
-                    },
-                    "required": ["agent_id"],
-                },
-            },
-        },
-    ),
-    # Background tasks, handled by the agent loop for the same reason: the pool
-    # of running commands and the tab each one streams into belong to the UI.
-    #
-    # run_background is written as "background" rather than "execute" so the
-    # safe_command allowance can never apply to it, and never left to default
-    # to "none", which would hand the model an unconfirmed, untimed, turn-
-    # outliving way to run any command at all. read_task and kill_task only
-    # touch tasks this same agent started, so they are not gated.
+    # Starting a background command is the one supervised tool that reaches
+    # outside the process, so it is the one with an access class of its own:
+    # "background" rather than "execute" so the safe_command allowance can
+    # never apply to it, and never left to default to "none", which would hand
+    # the model an unconfirmed, untimed, turn-outliving way to run anything.
     "run_background": Tool(
         run=None,
         access="background",
@@ -1333,15 +1287,15 @@ REGISTRY: dict[str, Tool] = {
             "function": {
                 "name": "run_background",
                 "description": (
-                    "Start a long-running command in its own tab and return a task id, "
+                    "Start a long-running command in its own tab and return a job id, "
                     "instead of waiting for it like the shell tool does. Use it for things "
-                    "that are meant to keep running — a dev server, a file watcher, a long "
-                    "build or test suite — and use shell for anything that finishes on its "
+                    "that are meant to keep running \u2014 a dev server, a file watcher, a long "
+                    "build or test suite \u2014 and use shell for anything that finishes on its "
                     "own within a couple of minutes. The command gets no terminal and no "
                     "input, so it must be non-interactive; output may arrive in blocks "
                     "rather than line by line, because a pipe is not a terminal. Nothing "
-                    "reaches you on its own: call read_task for new output, and kill_task "
-                    "when you are done with it."
+                    "reaches you on its own: call read_job for new output, wait_for_job to "
+                    "wait for it to finish, and stop_job when you are done with it."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1349,7 +1303,7 @@ REGISTRY: dict[str, Tool] = {
                         "command": {"type": "string"},
                         "description": {
                             "type": "string",
-                            "description": "A few words naming the task; it labels the tab.",
+                            "description": "A few words naming the job; it labels the tab.",
                         },
                     },
                     "required": ["command", "description"],
@@ -1357,49 +1311,100 @@ REGISTRY: dict[str, Tool] = {
             },
         },
     ),
-    "read_task": Tool(
+    # The three below work on either kind of job. They are one tool each rather
+    # than one per kind because the ids share a space (see Supervisor._new_id):
+    # the model holds a mixed list of them and a per-kind tool would only give
+    # it a way to guess wrong. None is gated \u2014 each one reaches only the jobs
+    # this same agent started.
+    "read_job": Tool(
         run=None,
         access="none",
         schema={
             "type": "function",
             "function": {
-                "name": "read_task",
+                "name": "read_job",
                 "description": (
-                    "Read what a background task has printed since you last read it, "
-                    "together with whether it is still running and its exit code if it is "
-                    "not. Only the tail is returned when there is a lot of it."
+                    "Read what a job you started has produced since you last read it (mode "
+                    "'new', the default) or everything it has produced (mode 'all'), "
+                    "together with its state. For an agent that is its assistant text only "
+                    "\u2014 not its thinking and not its tool output \u2014 so ask it in the spawn "
+                    "prompt to end with the summary you need. For a background command it is "
+                    "the tail of its output, plus the exit code once it has stopped."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task_id": {"type": "string"},
+                        "job_id": {
+                            "type": "string",
+                            "description": "The id of an agent or a background command you started.",
+                        },
                         "mode": {
                             "type": "string",
                             "enum": ["new", "all"],
                             "description": "'new' (default) since your last read, or 'all'.",
                         },
                     },
-                    "required": ["task_id"],
+                    "required": ["job_id"],
                 },
             },
         },
     ),
-    "kill_task": Tool(
+    "wait_for_job": Tool(
         run=None,
         access="none",
         schema={
             "type": "function",
             "function": {
-                "name": "kill_task",
+                "name": "wait_for_job",
                 "description": (
-                    "Stop a background task and everything it started. Its output stays "
-                    "readable afterwards. Stop tasks you no longer need: they keep running "
-                    "and keep a tab open until the app exits."
+                    "Wait until a job you started is no longer running, then return its "
+                    "state. This never blocks forever: when the timeout runs out it returns "
+                    "'running', and it returns early with 'needs_confirm' when an agent is "
+                    "stuck on a permission prompt in its own tab \u2014 say so, because only the "
+                    "user can clear that. Read what it produced with read_job afterwards."
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {"task_id": {"type": "string"}},
-                    "required": ["task_id"],
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "The id of an agent or a background command you started.",
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": (
+                                f"Seconds to wait (optional, default {DEFAULT_WAIT_TIMEOUT:g}, "
+                                f"maximum {MAX_WAIT_TIMEOUT:g})."
+                            ),
+                        },
+                    },
+                    "required": ["job_id"],
+                },
+            },
+        },
+    ),
+    "stop_job": Tool(
+        run=None,
+        access="none",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "stop_job",
+                "description": (
+                    "Stop a job you started, and everything it started. What it produced "
+                    "stays readable afterwards. Stop what you no longer need: an agent going "
+                    "the wrong way keeps spending tokens, and a background command keeps "
+                    "running and keeps a tab open until the app exits."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "The id of an agent or a background command you started.",
+                        },
+                    },
+                    "required": ["job_id"],
                 },
             },
         },
@@ -1412,15 +1417,22 @@ REGISTRY: dict[str, Tool] = {
 # work. A background task is in the list for a second reason: headless runs one
 # turn under asyncio.run, which cancels everything still alive on the way out,
 # so a task started there would be a process group nobody ever kills.
-SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "read_agent", "wait_for_agent",
-                    "run_background", "read_task", "kill_task")
+SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "run_background",
+                    "read_job", "wait_for_job", "stop_job")
 
-# What a spawned agent must not be given: spawning (depth stays 1), the
-# handoff, which would swap the session out from under the id its parent holds,
-# and background tasks, which are the same depth-1 rule — only the conversation
-# the user is actually in gets to leave processes running behind it.
-SUBAGENT_DENIED = ("spawn_agent", "start_new_session",
-                   "run_background", "read_task", "kill_task")
+# What a spawned agent must not be given: every job tool, and the handoff.
+#
+# Every job tool, because depth stays 1 — only the conversation the user is
+# actually in starts agents and leaves processes running behind it — and a
+# subagent that can start nothing has nothing to read, wait for or stop either.
+# The ownership check would answer "unknown" to all three anyway; leaving them
+# in the schema would only spend tokens describing tools that cannot apply.
+#
+# The handoff, because its access is "always" and the confirmation appears in
+# the subagent's own tab, where the user is likely to approve it: approving it
+# swaps the session out from under the id the parent holds, and the parent is
+# never told.
+SUBAGENT_DENIED = ("start_new_session", *SUPERVISED_TOOLS)
 
 
 def without(registry: dict[str, Tool], names) -> dict[str, Tool]:

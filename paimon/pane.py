@@ -10,6 +10,7 @@ import asyncio
 import random
 import time
 from datetime import datetime
+from uuid import uuid4
 
 from textual import events, on, work
 from textual.app import ComposeResult
@@ -18,7 +19,6 @@ from textual.content import Content
 from textual.message import Message
 from textual.widgets import LoadingIndicator, Static
 from textual.widgets.markdown import MarkdownStream
-from textual.worker import Worker, WorkerState
 
 from . import lockfile, tools
 from .agent import (
@@ -39,6 +39,7 @@ from .agent import (
     UserInput,
     replay_events,
 )
+from .jobs import AgentJob, Outcome, Result, State, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint
 from .ui import AssistantMessage, ConfirmPanel, FoldedText, PromptInput, ToolResult, UserMessage
@@ -218,8 +219,9 @@ class Pane(Vertical):
             super().__init__()
 
     # The defaults are the quiet ones, so a kind of pane only has to state
-    # what is true of it. Subclasses carry two attributes besides: ``cwd`` and
-    # ``mode``, which is what a pane opened in place of this one inherits.
+    # what is true of it. Subclasses carry three attributes besides: ``job``,
+    # the thing this pane is a window onto, and ``cwd`` and ``mode``, which is
+    # what a pane opened in place of this one inherits.
     needs_confirm = False
     is_busy = False
     is_running = False
@@ -257,36 +259,36 @@ class Pane(Vertical):
 class SessionPane(Pane):
     """A single conversation: an agent, its rendered log and its prompt."""
 
-    def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None,
-                 supervisor=None, agent_id: str | None = None) -> None:
+    def __init__(self, agent: Agent, *, job_id: str, parent=None, resumed: bool = False,
+                 id: str | None = None, supervisor=None) -> None:
         super().__init__(id=id)
-        self.agent = agent
-        # The pool this pane's agent can start and talk to other agents through,
-        # and — when this pane is one of those agents — the id its parent knows
-        # it by. Shown on the tab, since that id is what the model reports.
+        # The pool this pane's agent can start and talk to other agents through.
         self.supervisor = supervisor
-        self.agent_id = agent_id
-        self._adopt(agent)
+        # Whose subagent this conversation is, or None when the user opened
+        # it. It is what decides who may read and stop this pane's work, so it
+        # lives on the job; the pane keeps it to build the next one. Not named
+        # _parent: MessagePump owns that one, and assigning it takes the whole
+        # pane out of the DOM.
+        self._owner = parent
+        self._adopt(agent, job_id)
         self.mode = agent.mode
         self._resumed = resumed
-        self._turn: Worker | None = None
         # Tab label, kept here rather than read back from the session file on
         # every repaint of the strip.
         self._title = agent.session.first_user_text() or ""
         # Last context size measured for this session, so redrawing the status
         # bar for an unrelated reason does not blank the readout.
         self._tokens: int | None = None
-        # Depth of pending _confirm calls; see needs_confirm.
-        self._confirming = 0
-        # Set by close(): the turn is cancelled and the widgets go away, so
-        # whatever the worker unwinds through must not touch the DOM. Not
-        # named _closing: MessagePump already owns that attribute, and
-        # setting it strands the widget's message loop on teardown.
+        # Set by close(): the job is cancelled and the widgets go away, so
+        # nothing it unwinds through must touch the DOM. Not named _closing:
+        # MessagePump already owns that attribute, and setting it strands the
+        # widget's message loop on teardown.
         self._pane_closing = False
-        # run_turn reports model errors in the log instead of letting them
-        # escape the worker (which would exit the app), so the worker still
-        # ends up SUCCESS; this is what tells the two apart afterwards.
-        self._turn_failed = False
+        # The spinner, which used to be closures inside the turn worker.
+        self._status_state: str | None = None
+        self._phrase = ""
+        self._turn_started = 0.0
+        self._status_timer = None
         self._todo_panel: Static | None = None
         self._queue: list[str] = []
         self._pending_handoff: str | None = None
@@ -305,39 +307,32 @@ class SessionPane(Pane):
     @property
     def is_running(self) -> bool:
         """Whether a turn is streaming right now. For display only."""
-        return self._turn is not None and self._turn.is_running
+        return self.job.state is State.RUNNING
 
     @property
     def is_busy(self) -> bool:
-        """Whether a turn is running or about to start.
+        """Whether a turn is running, or one is already queued behind it.
 
-        What every guard asks. A worker sits in PENDING for a tick before it
-        runs, and a second turn started in that window cancels the first
-        (run_turn is exclusive) — which, now that a turn can be started by the
-        supervisor and by the user at the same moment, is reachable.
+        What every guard asks. Taken from the job rather than from a worker's
+        status: the driver accepts a prompt the instant it is submitted, so
+        there is no window in which a second turn can be started by the user
+        and the supervisor at the same moment.
         """
-        return self._turn is not None and not self._turn.is_finished
-
-    @property
-    def turn_failed(self) -> bool:
-        """Whether the last finished turn ended in an error."""
-        return self._turn_failed
+        return self.job.is_busy
 
     @property
     def needs_confirm(self) -> bool:
-        """Whether this pane is blocked on a permission confirmation.
-
-        Counted rather than queried: removing the panel is asynchronous, and
-        the tab badge must clear the moment the answer is in.
-        """
-        return self._confirming > 0
+        """Whether this pane is blocked on a permission confirmation."""
+        return self.job.blocked > 0
 
     @property
     def tab_title(self) -> str:
         """Short label for the tab strip."""
         title = " ".join(self._title.split())
         title = title or "new session"
-        return f"{self.agent_id} {title}" if self.agent_id else title
+        # The id is only worth a tab's width while somebody holds it: it is
+        # what the model that started this pane calls it.
+        return f"{self.job.job_id} {title}" if self.job.parent is not None else title
 
     def notice(self, renderable) -> None:
         self._add(renderable)
@@ -352,7 +347,9 @@ class SessionPane(Pane):
         if self._pane_closing:
             return
         self._pane_closing = True
-        self.interrupt()
+        # Nothing more may reach the widgets: they go one message loop from
+        # now, and mounting into them after that raises.
+        self.job.sink = None
         self._retire_agent()
 
     def shutdown(self) -> None:
@@ -365,6 +362,8 @@ class SessionPane(Pane):
         """
         if not self._pane_closing:
             self._pane_closing = True
+            self.job.sink = None
+            self.job.shutdown()
             self.agent.session.unlock()
 
     def compose(self) -> ComposeResult:
@@ -384,6 +383,9 @@ class SessionPane(Pane):
         yield prompt
 
     async def on_mount(self) -> None:
+        # The first job is built in __init__, before there is a loop to drive
+        # it; every later one is started by _swap_agent as it is made.
+        self.job.start()
         self.query_one("#log", VerticalScroll).anchor()
         self._focus_input()
         self._refresh_mode()
@@ -426,11 +428,36 @@ class SessionPane(Pane):
 
     # ---- session switching --------------------------------------------------
 
-    def _adopt(self, agent: Agent) -> None:
-        """Take over an agent: this pane confirms for it and supervises it."""
+    def _adopt(self, agent: Agent, job_id: str) -> None:
+        """Take over an agent: this pane confirms for it and renders its job."""
         self.agent = agent
         agent.confirm = self._confirm
         agent.supervisor = self.supervisor
+        # One renderer per conversation rather than one per turn: a turn now
+        # opens with a UserInput event, which is what resets it. A new one per
+        # agent, so a swapped-out session cannot leave a live markdown stream
+        # pointing at a log that has just been emptied.
+        self._renderer = _EventRenderer(self)
+        self.job = AgentJob(job_id, agent, parent=self._owner)
+        self.job.sink = self._on_event
+        self.job.on_change = self._on_change
+        if self.supervisor is not None:
+            self.supervisor.register(self.job)
+
+    def _swap_agent(self, agent: Agent) -> None:
+        """Put a different conversation in this pane, under a new job.
+
+        The new one is nobody's subagent even when the old one was: the id the
+        parent holds names the conversation being left behind, which stays in
+        the table as killed and readable rather than quietly becoming a
+        different session the parent never asked for.
+        """
+        self._owner = None
+        self._adopt(agent, self._new_job_id())
+        self.job.start()
+
+    def _new_job_id(self) -> str:
+        return self.supervisor.new_id() if self.supervisor is not None else uuid4().hex[:4]
 
     def _retire_agent(self) -> list[str]:
         """Release the current session and stop the agents it started.
@@ -440,6 +467,9 @@ class SessionPane(Pane):
         again. Returns the ids, for the caller to report.
         """
         killed = self.supervisor.kill_children(self.agent) if self.supervisor is not None else []
+        self.job.cancel()
+        if self.supervisor is not None:
+            self.supervisor.released(self.job)
         self.agent.session.unlock()
         return killed
 
@@ -460,13 +490,14 @@ class SessionPane(Pane):
     def new_session(self) -> None:
         if self.is_busy:
             return
-        # The toolset travels with the pane, not with the session: a pane that
-        # is somebody's subagent stays one, without spawning or handing off.
+        # The toolset travels with the pane, not with the session: a pane
+        # started as a subagent keeps its narrowed set, without spawning or
+        # handing off, even though the new conversation is nobody's subagent.
         agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
                            config=self.config, toolset=self.agent.toolset,
                            parent=self.agent.session.parent)
         killed = self._retire_agent()
-        self._adopt(agent)
+        self._swap_agent(agent)
         self._title = ""
         self._tokens = None
         self.query_one("#log", VerticalScroll).remove_children()
@@ -492,7 +523,7 @@ class SessionPane(Pane):
         # log stays; only the agent underneath changes.
         agent.todos = list(self.agent.todos)
         killed = self._retire_agent()
-        self._adopt(agent)
+        self._swap_agent(agent)
         self._add(Content.from_markup("[$text-muted]Forked session $id[/]", id=agent.session.id[:8]))
         self._report_killed(killed)
         self._sync_statusbar()
@@ -524,7 +555,7 @@ class SessionPane(Pane):
             self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return
         killed = self._retire_agent()
-        self._adopt(agent)
+        self._swap_agent(agent)
         self._title = agent.session.first_user_text() or ""
         self._tokens = None
         self.query_one("#log", VerticalScroll).remove_children()
@@ -669,15 +700,16 @@ class SessionPane(Pane):
         # next keystroke would answer a confirmation they never saw.
         if self.is_current:
             panel.focus()
-        self._confirming += 1
-        self._notify_state()
+        # Counted on the job rather than here: removing the panel is
+        # asynchronous, and the tab badge has to clear the moment the answer is
+        # in, not whenever the widget finally goes.
+        self.job.mark_blocked(True)
         try:
             verdict = await future
         finally:
-            self._confirming -= 1
+            self.job.mark_blocked(False)
             prompt.display = True
             panel.remove()
-            self._notify_state()
         return verdict == "allow"
 
     # ---- input → turn -------------------------------------------------------
@@ -690,15 +722,7 @@ class SessionPane(Pane):
             self._queue.append(text)
             self._refresh_queued()
             return
-        self.start_turn(text)
-
-    def start_turn(self, text: str) -> None:
-        """Begin a turn on this pane's agent. Only valid while it is idle."""
-        if not self._title:
-            self._title = text
-        self._add_user(text)
-        self._turn = self.run_turn(text)
-        self._notify_state()
+        self.job.submit(text)
 
     def _refresh_queued(self) -> None:
         widget = self.query_one("#queued", Static)
@@ -710,21 +734,88 @@ class SessionPane(Pane):
         lines = "\n".join(f"[$text-muted]⏸ ${key}[/]" for key in kwargs)
         widget.update(Content.from_markup(lines, **kwargs))
 
-    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Flush queued prompts once the running turn is over.
+    def interrupt(self) -> None:
+        self.job.interrupt()
 
-        A finished turn submits them as the next turn; a turn that was
-        stopped or that failed hands them back to the input, so they aren't
-        fired at a model the user just stopped or that just errored.
+    # ---- the job's two hooks ------------------------------------------------
+
+    def _on_change(self, job) -> None:
+        """This pane's job moved. Called from its driver and from cancellation.
+
+        Only a notification: everything that has to happen in order with the
+        turn's own output belongs in the sink below, which is the one place
+        guaranteed to run after the last event of a turn.
         """
-        done = (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED)
-        if event.worker is not self._turn or event.state not in done:
+        if self._pane_closing or not self.is_mounted:
             return
         self._notify_state()
-        finished = event.state == WorkerState.SUCCESS and not self._turn_failed
+
+    async def _on_event(self, ev) -> None:
+        """Render one event of this pane's job. The job's sink.
+
+        Awaited by the driver, so the renderer's mounts are what paces a turn
+        and nothing has to be buffered on the way here.
+        """
+        if self._pane_closing or not self.app.is_running:
+            return
+        if isinstance(ev, TurnOver):
+            await self._end_turn(ev.result)
+            return
+        if isinstance(ev, UserInput):
+            self._begin_turn(ev.text)
+        await self._renderer.handle(ev)
+        if isinstance(ev, TurnEnd):
+            self._set_state(None)
+            self._sync_statusbar(tokens=True)
+        elif isinstance(ev, ToolStart):
+            self._set_state("tool")
+        elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted,
+                             ContextCompactionFailed, ModelRetry)):
+            # the model is about to react to what just happened
+            self._set_state("waiting")
+        elif isinstance(ev, ReasoningDelta):
+            # folded reasoning only ticks a line count, so the spinner stands in
+            self._set_state(None if self.config.show_reasoning else "thinking")
+        elif isinstance(ev, RequestStats):
+            self._tps = ev.output_tokens / ev.seconds
+            self._sync_statusbar(tokens=True)
+        elif isinstance(ev, SessionHandoff):
+            # the switch happens once the turn is over, in _end_turn, since
+            # new_session refuses to run while one is in flight
+            self._pending_handoff = ev.prompt
+        elif not isinstance(ev, UserInput):
+            self._set_state(None)
+
+    def _begin_turn(self, text: str) -> None:
+        if not self._title:
+            self._title = text
+        self._turn_started = time.monotonic()
+        self._status_state = None
+        self._set_state("waiting")
+        if self._status_timer is None:
+            self._status_timer = self.set_interval(1, self._tick_status)
+
+    async def _end_turn(self, result: Result) -> None:
+        """Close out a turn, however it ended, and start whatever waits behind it.
+
+        Queued messages were typed against a turn that then stopped or failed,
+        so they go back to the input rather than at a model the user just
+        interrupted. That is a decision about a text box, which is why it lives
+        here and not in the job's inbox.
+        """
+        await self._renderer.close()
+        self._set_state(None)
+        if self._status_timer is not None:
+            self._status_timer.stop()
+            self._status_timer = None
+        if result.outcome is Outcome.INTERRUPTED:
+            self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
+        elif result.outcome is Outcome.FAILED:
+            self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=result.error))
+        self._focus_input()
         if self._pending_handoff is not None:
             prompt, self._pending_handoff = self._pending_handoff, None
-            if finished:
+            if result.finished:
                 self._complete_handoff(prompt)
                 return
         if not self._queue:
@@ -732,13 +823,13 @@ class SessionPane(Pane):
         text = "\n\n".join(self._queue)
         self._queue.clear()
         self._refresh_queued()
-        if finished:
-            self.start_turn(text)
+        if result.finished:
+            self.job.submit(text)
         else:
-            prompt = self.query_one(PromptInput)
-            draft = prompt.text
-            prompt.load_text(f"{text}\n{draft}" if draft else text)
-            prompt.move_cursor(prompt.document.end)
+            prompt_input = self.query_one(PromptInput)
+            draft = prompt_input.text
+            prompt_input.load_text(f"{text}\n{draft}" if draft else text)
+            prompt_input.move_cursor(prompt_input.document.end)
 
     def _complete_handoff(self, prompt: str) -> None:
         """Switch to a fresh session and submit the approved handoff prompt.
@@ -758,82 +849,29 @@ class SessionPane(Pane):
         self.new_session()
         self._add(Content.from_markup(
             "[$text-muted]Handed off — previous session: $hint[/]", hint=hint))
-        self.start_turn(prompt)
+        self.job.submit(prompt)
 
-    def interrupt(self) -> None:
-        if self.is_busy:
-            self._turn.cancel()
+    # ---- the spinner --------------------------------------------------------
 
-    @work(exclusive=True)
-    async def run_turn(self, text: str) -> None:
-        renderer = _EventRenderer(self)
-        self._turn_failed = False
-        turn_started = time.monotonic()
-        state: str | None = None
-        phrase = ""
+    def _set_state(self, new: str | None) -> None:
+        """Show (or hide) the status line for what the turn is doing now.
 
-        def status_label() -> str:
-            elapsed = int(time.monotonic() - turn_started)
-            return f" {phrase} {elapsed}s" if elapsed else f" {phrase}"
+        The phrase is re-rolled only on state changes so it does not flicker
+        through the pool while one state lasts.
+        """
+        if new == self._status_state:
+            return
+        self._status_state = new
+        if new is None:
+            self._set_status(False)
+        else:
+            self._phrase = random.choice(_STATUS_PHRASES[new])
+            self._set_status(True, self._status_label())
 
-        def set_state(new: str | None) -> None:
-            # The phrase is re-rolled only on state changes so it doesn't
-            # flicker through the pool while a state lasts.
-            nonlocal state, phrase
-            if new == state:
-                return
-            state = new
-            if new is None:
-                self._set_status(False)
-            else:
-                phrase = random.choice(_STATUS_PHRASES[new])
-                self._set_status(True, status_label())
+    def _status_label(self) -> str:
+        elapsed = int(time.monotonic() - self._turn_started)
+        return f" {self._phrase} {elapsed}s" if elapsed else f" {self._phrase}"
 
-        def tick() -> None:
-            if state is not None:
-                self._set_status(True, status_label())
-
-        set_state("waiting")
-        timer = self.set_interval(1, tick)
-
-        try:
-            async for ev in self.agent.run(text):
-                await renderer.handle(ev)
-                if isinstance(ev, TurnEnd):
-                    set_state(None)
-                    self._sync_statusbar(tokens=True)
-                elif isinstance(ev, ToolStart):
-                    set_state("tool")
-                elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted,
-                                     ContextCompactionFailed, ModelRetry)):
-                    # the model is about to react to what just happened
-                    set_state("waiting")
-                elif isinstance(ev, ReasoningDelta):
-                    # folded reasoning only ticks a line count, so the spinner stands in
-                    set_state(None if self.config.show_reasoning else "thinking")
-                elif isinstance(ev, RequestStats):
-                    self._tps = ev.output_tokens / ev.seconds
-                    self._sync_statusbar(tokens=True)
-                elif isinstance(ev, SessionHandoff):
-                    # the switch happens after this worker finishes, in
-                    # on_worker_state_changed, since new_session
-                    # refuses to run while a turn is in flight
-                    self._pending_handoff = ev.prompt
-                else:
-                    set_state(None)
-        except asyncio.CancelledError:
-            # Quitting the app, and closing this pane, cancel this worker
-            # while its widgets are going away — mounting anything into them
-            # then raises MountError.
-            if self.app.is_running and not self._pane_closing:
-                self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
-            raise
-        except Exception as exc:  # noqa: BLE001 — show errors instead of crashing the UI
-            self._turn_failed = True
-            self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=str(exc)))
-        finally:
-            timer.stop()
-            if self.app.is_running and not self._pane_closing:
-                await renderer.close()
-                set_state(None)
-                self._focus_input()
+    def _tick_status(self) -> None:
+        if self._status_state is not None:
+            self._set_status(True, self._status_label())
