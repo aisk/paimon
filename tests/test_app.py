@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import RichLog, Static
 from helpers import SILENT_EVENTS, agent_events, stub_model
@@ -546,6 +546,45 @@ class QueueTest(AppTestCase):
             self.assertEqual(prompt.text, "queued later\nhalf-typed draft")
             self.assertFalse(app.pane._queue)
             self.assertEqual(started, ["first message\n\nsecond message"], "cancel must not auto-submit")
+
+
+class InjectedQueueTest(AppTestCase):
+    """A queued message joins the turn already running, at its next request."""
+
+    async def test_the_queue_is_injected_rather_than_held_to_the_next_turn(self) -> None:
+        app = self.make_app(mode="yolo")
+        seen: list[list[object]] = []
+        requests = 0
+
+        async def stream(messages, info):
+            nonlocal requests
+            requests += 1
+            seen.append(list(messages))
+            if requests == 1:
+                # The user types while the model is still working.
+                app.pane.handle_submit(PromptInput.Submitted("actually use uv"))
+                yield {0: DeltaToolCall(name="shell", json_args='{"command": "echo hi"}',
+                                        tool_call_id="call-1")}
+            else:
+                yield "done"
+
+        with patch("paimon.agent.build_model", return_value=FunctionModel(stream_function=stream)):
+            async with app.run_test() as pilot:
+                queued = app.query_one("#queued", Static)
+                app.pane.handle_submit(PromptInput.Submitted("go"))
+                await InterruptTest._wait_for(pilot, lambda: not app.pane.is_busy)
+
+                self.assertEqual(requests, 2, "the tool result went back to the model")
+                prompts = [part.content for message in seen[1] if isinstance(message, ModelRequest)
+                           for part in message.parts if isinstance(part, UserPromptPart)]
+                self.assertEqual(prompts, ["go", "actually use uv"])
+                self.assertFalse(app.pane._queue)
+                self.assertFalse(queued.display)
+                self.assertEqual(
+                    [str(widget.render()) for widget in app.pane.query(UserMessage)],
+                    ["go", "actually use uv"],
+                    "the injected message is drawn like any other user turn",
+                )
 
 
 class InterruptTest(AppTestCase):

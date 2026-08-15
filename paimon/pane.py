@@ -433,6 +433,7 @@ class SessionPane(Pane):
         self.agent = agent
         agent.confirm = self._confirm
         agent.supervisor = self.supervisor
+        agent.pending = self._take_queued
         # One renderer per conversation rather than one per turn: a turn now
         # opens with a UserInput event, which is what resets it. A new one per
         # agent, so a swapped-out session cannot leave a live markdown stream
@@ -734,6 +735,18 @@ class SessionPane(Pane):
         lines = "\n".join(f"[$text-muted]⏸ ${key}[/]" for key in kwargs)
         widget.update(Content.from_markup(lines, **kwargs))
 
+    def _take_queued(self) -> list[str]:
+        """Hand the queued messages to the running turn, which injects them.
+
+        Called from the agent loop, which runs on this app's event loop, so
+        touching the panel from here is safe.
+        """
+        if self._pane_closing or not self._queue:
+            return []
+        texts, self._queue = self._queue, []
+        self._refresh_queued()
+        return texts
+
     def interrupt(self) -> None:
         self.job.interrupt()
 
@@ -789,10 +802,13 @@ class SessionPane(Pane):
     def _begin_turn(self, text: str) -> None:
         if not self._title:
             self._title = text
-        self._turn_started = time.monotonic()
         self._status_state = None
         self._set_state("waiting")
         if self._status_timer is None:
+            # A message injected mid-turn arrives as a UserInput event too, and
+            # must not restart the clock of the turn it landed in. The timer is
+            # the marker: it only clears when a turn ends.
+            self._turn_started = time.monotonic()
             self._status_timer = self.set_interval(1, self._tick_status)
 
     async def _end_turn(self, result: Result) -> None:

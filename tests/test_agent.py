@@ -390,6 +390,107 @@ class AgentToolsetTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(events[-1], TurnEnd)
 
 
+class PendingMessagesTest(unittest.IsolatedAsyncioTestCase):
+    """Messages queued mid-turn reach the model at the next request, not the
+    next turn."""
+
+    async def test_queued_message_is_injected_before_the_next_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config(), mode="yolo")
+
+            queue = ["use uv instead"]
+
+            def take() -> list[str]:
+                texts, queue[:] = list(queue), []
+                return texts
+
+            agent.pending = take
+            seen: list[list[object]] = []
+            requests = 0
+
+            async def stream(messages, info):
+                nonlocal requests
+                requests += 1
+                seen.append(list(messages))
+                if requests == 1:
+                    yield {0: DeltaToolCall(name="shell", json_args='{"command": "echo hi"}',
+                                            tool_call_id="call-1")}
+                else:
+                    yield "done"
+
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                events = [event async for event in agent.run("go")
+                          if not isinstance(event, RequestStats)]
+
+            # Queued before the turn even started, so the first request already
+            # carries it, ahead of the tool call it goes on to make.
+            self.assertEqual(
+                [type(event) for event in events],
+                [UserInput, ToolStart, ToolEnd, TextDelta, TurnEnd],
+            )
+            self.assertEqual(events[0].text, "use uv instead")
+
+            prompts = [part.content for message in seen[0] if isinstance(message, ModelRequest)
+                       for part in message.parts if isinstance(part, UserPromptPart)]
+            self.assertEqual(prompts, ["go", "use uv instead"])
+
+    async def test_a_message_queued_during_a_tool_call_lands_after_its_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config(), mode="yolo")
+
+            queue: list[str] = []
+            agent.pending = lambda: [queue.pop(0)] if queue else []
+            requests = 0
+
+            async def stream(messages, info):
+                nonlocal requests
+                requests += 1
+                if requests == 1:
+                    # Typed while the tool below is running.
+                    queue.append("stop, wrong file")
+                    yield {0: DeltaToolCall(name="shell", json_args='{"command": "echo hi"}',
+                                            tool_call_id="call-1")}
+                else:
+                    yield "done"
+
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                events = [event async for event in agent.run("go")
+                          if not isinstance(event, RequestStats)]
+
+            self.assertEqual(
+                [type(event) for event in events],
+                [ToolStart, ToolEnd, UserInput, TextDelta, TurnEnd],
+            )
+            # The injected request follows the tool results rather than
+            # replacing them, so no tool_call_id is left unanswered.
+            requests_only = [m for m in agent.history if isinstance(m, ModelRequest)]
+            self.assertTrue(any(isinstance(part, ToolReturnPart)
+                                for part in requests_only[-2].parts))
+            self.assertEqual([part.content for part in requests_only[-1].parts],
+                             ["stop, wrong file"])
+
+    async def test_without_the_hook_nothing_is_injected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config(), mode="yolo")
+
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                events = [event async for event in agent.run("go")
+                          if not isinstance(event, RequestStats)]
+
+            self.assertEqual([type(event) for event in events], [TextDelta, TurnEnd])
+
+
 class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
     """start_new_session ends the turn on approval without another model
     request; without a confirm hook it is denied even in yolo mode."""

@@ -238,6 +238,11 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
 # Re-exported so UI code can keep importing it from here.
 ConfirmFn = tools.ConfirmFn
 
+# Takes the messages a user queued while a turn was already running, clearing
+# the queue as it goes. The loop calls it before every model request, so what
+# it returns reaches the model at the next step rather than the next turn.
+PendingFn = Callable[[], list[str]]
+
 
 class Agent:
     """One conversation against one session.
@@ -272,6 +277,9 @@ class Agent:
         # None everywhere else (headless, tests), where the agent tools refuse
         # rather than pretend.
         self.supervisor = None
+        # Set by the UI too: the hook the loop pulls queued user messages from.
+        # None where nobody can type while a turn runs (headless, tests).
+        self.pending: Optional[PendingFn] = None
         # Per-agent tool state, kept off the tool functions so one agent's
         # shell overflow files stay invisible to the next one.
         self.tool_context = tools.ToolContext()
@@ -560,6 +568,16 @@ class Agent:
         compaction_failures = 0
 
         while True:
+            # Messages the user queued while this turn was already running.
+            # Appended as their own request so the model sees them at the next
+            # step, without touching the stream that just ended or the tool
+            # results already recorded. Before compaction, so they count
+            # towards the context check and survive a history replacement.
+            for queued in (self.pending() if self.pending is not None else []):
+                self._append_message(ModelRequest(
+                    parts=[UserPromptPart(content=expand_mentions(queued, self.cwd))]))
+                yield UserInput(queued)
+
             if not compaction_off:
                 try:
                     compacted = await self._maybe_compact()
