@@ -47,6 +47,8 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-disabled; }
 .todos { padding: 0 1; border-left: solid $primary 45%; }
+/* Unprompted, so it is the quietest block that still has a rule of its own. */
+.recap { padding: 0 1; border-left: solid $accent 60%; color: $text-muted; }
 .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
 .user-message {
     width: 100%;

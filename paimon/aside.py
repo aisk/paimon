@@ -43,6 +43,20 @@ DEFAULT_INSTRUCTIONS = (
     "Nothing you write here is added to the conversation."
 )
 
+# The recap: what the UI asks for on its own once the user has gone quiet after
+# a turn that did some work. Lives here rather than in the pane that schedules
+# it, so the prose stays next to the mechanism that sends it and testable
+# without a terminal.
+RECAP_INSTRUCTIONS = (
+    "[recap] The user stepped away and is coming back to a screen full of tool "
+    "output. In two to four short lines, say where things stand: what was just "
+    "done, and the obvious next step. Answer in the language the user has been "
+    "writing in. No headings, no code blocks, no preamble, and do not offer to "
+    "help."
+)
+
+RECAP_QUESTION = "Where does this session stand right now?"
+
 
 class AsideError(PaimonError):
     """An aside finished without an answer in it."""

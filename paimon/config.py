@@ -89,6 +89,11 @@ class Config:
     # Auto-allow clearly read-only shell commands (ls, git status, ...) in
     # read/edit modes. A guardrail toggle, not a security boundary.
     safe_commands: bool = True
+    # Offer a short recap once a turn that did some work is followed by this
+    # many idle seconds. Seconds rather than a count so a test can turn the
+    # wait down; the TUI never writes these back, they are edited by hand.
+    recap_enabled: bool = True
+    recap_idle_seconds: float = 15.0
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
@@ -112,6 +117,8 @@ class Config:
             theme=data.get("theme"),
             show_reasoning=data.get("show_reasoning", cls.show_reasoning),
             safe_commands=data.get("safe_commands", cls.safe_commands),
+            recap_enabled=data.get("recap_enabled", cls.recap_enabled),
+            recap_idle_seconds=data.get("recap_idle_seconds", cls.recap_idle_seconds),
             compaction_enabled=compaction.get("enabled", cls.compaction_enabled),
             compaction_reserve_tokens=compaction.get("reserve_tokens", cls.compaction_reserve_tokens),
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),

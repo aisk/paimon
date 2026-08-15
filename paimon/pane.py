@@ -17,10 +17,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
-from textual.widgets import LoadingIndicator, Static
+from textual.widgets import LoadingIndicator, Static, TextArea
 from textual.widgets.markdown import MarkdownStream
 
-from . import lockfile, tools
+from . import aside, lockfile, tools
 from .agent import (
     Agent,
     AgentsNotice,
@@ -42,7 +42,15 @@ from .agent import (
 from .jobs import AgentJob, Outcome, Result, State, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint
-from .ui import AssistantMessage, ConfirmPanel, FoldedText, PromptInput, ToolResult, UserMessage
+from .ui import (
+    AssistantMessage,
+    ConfirmPanel,
+    FoldedText,
+    PromptInput,
+    RecapMessage,
+    ToolResult,
+    UserMessage,
+)
 
 # All three markers are East Asian Width "narrow", so the labels stay aligned on
 # terminals that render ambiguous-width glyphs double-wide. Finished work is
@@ -270,6 +278,11 @@ class SessionPane(Pane):
         # _parent: MessagePump owns that one, and assigning it takes the whole
         # pane out of the DOM.
         self._owner = parent
+        # Set before _adopt, which cancels whatever recap the pane had armed.
+        self._recap_timer = None
+        # Whether the turn now running has called a tool. A turn that only
+        # answered needs no recap: the answer is right there on the screen.
+        self._used_tools = False
         self._adopt(agent, job_id)
         self.mode = agent.mode
         self._resumed = resumed
@@ -350,6 +363,7 @@ class SessionPane(Pane):
         # Nothing more may reach the widgets: they go one message loop from
         # now, and mounting into them after that raises.
         self.job.sink = None
+        self._cancel_recap()
         self._retire_agent()
 
     def shutdown(self) -> None:
@@ -363,6 +377,7 @@ class SessionPane(Pane):
         if not self._pane_closing:
             self._pane_closing = True
             self.job.sink = None
+            self._cancel_recap()
             self.job.shutdown()
             self.agent.session.unlock()
 
@@ -430,6 +445,7 @@ class SessionPane(Pane):
 
     def _adopt(self, agent: Agent, job_id: str) -> None:
         """Take over an agent: this pane confirms for it and renders its job."""
+        self._cancel_recap()
         self.agent = agent
         agent.confirm = self._confirm
         agent.supervisor = self.supervisor
@@ -718,6 +734,7 @@ class SessionPane(Pane):
     @on(PromptInput.Submitted)
     def handle_submit(self, event: PromptInput.Submitted) -> None:
         text = event.text
+        self._cancel_recap()
         self.query_one(PromptInput).clear()
         if self.is_busy:
             self._queue.append(text)
@@ -748,7 +765,58 @@ class SessionPane(Pane):
         return texts
 
     def interrupt(self) -> None:
+        # Esc stops whatever this pane is doing on its own, a recap included.
+        self._cancel_recap()
         self.job.interrupt()
+
+    # ---- idle recap ---------------------------------------------------------
+
+    @on(TextArea.Changed, "#prompt")
+    def _typing_defers_recap(self, event: TextArea.Changed) -> None:
+        """Somebody is at the keyboard, so they have not gone anywhere yet."""
+        # Only while one is armed: at any other time typing means nothing here,
+        # and this runs on every keystroke.
+        if self._recap_timer is not None:
+            self._arm_recap()
+
+    def _arm_recap(self) -> None:
+        """Offer a recap if this pane is still the one being looked at when
+        the idle wait runs out."""
+        self._cancel_recap()
+        if not (self.config.recap_enabled and self._used_tools
+                and self.is_current and not self.is_busy):
+            return
+        self._recap_timer = self.set_timer(self.config.recap_idle_seconds, self._recap)
+
+    def _cancel_recap(self) -> None:
+        """Drop a pending recap, and any request already out for one."""
+        if self._recap_timer is not None:
+            self._recap_timer.stop()
+            self._recap_timer = None
+        # Not before the pane is mounted: _adopt runs from __init__, where
+        # there is no app to hold a worker yet.
+        if self.is_mounted:
+            self.workers.cancel_group(self, "recap")
+
+    @work(exclusive=True, group="recap")
+    async def _recap(self) -> None:
+        """Ask what the session looks like now, and show it under the log.
+
+        Read-only (see Agent.ask_aside): the recap is never part of the
+        conversation, so a resumed session does not replay it.
+        """
+        self._recap_timer = None
+        try:
+            text = "".join([delta async for delta in self.agent.ask_aside(
+                aside.RECAP_QUESTION, instructions=aside.RECAP_INSTRUCTIONS)])
+        except Exception:  # noqa: BLE001 — nobody asked for this, so nobody hears about it
+            return
+        # Collected before it is mounted rather than streamed in: cancelling
+        # then leaves no half-written block behind, and after a wait this long
+        # the extra second is nobody's problem.
+        if self._pane_closing or self.is_busy or not self.is_current or not text.strip():
+            return
+        self.query_one("#log", VerticalScroll).mount(RecapMessage(text.strip()))
 
     # ---- the job's two hooks ------------------------------------------------
 
@@ -781,6 +849,7 @@ class SessionPane(Pane):
             self._set_state(None)
             self._sync_statusbar(tokens=True)
         elif isinstance(ev, ToolStart):
+            self._used_tools = True
             self._set_state("tool")
         elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted,
                              ContextCompactionFailed, ModelRetry)):
@@ -802,6 +871,7 @@ class SessionPane(Pane):
     def _begin_turn(self, text: str) -> None:
         if not self._title:
             self._title = text
+        self._cancel_recap()
         self._status_state = None
         self._set_state("waiting")
         if self._status_timer is None:
@@ -809,6 +879,7 @@ class SessionPane(Pane):
             # must not restart the clock of the turn it landed in. The timer is
             # the marker: it only clears when a turn ends.
             self._turn_started = time.monotonic()
+            self._used_tools = False
             self._status_timer = self.set_interval(1, self._tick_status)
 
     async def _end_turn(self, result: Result) -> None:
@@ -834,18 +905,22 @@ class SessionPane(Pane):
             if result.finished:
                 self._complete_handoff(prompt)
                 return
-        if not self._queue:
-            return
-        text = "\n\n".join(self._queue)
-        self._queue.clear()
-        self._refresh_queued()
+        if self._queue:
+            text = "\n\n".join(self._queue)
+            self._queue.clear()
+            self._refresh_queued()
+            if result.finished:
+                self.job.submit(text)
+            else:
+                prompt_input = self.query_one(PromptInput)
+                draft = prompt_input.text
+                prompt_input.load_text(f"{text}\n{draft}" if draft else text)
+                prompt_input.move_cursor(prompt_input.document.end)
+        # Last, so a turn started just above (a queued message, a handoff) is
+        # already busy and arms nothing. Only for a turn that ran to its own
+        # end: recapping work the user just stopped is not what they asked for.
         if result.finished:
-            self.job.submit(text)
-        else:
-            prompt_input = self.query_one(PromptInput)
-            draft = prompt_input.text
-            prompt_input.load_text(f"{text}\n{draft}" if draft else text)
-            prompt_input.move_cursor(prompt_input.document.end)
+            self._arm_recap()
 
     def _complete_handoff(self, prompt: str) -> None:
         """Switch to a fresh session and submit the approved handoff prompt.
