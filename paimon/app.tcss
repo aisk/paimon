@@ -50,8 +50,13 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-disabled; }
 .todos { padding: 0 1; border-left: solid $primary 45%; }
-/* Unprompted, so it is the quietest block that still has a rule of its own. */
+/* Unprompted, so it is the quietest block that still has a rule of its own.
+   The Markdown widget's own default padding and $foreground would both win
+   over "quiet", so both are restated here. */
 .recap { padding: 0 1; border-left: solid $accent 60%; color: $text-muted; }
+/* A heading that slips past the recap instructions still belongs to the muted
+   block, and the breathing room the log gives blocks is enough for it. */
+.recap MarkdownHeader { color: $text-muted; margin: 0 0 1 0; text-style: b; }
 .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
 .user-message {
     width: 100%;

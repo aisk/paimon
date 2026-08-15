@@ -20,6 +20,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import RichLog, Static
+from textual.widgets.markdown import MarkdownBlock
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import aside, lockfile
 from paimon.agent import Agent, ReasoningDelta, ToolEnd, ToolStart
@@ -1548,7 +1549,13 @@ class RecapTest(AppTestCase):
 
     @staticmethod
     def _recap_text(app: PaimonApp) -> str:
-        return " ".join(str(widget.render()) for widget in app.query(RecapMessage))
+        # A recap is a Markdown container: its words live in the blocks it
+        # mounted, not in the container's own render.
+        return " ".join(
+            str(block.render())
+            for recap in app.query(RecapMessage)
+            for block in recap.query(MarkdownBlock)
+        )
 
     async def _finish_a_turn(self, app: PaimonApp, pilot) -> None:
         app.pane.handle_submit(PromptInput.Submitted("go"))

@@ -39,21 +39,20 @@ class AssistantMessage(Markdown):
         return f"**Paimon**\n\n{body}" if heading else body
 
 
-class RecapMessage(Static):
+class RecapMessage(Markdown):
     """A recap Paimon offered by itself, after the user went quiet.
 
     Nobody asked for it, so it is styled to be read past: a muted body behind
     an accent rule, distinct from the user's own block and from the plan panel,
-    which both carry a $primary rule.
+    which both carry a $primary rule. Rendered as markdown like an answer, so
+    whatever emphasis the model reached for comes out right; the app CSS keeps
+    every block inside it muted and quiet.
     """
 
     HEADER = "⟲ While you were away"
 
     def __init__(self, body: str) -> None:
-        super().__init__(
-            Content.from_markup("[b]$header[/]\n$body", header=self.HEADER, body=body),
-            classes="recap",
-        )
+        super().__init__(f"**{self.HEADER}**\n\n{body}", classes="recap")
 
 
 class FoldedText(Static):
