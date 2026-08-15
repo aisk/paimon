@@ -49,7 +49,7 @@ npx skills add aisk/paimon            # the same skill, via skills.sh
 
 ## Using Paimon as a library
 
-The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and holds it for the `with` block, and `agent.run()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes:
+The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and `agent.run()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes:
 
 ```python
 import asyncio
@@ -57,15 +57,15 @@ import asyncio
 from paimon.agent import Agent, TextDelta
 
 async def main():
-    with Agent.open(mode="edit") as agent:
-        async for event in agent.run("summarize the tests in this directory"):
-            if isinstance(event, TextDelta):
-                print(event.text, end="", flush=True)
+    agent = Agent.open(mode="edit")
+    async for event in agent.run("summarize the tests in this directory"):
+        if isinstance(event, TextDelta):
+            print(event.text, end="", flush=True)
 
 asyncio.run(main())
 ```
 
-`Agent.open()` also takes a working directory, an async `confirm` callback for permission prompts, and a `toolset` to hand the model fewer tools or tools of your own. It writes the same session files as the CLI, so a run started in code can be resumed later with `paimon -r`.
+`Agent.open()` also takes a working directory, an async `confirm` callback for permission prompts, and a `toolset` to hand the model fewer tools or tools of your own. An agent holds its session until it goes away; to give it back at a definite moment, call `close()` or use the agent as a context manager. It writes the same session files as the CLI, so a run started in code can be resumed later with `paimon -r`.
 
 ## Sessions
 

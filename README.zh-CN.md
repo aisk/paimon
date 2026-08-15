@@ -49,7 +49,7 @@ npx skills add aisk/paimon            # 通过 skills.sh 安装同一个 skill
 
 ## 当作库使用
 
-agent 循环本身是可以导入的，Python 程序不必经过 CLI 就能驱动它。`Agent.open()` 新建或恢复一个会话并在 `with` 块期间持有它，`agent.run()` 产出类型化的事件，每段文本、每次工具调用、每个回合结束各一个，调用方自己决定怎么渲染或过滤：
+agent 循环本身是可以导入的，Python 程序不必经过 CLI 就能驱动它。`Agent.open()` 新建或恢复一个会话，`agent.run()` 产出类型化的事件，每段文本、每次工具调用、每个回合结束各一个，调用方自己决定怎么渲染或过滤：
 
 ```python
 import asyncio
@@ -57,15 +57,15 @@ import asyncio
 from paimon.agent import Agent, TextDelta
 
 async def main():
-    with Agent.open(mode="edit") as agent:
-        async for event in agent.run("summarize the tests in this directory"):
-            if isinstance(event, TextDelta):
-                print(event.text, end="", flush=True)
+    agent = Agent.open(mode="edit")
+    async for event in agent.run("summarize the tests in this directory"):
+        if isinstance(event, TextDelta):
+            print(event.text, end="", flush=True)
 
 asyncio.run(main())
 ```
 
-`Agent.open()` 还接受工作目录、用于权限确认的异步 `confirm` 回调，以及 `toolset`，可以只给模型一部分工具，或者换成你自己的工具。它写的会话文件和 CLI 一样，所以代码里跑出来的会话之后可以用 `paimon -r` 恢复。
+`Agent.open()` 还接受工作目录、用于权限确认的异步 `confirm` 回调，以及 `toolset`，可以只给模型一部分工具，或者换成你自己的工具。agent 被回收时会交还会话，想在确定的时刻交还就调 `close()`，或者把它当上下文管理器用。它写的会话文件和 CLI 一样，所以代码里跑出来的会话之后可以用 `paimon -r` 恢复。
 
 ## 会话
 
