@@ -524,7 +524,7 @@ class PaimonApp(App):
                 parts.append(f"context ~{tokens / 1000:.1f}k tokens "
                              "(auto-compaction off: unknown context window)")
         if pane._tps is not None:
-            parts.append(f"{pane._tps:.0f} tps")
+            parts.append(f"{pane._tps:.0f} tokens per second")
         return parts
 
     @work(exclusive=True, group="statusbar")
