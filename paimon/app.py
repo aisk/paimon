@@ -67,6 +67,11 @@ class PaimonApp(App):
                 self.action_toggle_reasoning,
             ),
             SystemCommand(
+                "Toggle idle recap",
+                "Offer a short recap after a turn once you go quiet (it costs an extra request)",
+                self.action_toggle_recap,
+            ),
+            SystemCommand(
                 "Compact context",
                 "Summarize the earlier conversation now instead of waiting for the context to fill",
                 self.action_compact,
@@ -392,6 +397,19 @@ class PaimonApp(App):
         self.config.save(show_reasoning=not self.config.show_reasoning)
         state = "streamed live" if self.config.show_reasoning else "folded"
         self.pane.notice(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
+
+    def action_toggle_recap(self) -> None:
+        """Turn the after-idle recap off (or back on), for every pane.
+
+        Config is process-wide, so one switch covers all panes; turning it off
+        also drops recaps already armed, which check the flag only when armed.
+        """
+        self.config.save(recap_enabled=not self.config.recap_enabled)
+        if not self.config.recap_enabled:
+            for pane in self.sessions:
+                pane._cancel_recap()
+        state = "on" if self.config.recap_enabled else "off"
+        self.pane.notice(Content.from_markup(f"[$text-muted]Idle recap: {state}[/]"))
 
     # ---- login --------------------------------------------------------------
 

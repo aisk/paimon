@@ -132,6 +132,7 @@ class Config:
         api_key: object = UNSET,
         theme: object = UNSET,
         show_reasoning: object = UNSET,
+        recap_enabled: object = UNSET,
     ) -> None:
         """Persist the fields passed to config.json and update self.
 
@@ -144,6 +145,7 @@ class Config:
             ("model", model), ("api_base", api_base), ("api_key", api_key),
             ("theme", theme),
             ("show_reasoning", show_reasoning),
+            ("recap_enabled", recap_enabled),
         ) if value is not UNSET]
         for key, value in passed:
             if value is None or value == "":

@@ -519,6 +519,24 @@ class ReasoningDisplayTest(AppTestCase):
             app.action_toggle_reasoning()
             self.assertFalse(Config.load().show_reasoning, "persisted to config.json")
 
+    async def test_toggle_recap_flips_persists_and_drops_an_armed_recap(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            self.assertTrue(app.config.recap_enabled, "on by default")
+            app.pane._used_tools = True
+            app.pane._arm_recap()
+            self.assertIsNotNone(app.pane._recap_timer)
+            app.action_toggle_recap()
+            await pilot.pause()
+            self.assertFalse(Config.load().recap_enabled)
+            self.assertFalse(app.config.recap_enabled)
+            self.assertIsNone(app.pane._recap_timer, "an armed recap is dropped")
+            app.action_toggle_recap()
+            await pilot.pause()
+            self.assertTrue(Config.load().recap_enabled)
+            # Turning it back on arms nothing by itself: the next turn does.
+            self.assertIsNone(app.pane._recap_timer)
+
 
 class QueueTest(AppTestCase):
     async def test_queue_flush_and_cancel(self) -> None:

@@ -65,6 +65,12 @@ class ConfigProfileTest(unittest.TestCase):
         config.save(show_reasoning=False)
         self.assertFalse(Config.load().show_reasoning)
 
+    def test_save_persists_recap_enabled_false(self) -> None:
+        config = Config.load()
+        config.save(recap_enabled=False)
+        self.assertFalse(config.recap_enabled)
+        self.assertFalse(Config.load().recap_enabled)
+
     def test_load_records_the_profile_on_the_instance(self) -> None:
         self.assertEqual(Config.load().profile, "default")
         self.assertEqual(Config.load("work").profile, "work")
