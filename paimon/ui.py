@@ -256,7 +256,7 @@ class ConfirmPanel(Vertical, can_focus=True):
 
     def _diff_width(self) -> int:
         # pane margins + panel padding + border eat ~10 cells. Measured on the
-        # host pane, which is narrower than the terminal once tabs are docked.
+        # host pane rather than the app: the pane carries the side margins.
         host = self.parent if isinstance(self.parent, Widget) else self.app
         return max(60, host.size.width - 10)
 

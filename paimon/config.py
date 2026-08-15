@@ -82,8 +82,6 @@ class Config:
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     theme: Optional[str] = None
-    # Where the pane tab strip sits: "top", "left" or "right".
-    tab_dock: str = "top"
     # Stream reasoning expanded in the TUI (it folds once the block ends) and
     # print it in headless mode. When off the TUI folds it behind a line-count
     # stub instead; either way it is still generated, persisted and sent back.
@@ -112,7 +110,6 @@ class Config:
             api_base=data.get("api_base"),
             api_key=data.get("api_key"),
             theme=data.get("theme"),
-            tab_dock=data.get("tab_dock", cls.tab_dock),
             show_reasoning=data.get("show_reasoning", cls.show_reasoning),
             safe_commands=data.get("safe_commands", cls.safe_commands),
             compaction_enabled=compaction.get("enabled", cls.compaction_enabled),
@@ -127,7 +124,6 @@ class Config:
         api_base: object = UNSET,
         api_key: object = UNSET,
         theme: object = UNSET,
-        tab_dock: object = UNSET,
         show_reasoning: object = UNSET,
     ) -> None:
         """Persist the fields passed to config.json and update self.
@@ -139,7 +135,7 @@ class Config:
         data = _load_file_config(path)
         passed = [(key, value) for key, value in (
             ("model", model), ("api_base", api_base), ("api_key", api_key),
-            ("theme", theme), ("tab_dock", tab_dock),
+            ("theme", theme),
             ("show_reasoning", show_reasoning),
         ) if value is not UNSET]
         for key, value in passed:

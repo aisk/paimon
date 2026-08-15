@@ -20,7 +20,7 @@ from .pane import Pane, SessionPane
 from .session import SessionError
 from .jobs import CommandJob, Job
 from .supervisor import Supervisor, SupervisorError
-from .tabs import DOCKS, PaneTabs
+from .tabs import PaneTabs
 from .taskpane import TaskPane
 
 # Every pane holds a live agent and its context, or a live process, so panes
@@ -79,8 +79,6 @@ class PaimonApp(App):
             SystemCommand("New pane", "Open another session alongside this one",
                           self.action_new_pane),
             SystemCommand("Close pane", "Close this session's pane", self.action_close_pane),
-            SystemCommand("Move tabs", "Dock the pane tabs at the top, the left or the right",
-                          self.action_move_tabs),
         ]
 
     def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False) -> None:
@@ -97,7 +95,7 @@ class PaimonApp(App):
         self._current = pane
         self._next_pane = 2
         self._switcher = ContentSwitcher(pane, initial=pane.id, id="panes")
-        self._tabs = PaneTabs(self.config.tab_dock)
+        self._tabs = PaneTabs()
         self._pick_session = pick_session
         if self.config.theme in self.available_themes:
             self.theme = self.config.theme
@@ -136,12 +134,11 @@ class PaimonApp(App):
     def _sync_panes(self) -> None:
         """Redraw everything that shows more than one pane at a time."""
         self._tabs.sync(self._panes, self._current)
-        # A visible top strip ends in a rule, which is all the separation the
-        # conversation needs; the pane drops its own top margin so the tabs
-        # cost two rows rather than four.
+        # A visible strip opens with a rule, which is all the separation the
+        # status bar needs; the bar drops its own bottom margin so the tabs
+        # cost three rows rather than four.
         if self.is_mounted:
-            self.screen.set_class(
-                self._tabs.display and self._tabs.dock_side == "top", "-tabs-top")
+            self.screen.set_class(self._tabs.display, "-tabs-bottom")
         self.refresh_statusbar()
 
     def _switch_to(self, pane: Pane) -> None:
@@ -321,19 +318,6 @@ class PaimonApp(App):
             if pane.needs_confirm:
                 self._switch_to(pane)
                 return
-
-    @work(group="picker")
-    async def action_move_tabs(self) -> None:
-        choice = await self.push_screen_wait(
-            PickerScreen("Dock the pane tabs", [dock.capitalize() for dock in DOCKS]))
-        if not choice:
-            self.pane._focus_input()
-            return
-        dock = choice.lower()
-        self._tabs.set_dock(dock)
-        self._sync_panes()
-        self.config.save(tab_dock=dock)
-        self.pane._focus_input()
 
     def _watch_theme(self, theme_name: str) -> None:
         super()._watch_theme(theme_name)

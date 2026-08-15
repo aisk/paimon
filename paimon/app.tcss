@@ -6,33 +6,25 @@ SessionPane { height: 1fr; margin: 1 2 0 2; }
 
 /* ---- pane tabs ---- */
 
-/* Orientation is the dock: a top strip is a row of tabs, a side strip is a
-   column of them. Hidden entirely while a single pane is open. The tabs draw
-   their own frames (paimon/tabs.py), so there are no borders here, only the
-   room to draw in. The side width must match tabs.SIDE_WIDTH. */
-#pane-tabs.-top { dock: top; layout: horizontal; height: 3; padding: 0 2; }
-#pane-tabs.-left { dock: left; layout: vertical; width: 28; }
-#pane-tabs.-right { dock: right; layout: vertical; width: 28; }
-#pane-tabs-fill { color: $text-muted; }
-#pane-tabs.-top #pane-tabs-fill { width: 1fr; height: 3; }
-#pane-tabs.-left #pane-tabs-fill, #pane-tabs.-right #pane-tabs-fill {
-    width: 100%;
-    height: 1fr;
-}
+/* A row of tabs along the bottom edge, hidden entirely while a single pane is
+   open. The tabs draw their own frames (paimon/tabs.py), so there are no
+   borders here, only the room to draw in. */
+#pane-tabs { dock: bottom; layout: horizontal; height: 3; padding: 0 2; }
+#pane-tabs-fill { width: 1fr; height: 3; color: $text-muted; }
 .pane-tab {
+    width: auto;
     height: auto;
     color: $text-muted;
     text-wrap: nowrap;
 }
-#pane-tabs.-top .pane-tab { width: auto; }
-#pane-tabs.-left .pane-tab, #pane-tabs.-right .pane-tab { width: 100%; }
 .pane-tab:hover { color: $text; }
 .pane-tab.-attention { color: $warning; }
 .pane-tab.-active { color: $text; text-style: bold; }
 
-/* A top strip already ends in a rule, so the pane's own breathing room above
-   would only push the conversation down a row for nothing. */
-Screen.-tabs-top SessionPane { margin-top: 0; }
+/* The strip opens with a rule, so the status bar's own breathing room below
+   would only hold the two apart for nothing. Spelled in full: a single-edge
+   margin rule resets the other three rather than merging with the shorthand. */
+Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 
 * {
     scrollbar-size-vertical: 1;

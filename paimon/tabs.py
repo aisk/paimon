@@ -1,10 +1,14 @@
-"""The strip listing the open panes, docked at the top, left or right.
+"""The strip listing the open panes, docked at the bottom of the screen.
 
-Written by hand rather than with ``Tabs``/``TabbedContent``: that widget's
-underline and its left/right bindings are horizontal by construction, and it
-prefixes every tab ID, which a mix of session and background-task panes would
-have to undo. The strip here is a plain container of ``PaneTab`` widgets whose
-orientation is a CSS class.
+Bottom rather than top: terminals and multiplexers put their own tab bars
+along the top edge, and two rows of tabs stacked on each other are more
+confusing than either alone. The bottom also sits next to the prompt, which is
+where the eye already is when panes are switched.
+
+Written by hand rather than with ``Tabs``/``TabbedContent``: that widget brings
+an underline and a set of bindings this strip does not want, and it prefixes
+every tab ID, which a mix of session and background-task panes would have to
+undo.
 
 Each tab draws its own frame instead of leaning on a CSS border: the line
 separating the strip from the conversation has to run unbroken across the whole
@@ -19,9 +23,6 @@ from textual.content import Content
 from textual.message import Message
 from textual.widgets import Static
 
-# Where the strip can sit. The first is the default.
-DOCKS = ("top", "left", "right")
-
 # Textual has no spinner widget (LoadingIndicator fills its whole area), so a
 # running tab cycles one narrow glyph on the strip's own interval.
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -34,15 +35,11 @@ _SPINNER_INTERVAL = 0.12
 _IDLE = " "
 _ATTENTION = "!"
 
-# A top tab's interior, in cells. Tabs share the strip evenly between these
-# bounds: the maximum keeps two panes from each taking half the terminal, the
-# minimum (index plus marker, no title) is what lets all eight still fit.
-_TOP_MAX = 30
-_TOP_MIN = 6
-
-# Columns a side strip occupies, separator column included. Must match the
-# width app.tcss gives #pane-tabs.-left / .-right.
-SIDE_WIDTH = 28
+# A tab's interior, in cells. Tabs share the strip evenly between these bounds:
+# the maximum keeps two panes from each taking half the terminal, the minimum
+# (index plus marker, no title) is what lets all eight still fit.
+_TAB_MAX = 30
+_TAB_MIN = 6
 
 
 def _fit(text: str, width: int) -> str:
@@ -67,41 +64,18 @@ class PaneTab(Static):
     def on_click(self) -> None:
         self.post_message(PaneTabs.Selected(self.pane))
 
-    def draw(self, dock: str, label: str, marker: str, active: bool, width: int) -> None:
-        """Render this tab for the dock it currently sits in."""
-        if dock == "top":
-            content = self._draw_top(label, marker, active, width)
-        else:
-            content = self._draw_side(dock, label, marker, active)
-        self.update(content)
-
-    def _draw_top(self, label: str, marker: str, active: bool, width: int) -> Content:
+    def draw(self, label: str, marker: str, active: bool, width: int) -> None:
+        """Render this tab: the rule on top, the frame opening downwards."""
         cell = _cell(label, marker, width)
         if active:
-            return Content.from_markup(
-                "[$primary]╭$bar╮[/]\n[$primary]│[/]$cell[$primary]│[/]\n[$primary]┴$bar┴[/]",
-                bar="─" * width, cell=cell)
+            self.update(Content.from_markup(
+                "[$primary]┬$bar┬[/]\n[$primary]│[/]$cell[$primary]│[/]\n[$primary]╰$bar╯[/]",
+                bar="─" * width, cell=cell))
+            return
         # The rule carries no markup style: $text-muted is an "auto" colour and
         # only resolves against the background when the stylesheet applies it.
         rule = "─" * (width + 2)
-        return Content(f"{' ' * (width + 2)}\n {cell} \n{rule}")
-
-    def _draw_side(self, dock: str, label: str, marker: str, active: bool) -> Content:
-        # The separator is the strip's own edge column, so the frame is flush
-        # against it and the two meet in a junction glyph rather than crossing.
-        cell = _cell(label, marker, SIDE_WIDTH - 2)
-        bar = "─" * (SIDE_WIDTH - 2)
-        if dock == "left":
-            if active:
-                return Content.from_markup(
-                    "[$primary]╭$bar┤[/]\n[$primary]│[/]$cell[$primary]│[/]\n[$primary]╰$bar┤[/]",
-                    bar=bar, cell=cell)
-            return Content(f" {cell}│")
-        if active:
-            return Content.from_markup(
-                "[$primary]├$bar╮[/]\n[$primary]│[/]$cell[$primary]│[/]\n[$primary]├$bar╯[/]",
-                bar=bar, cell=cell)
-        return Content(f"│{cell} ")
+        self.update(Content(f"{rule}\n {cell} \n{' ' * (width + 2)}"))
 
 
 class _StripFill(Static):
@@ -109,7 +83,6 @@ class _StripFill(Static):
 
     def __init__(self) -> None:
         super().__init__(id="pane-tabs-fill")
-        self.dock_side = DOCKS[0]
 
     def on_resize(self) -> None:
         self.refresh()
@@ -118,11 +91,7 @@ class _StripFill(Static):
         width, height = self.size.width, self.size.height
         if width <= 0 or height <= 0:
             return Content("")
-        if self.dock_side == "top":
-            return Content(f"\n\n{'─' * width}")
-        pad = " " * (width - 1)
-        row = f"{pad}│" if self.dock_side == "left" else f"│{pad}"
-        return Content("\n".join([row] * height))
+        return Content(f"{'─' * width}\n\n")
 
 
 class PaneTabs(Container):
@@ -139,15 +108,13 @@ class PaneTabs(Container):
             self.pane = pane
             super().__init__()
 
-    def __init__(self, dock: str = DOCKS[0]) -> None:
+    def __init__(self) -> None:
         super().__init__(id="pane-tabs")
         self._panes: list = []
         self._current = None
         self._frame = 0
         self._timer = None
         self._fill = _StripFill()
-        self._dock = DOCKS[0]
-        self.set_dock(dock)
 
     def compose(self):
         yield self._fill
@@ -155,26 +122,11 @@ class PaneTabs(Container):
     def on_mount(self) -> None:
         self._timer = self.set_interval(_SPINNER_INTERVAL, self._tick, pause=True)
 
-    @property
-    def dock_side(self) -> str:
-        """Which edge the strip is on. Named to avoid Widget.dock (the style)."""
-        return self._dock
-
-    def set_dock(self, dock: str) -> None:
-        """Move the strip. Orientation and size are what the class selects."""
-        if dock not in DOCKS:
-            dock = DOCKS[0]
-        self._dock = dock
-        self._fill.dock_side = dock
-        self.set_classes([f"-{dock}"])
-        self._redraw()
-        self._fill.refresh()
-
     def sync(self, panes: list, current) -> None:
         """Mirror the pane list, then redraw every label.
 
         The strip is hidden while a single pane is open: one tab says nothing
-        and would cost a row (or a column) of the conversation.
+        and would cost three rows of the conversation.
         """
         self.display = len(panes) > 1
         keep = set(panes)
@@ -206,8 +158,8 @@ class PaneTabs(Container):
     def on_resize(self) -> None:
         self._redraw()
 
-    def _top_width(self) -> int:
-        """How wide each top tab gets: an even share of the strip, bounded.
+    def _tab_width(self) -> int:
+        """How wide each tab gets: an even share of the strip, bounded.
 
         Tabs are clipped rather than scrolled, and the pane the user just
         opened is the last one, so tabs that refuse to shrink would hide the
@@ -215,13 +167,13 @@ class PaneTabs(Container):
         """
         available = self.container_size.width
         if not available or not self._panes:
-            return _TOP_MAX
+            return _TAB_MAX
         # Two of every tab's columns go to its frame, not to the interior.
         share = available // len(self._panes) - 2
-        return max(_TOP_MIN, min(_TOP_MAX, share))
+        return max(_TAB_MIN, min(_TAB_MAX, share))
 
     def _redraw(self) -> None:
-        width = self._top_width()
+        width = self._tab_width()
         # Iterate the mounted tabs, not the pane list: mounting is
         # asynchronous, so a pane added this frame has no tab yet.
         for tab in self.query(PaneTab):
@@ -232,8 +184,7 @@ class PaneTabs(Container):
             active = pane is self._current
             tab.set_class(active, "-active")
             tab.set_class(pane.needs_confirm, "-attention")
-            tab.draw(self._dock, f"{index} {pane.tab_title}", self._marker(pane),
-                     active, width)
+            tab.draw(f"{index} {pane.tab_title}", self._marker(pane), active, width)
 
     def _marker(self, pane) -> str:
         if pane.needs_confirm:

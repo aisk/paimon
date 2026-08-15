@@ -827,7 +827,7 @@ class MultiPaneTest(AppTestCase):
         """A tab's drawn text with its frame and padding taken back out."""
         tab = app.query_one(f"#tab-{pane.id}", PaneTab)
         lines = str(tab.render()).splitlines()
-        return " ".join(line.strip("╭╮╰╯├┤┴│─ ") for line in lines).strip()
+        return " ".join(line.strip("╭╮╰╯┬┴│─ ") for line in lines).strip()
 
     async def test_new_pane_opens_a_second_session_and_shows_the_strip(self) -> None:
         app = self.make_app()
@@ -996,43 +996,6 @@ class PaneAttentionTest(AppTestCase):
             self.assertIs(app.pane, current)
 
 
-class TabDockTest(AppTestCase):
-    async def test_move_tabs_redocks_the_strip_and_remembers_it(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            self.assertTrue(app._tabs.has_class("-top"))
-            app.action_move_tabs()
-            await pilot.pause()
-            self.assertIsInstance(app.screen, PickerScreen)
-            app.screen.dismiss("Left")
-            await pilot.pause()
-
-            self.assertTrue(app._tabs.has_class("-left"))
-            self.assertFalse(app._tabs.has_class("-top"))
-            self.assertEqual(Config.load().tab_dock, "left")
-
-    async def test_a_saved_dock_is_applied_on_start(self) -> None:
-        app = self.make_app(config=Config(model="test-model", tab_dock="right"))
-        async with app.run_test():
-            self.assertTrue(app._tabs.has_class("-right"))
-
-    async def test_only_a_visible_top_strip_takes_the_panes_top_margin(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            self.assertFalse(app.screen.has_class("-tabs-top"),
-                             "one pane means no strip and no rule to sit under")
-            await pilot.press("ctrl+t")
-            await pilot.pause()
-            self.assertTrue(app.screen.has_class("-tabs-top"))
-
-            app.action_move_tabs()
-            await pilot.pause()
-            app.screen.dismiss("Left")
-            await pilot.pause()
-            self.assertFalse(app.screen.has_class("-tabs-top"),
-                             "a side strip leaves the margin alone")
-
-
 class TabDrawingTest(AppTestCase):
     """The frames the tabs draw for themselves."""
 
@@ -1049,23 +1012,34 @@ class TabDrawingTest(AppTestCase):
             first, second = await self._strip(app, pilot)
             self.assertEqual(len(first), 3)
             self.assertEqual(len(second), 3)
-            # The second pane is the current one.
-            self.assertTrue(second[0].startswith("╭") and second[0].endswith("╮"))
-            self.assertTrue(second[2].startswith("┴") and second[2].endswith("┴"))
-            self.assertEqual(first[2], "─" * len(first[2]),
+            # The second pane is the current one. Its frame opens downwards
+            # from the rule the idle tabs carry.
+            self.assertTrue(second[0].startswith("┬") and second[0].endswith("┬"))
+            self.assertTrue(second[2].startswith("╰") and second[2].endswith("╯"))
+            self.assertEqual(first[0], "─" * len(first[0]),
                              "an idle tab contributes plain rule")
-            self.assertEqual(len(first[2]), len(second[2]),
-                             "every top tab is the same width, so the rule lines up")
+            self.assertEqual(len(first[0]), len(second[0]),
+                             "every tab is the same width, so the rule lines up")
 
-    async def test_side_tabs_frame_only_the_current_pane(self) -> None:
-        app = self.make_app(config=Config(model="test-model", tab_dock="left"))
+    async def test_only_a_visible_strip_takes_the_status_bars_bottom_margin(self) -> None:
+        app = self.make_app()
         async with app.run_test() as pilot:
-            first, second = await self._strip(app, pilot)
-            self.assertEqual(len(first), 1, "an idle side tab is a single row")
-            self.assertEqual([len(row) for row in second], [28, 28, 28])
-            self.assertTrue(second[0].startswith("╭") and second[0].endswith("┤"))
-            self.assertTrue(second[2].startswith("╰") and second[2].endswith("┤"))
-            self.assertTrue(first[0].endswith("│"), "the separator runs past every tab")
+            bar = app.query_one("#statusbar", Static)
+            self.assertFalse(app.screen.has_class("-tabs-bottom"),
+                             "one pane means no strip and no rule to sit over")
+            self.assertEqual((bar.styles.margin.bottom, bar.styles.margin.left), (1, 2))
+
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertTrue(app.screen.has_class("-tabs-bottom"))
+            # The side margins have to survive: they are what lines the bar up
+            # with the prompt above it and the strip's rule below.
+            self.assertEqual((bar.styles.margin.bottom, bar.styles.margin.left), (0, 2))
+
+            await pilot.press("ctrl+w")
+            await pilot.pause()
+            self.assertFalse(app.screen.has_class("-tabs-bottom"))
+            self.assertEqual((bar.styles.margin.bottom, bar.styles.margin.left), (1, 2))
 
     async def test_the_fill_stays_last_so_the_rule_reaches_the_edge(self) -> None:
         app = self.make_app()
