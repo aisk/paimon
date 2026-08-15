@@ -20,6 +20,12 @@ from typing import Optional
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.providers import infer_provider_class
 
+from .errors import PaimonError
+
+
+class NoModelError(PaimonError):
+    """No model is configured, so nothing can be asked of one."""
+
 
 @cache
 def user_agent() -> str:

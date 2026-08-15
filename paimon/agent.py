@@ -32,7 +32,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import aside, compaction, retry, tools
 from .config import Config
-from .llm import build_model, user_agent
+from .llm import NoModelError, build_model, user_agent
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .session import (
@@ -371,7 +371,7 @@ class Agent:
         """The configured model, rebuilt when login changes the config."""
         name = self.model_name
         if not name:
-            raise RuntimeError("No model configured; log in first")
+            raise NoModelError("No model configured; log in first")
         key = (name, self.config.api_base, self.config.api_key)
         if self._cached_model is None or self._cached_model[0] != key:
             self._cached_model = (key, build_model(*key))

@@ -19,11 +19,12 @@ from dataclasses import dataclass
 from typing import Optional
 from uuid import uuid4
 
+from .errors import PaimonError
 from .jobs import Job, State
 from .tools import DEFAULT_WAIT_TIMEOUT, MAX_WAIT_TIMEOUT, start_background
 
 
-class SupervisorError(RuntimeError):
+class SupervisorError(PaimonError):
     """A job could not be started. Reported to the model, not raised at it."""
 
 

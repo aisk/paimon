@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest, UserPromptPart
 
 from . import lockfile
+from .errors import PaimonError
 
 # A compaction checkpoint is a synthetic user message. Its shape belongs here
 # rather than to whatever decides *when* to compact: replaying a log has to
@@ -27,7 +28,7 @@ SUMMARY_PREFIX = "The conversation before this point was compacted into this che
 AGENTS_PREFIX = "[agents] "
 
 
-class SessionError(RuntimeError):
+class SessionError(PaimonError):
     """A session cannot be opened. Callers catch this to report and move on."""
 
 

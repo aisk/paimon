@@ -357,7 +357,12 @@ def _install_interrupt(task: "asyncio.Task") -> None:
 
 
 class _ToolBudgetExceeded(Exception):
-    """The turn asked for more tool calls than --max-tool-calls allows."""
+    """The turn asked for more tool calls than --max-tool-calls allows.
+
+    Control flow inside this module rather than a failure it reports, so
+    it stays off PaimonError: a caller catching that must not swallow the
+    signal that ends the turn here.
+    """
 
 
 async def _run_turn(agent: Agent, renderer, text: str,

@@ -25,9 +25,14 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
+from .errors import PaimonError
 from .llm import user_agent
 from .model_windows import CONTEXT_WINDOWS
 from .session import is_agents_message, summary_message
+
+
+class CompactionError(PaimonError):
+    """A checkpoint could not be made. The context is left as it was."""
 
 
 _TOOL_RESULT_LIMIT = 2_000
@@ -232,7 +237,7 @@ Use these sections:
         )
     summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))
     if not summary.strip():
-        raise RuntimeError("Context compaction returned an empty summary")
+        raise CompactionError("Context compaction returned an empty summary")
     result = CompactionResult(summary.strip(), kept_messages, tokens_before, tokens_after=0)
     result.tokens_after = count_tokens(result.messages, tool_schemas, system_prompt)
     return result

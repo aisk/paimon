@@ -118,7 +118,7 @@ class AgentSystemPromptTest(unittest.TestCase):
             session = make_session(cwd)
 
             with patch("paimon.agent.build_system_prompt") as generate:
-                with self.assertRaisesRegex(RuntimeError, "persisted system prompt"):
+                with self.assertRaisesRegex(SessionIncompleteError, "persisted system prompt"):
                     Agent.open(cwd=cwd, session=session, config=_config())
 
             generate.assert_not_called()
