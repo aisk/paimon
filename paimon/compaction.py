@@ -26,6 +26,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestParameters
 
 from .llm import user_agent
+from .model_windows import CONTEXT_WINDOWS
 from .session import is_agents_message, summary_message
 
 
@@ -65,10 +66,11 @@ class CompactionResult:
         return [summary_message(self.summary), *self.kept_messages]
 
 
-# Input-window sizes by model-name fragment, first match wins, so the more
-# specific entry goes first. Deliberately coarse and conservative: a value
-# that is too small only compacts early, while none at all would silently
-# disable the compaction safety net (the config override covers the rest).
+# Fallback window sizes by model-name fragment, consulted only when the
+# generated CONTEXT_WINDOWS table has no entry for the model. First match wins,
+# so the more specific fragment goes first. Deliberately coarse and
+# conservative: a value that is too small only compacts early, while none at
+# all would silently disable the compaction safety net.
 _KNOWN_WINDOWS: tuple[tuple[str, int], ...] = (
     ("gpt-4.1", 1_000_000),
     ("gpt-4o", 128_000),
@@ -93,14 +95,23 @@ _KNOWN_WINDOWS: tuple[tuple[str, int], ...] = (
 def context_window(model: Optional[str], override: Optional[int] = None) -> Optional[int]:
     """The window to compact against: the override, else a built-in estimate.
 
-    None means the window is unknown, which disables auto-compaction; callers
-    surface that state rather than let it look like compaction is working.
+    The estimate first looks the model up in the generated table, which knows
+    thousands of models exactly, and falls back to the coarse fragment table
+    for anything it has never heard of.  None means the window is unknown,
+    which disables auto-compaction; callers surface that state rather than let
+    it look like compaction is working.
     """
     if override and override > 0:
         return override
     if not model:
         return None
     name = model.lower()
+    # "zai:glm-4.6" is looked up as "glm-4.6", but the qualified name is tried
+    # first because a few catalogue entries carry a namespace of their own.
+    for candidate in (name, name.partition(":")[2], name.partition("/")[2]):
+        window = CONTEXT_WINDOWS.get(candidate)
+        if window:
+            return window
     for fragment, window in _KNOWN_WINDOWS:
         if fragment in name:
             return window

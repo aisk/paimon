@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
 )
 
 from paimon import compaction
+from paimon.model_windows import CONTEXT_WINDOWS
 from paimon.session import Session, agents_message, is_summary_message
 
 
@@ -25,16 +26,32 @@ def _assistant(content: str) -> ModelResponse:
 
 
 class ContextWindowTest(unittest.TestCase):
-    def test_override_beats_the_table(self) -> None:
+    """Windows come from the generated table, with the fragments as a backstop."""
+
+    def test_override_beats_the_tables(self) -> None:
         self.assertEqual(compaction.context_window("zai:glm-4.6", 42_000), 42_000)
 
-    def test_known_model_families_are_inferred(self) -> None:
-        self.assertEqual(compaction.context_window("zai:glm-4.6"), 200_000)
-        self.assertEqual(compaction.context_window("zai:glm-4.5"), 128_000)
-        self.assertEqual(compaction.context_window("anthropic:claude-sonnet-4-5"), 200_000)
-        self.assertEqual(compaction.context_window("bedrock:us.anthropic.claude-opus-4-1"), 200_000)
-        self.assertEqual(compaction.context_window("openai:gpt-5-mini"), 272_000)
-        self.assertEqual(compaction.context_window("deepseek:deepseek-chat"), 128_000)
+    def test_the_generated_table_answers_by_name(self) -> None:
+        # Asserted against the table rather than a literal, so regenerating it
+        # against a newer catalogue does not break the test.
+        self.assertEqual(compaction.context_window("zai:glm-4.6"),
+                         CONTEXT_WINDOWS["glm-4.6"])
+        self.assertEqual(compaction.context_window("anthropic:claude-sonnet-4-5"),
+                         CONTEXT_WINDOWS["claude-sonnet-4-5"])
+        # Everything past the provider prefix is looked up as one name, so
+        # Bedrock's region prefix and its trailing ":0" revision survive.
+        name = "us.anthropic.claude-opus-4-1-20250805-v1:0"
+        self.assertEqual(compaction.context_window(f"bedrock:{name}"), CONTEXT_WINDOWS[name])
+
+    def test_an_exact_name_beats_its_family_fragment(self) -> None:
+        # The 'glm' fragment would coarsely answer 128k for every GLM.
+        self.assertGreater(compaction.context_window("zai:glm-4.6"), 128_000)
+
+    def test_models_the_table_never_heard_of_fall_back_to_fragments(self) -> None:
+        self.assertNotIn("glm-9-experimental", CONTEXT_WINDOWS)
+        self.assertEqual(compaction.context_window("zai:glm-9-experimental"), 128_000)
+        self.assertNotIn("claude-unreleased-9", CONTEXT_WINDOWS)
+        self.assertEqual(compaction.context_window("anthropic:claude-unreleased-9"), 200_000)
 
     def test_unknown_model_and_no_override_disable_compaction(self) -> None:
         self.assertIsNone(compaction.context_window("acme:mystery-1"))
