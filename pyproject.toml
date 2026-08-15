@@ -1,9 +1,9 @@
 [project]
 name = "paimon"
-version = "0.2.1"
 description = "A minimal code agent built on pydantic-ai + textual"
 readme = "README.md"
 requires-python = ">=3.10"
+dynamic = ["version"]
 dependencies = [
     "pydantic-ai-slim[openai,anthropic]>=2.17.0",
     "textual>=8.2.7",
@@ -14,8 +14,10 @@ dependencies = [
 paimon = "paimon.cli:main"
 
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
 
 [tool.setuptools]
 packages = ["paimon"]

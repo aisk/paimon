@@ -1,0 +1,7 @@
+prune tests
+prune docs
+prune scripts
+prune .github
+exclude .gitignore
+exclude .python-version
+exclude uv.lock

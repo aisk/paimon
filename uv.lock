@@ -1057,7 +1057,6 @@ wheels = [
 
 [[package]]
 name = "paimon"
-version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic-ai-slim", extra = ["anthropic", "openai"] },
@@ -1073,7 +1072,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pydantic-ai-slim", extras = ["openai", "anthropic"], specifier = ">=2.17.0" },
+    { name = "pydantic-ai-slim", extras = ["anthropic", "openai"], specifier = ">=2.17.0" },
     { name = "textual", specifier = ">=8.2.7" },
     { name = "textual-serve", specifier = ">=1.1.3" },
 ]
