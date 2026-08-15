@@ -22,7 +22,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import RichLog, Static
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import aside, lockfile
-from paimon.agent import Agent, ReasoningDelta
+from paimon.agent import Agent, ReasoningDelta, ToolEnd, ToolStart
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.jobs import AgentJob, Outcome, Result
 from paimon.pane import SessionPane, _EventRenderer, _session_label
@@ -36,6 +36,7 @@ from paimon.ui import (
     ConfirmPanel,
     PromptInput,
     RecapMessage,
+    ToolCall,
     ToolResult,
     UserMessage,
 )
@@ -476,6 +477,46 @@ class EventCoverageTest(AppTestCase):
             await renderer.close()
 
 
+class ToolRenderingTest(AppTestCase):
+    async def test_multiline_command_folds_to_its_first_line(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app.pane)
+            await renderer.handle(ToolStart("c1", "shell", {"command": "echo one\necho two"}))
+            await pilot.pause()
+            widget = app.query(ToolCall).first()
+            body = str(widget.render())
+            self.assertIn("echo one", body)
+            self.assertNotIn("echo two", body)
+            self.assertIn("+1 lines", body)
+            widget.on_click()
+            body = str(widget.render())
+            self.assertIn("echo two", body)
+            self.assertIn("click to collapse", body)
+
+    async def test_single_line_command_has_no_fold(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app.pane)
+            await renderer.handle(ToolStart("c1", "shell", {"command": "ls"}))
+            await pilot.pause()
+            body = str(app.query(ToolCall).first().render())
+            self.assertIn("ls", body)
+            self.assertNotIn("click to expand", body)
+
+    async def test_folded_result_names_its_call(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app.pane)
+            await renderer.handle(ToolStart("c1", "shell", {"command": "ls src"}))
+            await renderer.handle(ToolEnd("c1", "shell", "a.py\nb.py\nc.py"))
+            await pilot.pause()
+            body = str(app.query(ToolResult).first().render())
+            self.assertIn("shell ls src", body)
+            self.assertIn("3 lines", body)
+            self.assertNotIn("a.py", body)
+
+
 class ReasoningDisplayTest(AppTestCase):
     async def test_reasoning_rendered_when_enabled(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
@@ -494,6 +535,7 @@ class ReasoningDisplayTest(AppTestCase):
             await renderer.handle(ReasoningDelta("line one\nline two\nline three"))
             await pilot.pause()
             body = str(app.query(".reasoning").first().render())
+            self.assertIn("reasoning", body)
             self.assertIn("3 lines", body)
             self.assertNotIn("line one", body)
 

@@ -62,9 +62,12 @@ class FoldedText(Static):
     Bodies of at most one line render as-is with no toggle.
     """
 
-    def __init__(self, body: str, *, classes: str = "", expanded: bool = False) -> None:
+    def __init__(
+        self, body: str, *, classes: str = "", expanded: bool = False, label: str = ""
+    ) -> None:
         self._full = body
         self._expanded = expanded
+        self._label = label
         super().__init__(self._body(), classes=classes)
 
     @property
@@ -79,9 +82,15 @@ class FoldedText(Static):
             return Content.from_markup(
                 "$body\n[i]click to collapse[/]", body=self._full
             )
+        lines = str(len(self._full.splitlines()))
+        if self._label:
+            return Content.from_markup(
+                "[i]… $label · $lines lines — click to expand[/]",
+                label=self._label,
+                lines=lines,
+            )
         return Content.from_markup(
-            "[i]… $lines lines — click to expand[/]",
-            lines=str(len(self._full.splitlines())),
+            "[i]… $lines lines — click to expand[/]", lines=lines
         )
 
     def set_text(self, body: str) -> None:
@@ -103,10 +112,40 @@ class FoldedText(Static):
 class ToolResult(FoldedText):
     """Tool output folded to a line-count stub; click expands the full text."""
 
-    def __init__(self, result: str, *, denied: bool = False) -> None:
+    def __init__(self, result: str, *, label: str = "", denied: bool = False) -> None:
         super().__init__(
             result or "(no output)",
             classes="tool-result denied" if denied else "tool-result",
+            label=label,
+        )
+
+
+class ToolCall(FoldedText):
+    """A tool invocation line; multi-line detail folds down to its first line."""
+
+    def __init__(self, name: str, detail: str) -> None:
+        self._name = name
+        super().__init__(detail, classes="tool-call")
+
+    def _body(self) -> Content:
+        if not self._foldable:
+            return Content.from_markup(
+                "[$text-accent b]$name[/]  [$text-muted]$detail[/]",
+                name=self._name,
+                detail=self._full,
+            )
+        if self._expanded:
+            return Content.from_markup(
+                "[$text-accent b]$name[/]  [$text-muted]$detail[/]\n[i]click to collapse[/]",
+                name=self._name,
+                detail=self._full,
+            )
+        lines = self._full.splitlines()
+        return Content.from_markup(
+            "[$text-accent b]$name[/]  [$text-muted]$first[/] [i]… +$more lines — click to expand[/]",
+            name=self._name,
+            first=lines[0],
+            more=str(len(lines) - 1),
         )
 
 

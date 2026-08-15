@@ -48,6 +48,7 @@ from .ui import (
     FoldedText,
     PromptInput,
     RecapMessage,
+    ToolCall,
     ToolResult,
     UserMessage,
 )
@@ -113,6 +114,7 @@ class _EventRenderer:
         self._reasoning: FoldedText | None = None
         self._reasoning_buf = ""
         self._first_text_block = True
+        self._call_labels: dict[str, str] = {}
 
     async def handle(self, ev: object) -> None:
         if isinstance(ev, UserInput):
@@ -134,7 +136,10 @@ class _EventRenderer:
             self._reasoning_buf += ev.text
             if self._reasoning is None:
                 self._reasoning = FoldedText(
-                    "", classes="reasoning", expanded=self._pane.config.show_reasoning
+                    "",
+                    classes="reasoning",
+                    expanded=self._pane.config.show_reasoning,
+                    label="reasoning",
                 )
                 await self._pane.query_one("#log", VerticalScroll).mount(self._reasoning)
             self._reasoning.set_text(self._reasoning_buf)
@@ -152,6 +157,9 @@ class _EventRenderer:
         elif isinstance(ev, ToolStart):
             # start fresh assistant/reasoning blocks after a tool runs
             await self.close()
+            self._call_labels[ev.id] = (
+                f"{ev.name} {tools.summarize_call(ev.name, ev.args, limit=40)}"
+            )
             self._pane._add_tool_start(ev.name, ev.args)
 
         elif isinstance(ev, TodosUpdate):
@@ -159,7 +167,8 @@ class _EventRenderer:
             self._pane._show_todos(ev.todos)
 
         elif isinstance(ev, ToolEnd):
-            self._pane._add_tool_result(ev.result, denied=ev.denied)
+            label = self._call_labels.pop(ev.id, ev.name)
+            self._pane._add_tool_result(ev.result, label=label, denied=ev.denied)
 
         elif isinstance(ev, ContextCompacted):
             self._pane._add(
@@ -647,19 +656,17 @@ class SessionPane(Pane):
         if visible and label:
             status.query_one(".status-label", Static).update(label)
 
-    def _add_tool_start(self, name: str, args: dict) -> Static:
-        detail = tools.summarize_call(name, args)
-        return self._add(
-            Content.from_markup(
-                "[$text-accent b]$name[/]  [$text-muted]$detail[/]",
-                name=name,
-                detail=detail,
-            )
-        )
-
-    def _add_tool_result(self, result: str, *, denied: bool = False) -> ToolResult:
+    def _add_tool_start(self, name: str, args: dict) -> ToolCall:
         log = self.query_one("#log", VerticalScroll)
-        widget = ToolResult(result, denied=denied)
+        widget = ToolCall(name, tools.summarize_call(name, args))
+        log.mount(widget)
+        return widget
+
+    def _add_tool_result(
+        self, result: str, *, label: str = "", denied: bool = False
+    ) -> ToolResult:
+        log = self.query_one("#log", VerticalScroll)
+        widget = ToolResult(result, label=label, denied=denied)
         log.mount(widget)
         return widget
 
