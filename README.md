@@ -4,7 +4,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Paimon is a coding agent that lives in your terminal. It reads and edits files in the current directory and runs commands. It also runs headless, so a stronger agent can drive it as a worker.
+Paimon is a coding agent that lives in your terminal. It reads and edits files in the current directory and runs commands. It also runs headless and imports as a library, so a stronger agent or a program of your own can drive it.
 
 ## Install
 
@@ -49,7 +49,7 @@ npx skills add aisk/paimon            # the same skill, via skills.sh
 
 ## Using Paimon as a library
 
-The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and `agent.run()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes:
+The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and holds it for the `with` block, and `agent.run()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes:
 
 ```python
 import asyncio
@@ -57,13 +57,10 @@ import asyncio
 from paimon.agent import Agent, TextDelta
 
 async def main():
-    agent = Agent.open(mode="edit")
-    try:
+    with Agent.open(mode="edit") as agent:
         async for event in agent.run("summarize the tests in this directory"):
             if isinstance(event, TextDelta):
                 print(event.text, end="", flush=True)
-    finally:
-        agent.session.unlock()
 
 asyncio.run(main())
 ```

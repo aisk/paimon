@@ -4,7 +4,7 @@
 
 [English](README.md) | 简体中文
 
-Paimon 是一个终端里的 coding agent。它读写当前目录下的文件，执行命令。它也支持无头运行，可以被更强的 agent 作为执行者调用。
+Paimon 是一个终端里的 coding agent。它读写当前目录下的文件，执行命令。它也支持无头运行，还可以作为库导入，由更强的 agent 或者你自己的程序来驱动。
 
 ## 安装
 
@@ -49,7 +49,7 @@ npx skills add aisk/paimon            # 通过 skills.sh 安装同一个 skill
 
 ## 当作库使用
 
-agent 循环本身是可以导入的，Python 程序不必经过 CLI 就能驱动它。`Agent.open()` 新建或恢复一个会话，`agent.run()` 产出类型化的事件，每段文本、每次工具调用、每个回合结束各一个，调用方自己决定怎么渲染或过滤：
+agent 循环本身是可以导入的，Python 程序不必经过 CLI 就能驱动它。`Agent.open()` 新建或恢复一个会话并在 `with` 块期间持有它，`agent.run()` 产出类型化的事件，每段文本、每次工具调用、每个回合结束各一个，调用方自己决定怎么渲染或过滤：
 
 ```python
 import asyncio
@@ -57,13 +57,10 @@ import asyncio
 from paimon.agent import Agent, TextDelta
 
 async def main():
-    agent = Agent.open(mode="edit")
-    try:
+    with Agent.open(mode="edit") as agent:
         async for event in agent.run("summarize the tests in this directory"):
             if isinstance(event, TextDelta):
                 print(event.text, end="", flush=True)
-    finally:
-        agent.session.unlock()
 
 asyncio.run(main())
 ```

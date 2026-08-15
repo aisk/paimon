@@ -245,6 +245,13 @@ class Agent:
     Built through :meth:`open`, which is where the session file is created or
     resumed and its lock taken; the constructor itself only wires up state a
     caller already holds, so it can neither fail nor leave a lock behind.
+
+    An agent holds its session until :meth:`close`, which ``with`` calls on the
+    way out::
+
+        with Agent.open(cwd=path) as agent:
+            async for event in agent.run("..."):
+                ...
     """
 
     def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
@@ -324,6 +331,28 @@ class Agent:
         except BaseException:
             session.unlock()
             raise
+
+    def close(self) -> None:
+        """Release the session, so another agent may open it. Idempotent."""
+        self.session.unlock()
+
+    def __enter__(self) -> "Agent":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Backstop for a caller that used neither ``with`` nor close(): the
+        # claim is refcounted in this process, so a forgotten agent would keep
+        # its session unopenable for as long as the process lives. Runs at
+        # interpreter shutdown too, where anything may already be torn down.
+        try:
+            session = getattr(self, "session", None)
+            if session is not None:
+                session.unlock()
+        except Exception:
+            pass
 
     @property
     def model_name(self) -> Optional[str]:

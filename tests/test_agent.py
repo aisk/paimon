@@ -1,3 +1,4 @@
+import gc
 import tempfile
 import threading
 import unittest
@@ -306,6 +307,52 @@ class SessionLockReleaseTest(unittest.TestCase):
             with self.assertRaises(SessionIncompleteError):
                 Agent.open(cwd=cwd, session=session, config=_config())
 
+            self.assertFalse(lockfile.held(session.path))
+
+
+class AgentCloseTest(unittest.TestCase):
+    """An agent holds its session until it is closed, one way or another."""
+
+    def _session(self, cwd: Path) -> Session:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        return session
+
+    def test_with_block_releases_the_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = self._session(cwd)
+
+            with Agent.open(cwd=cwd, session=session, config=_config()) as agent:
+                self.assertIs(agent.session, session)
+                self.assertTrue(lockfile.held(session.path))
+
+            self.assertFalse(lockfile.held(session.path))
+
+    def test_closing_twice_leaves_a_later_holder_alone(self) -> None:
+        """Claims are refcounted per process: a stale close must not drop one."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = self._session(cwd)
+            first = Agent.open(cwd=cwd, session=session, config=_config())
+            first.close()
+
+            resumed = Session(session.path, session.id, cwd)
+            second = Agent.open(cwd=cwd, session=resumed, config=_config())
+            self.addCleanup(second.close)
+
+            first.close()
+            self.assertTrue(lockfile.held(resumed.path), "the second agent still holds it")
+
+    def test_a_dropped_agent_releases_its_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = self._session(cwd)
+            agent = Agent.open(cwd=cwd, session=session, config=_config())
+            self.assertTrue(lockfile.held(session.path))
+
+            del agent
+            gc.collect()
             self.assertFalse(lockfile.held(session.path))
 
 

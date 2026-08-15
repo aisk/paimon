@@ -147,6 +147,10 @@ class Session:
         # Children share the project directory with the session that started
         # them, so they are hidden from listings unless asked for.
         self.parent = parent
+        # Whether this session holds the process claim on its file. Claims are
+        # refcounted per process, so unlocking twice would drop one somebody
+        # else has since taken; this is what makes unlock() idempotent.
+        self.locked = False
 
     def lock(self) -> None:
         """Mark this session active: only one agent may run a session.
@@ -163,9 +167,13 @@ class Session:
             raise SessionBusyError(f"session {self.id[:8]} is already open in this window")
         if not lockfile.acquire(self.path):
             raise SessionBusyError(f"session {self.id[:8]} is already active in another process")
+        self.locked = True
 
     def unlock(self) -> None:
-        """Release this process's claim; the lock drops with the last holder."""
+        """Release this session's claim, once; the lock drops with the last holder."""
+        if not self.locked:
+            return
+        self.locked = False
         lockfile.release(self.path)
 
     @classmethod
