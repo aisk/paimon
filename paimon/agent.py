@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import compaction, retry, tools
+from . import aside, compaction, retry, tools
 from .config import Config
 from .llm import build_model, user_agent
 from .mentions import expand_mentions
@@ -444,6 +444,29 @@ class Agent:
     async def compact_now(self) -> Optional[compaction.CompactionResult]:
         """Compact on demand; None when the history is too short to be worth it."""
         return await self._maybe_compact(force=True)
+
+    async def ask_aside(self, question: str, *,
+                        instructions: str = aside.DEFAULT_INSTRUCTIONS,
+                        max_tokens: int = aside.DEFAULT_MAX_TOKENS) -> AsyncIterator[str]:
+        """Ask a question over this agent's context, yielding the answer as text.
+
+        Read-only: neither the question nor the answer enters ``self.history``
+        or the session log, and no compaction is triggered. That is what lets
+        it be asked while a turn is already waiting on the model: it takes a
+        snapshot and opens a request of its own rather than joining the one in
+        flight. A cancelled aside leaves nothing behind either.
+
+        The history it sends is whatever exists when the first delta is asked
+        for, so a turn running alongside it may add messages the answer never
+        saw.
+        """
+        model = self._model()
+        context = _strip_foreign_thinking(aside.usable_history(self.history), model)
+        async for delta in aside.stream(model, self.system_prompt, context, question,
+                                        instructions=instructions,
+                                        tool_definitions=self._tool_definitions,
+                                        max_tokens=max_tokens):
+            yield delta
 
     # ---- Tools the agent loop runs itself ----------------------------------
     # These mutate agent-held state or end the turn, so they cannot go through
