@@ -295,7 +295,7 @@ class HeadlessRunTest(CliTestCase):
         lines = [json.loads(line) for line in out.splitlines()]
         self.assertEqual(lines[0]["type"], "init")
         self.assertEqual(lines[0]["model"], "test:stub")
-        self.assertEqual(lines[0]["mode"], "read")
+        self.assertEqual(lines[0]["mode"], "yolo")
         self.assertEqual(lines[-1]["type"], "result")
         self.assertEqual(lines[-1]["text"], "done")
         self.assertEqual(err, "")
@@ -317,7 +317,7 @@ class HeadlessRunTest(CliTestCase):
 
     def test_denied_tool_still_exits_0(self) -> None:
         code, out, err = self._main_output(
-            "-p", "run it", tool="shell", model="test:stub",
+            "-p", "run it", "--mode", "read", tool="shell", model="test:stub",
         )
         self.assertEqual(code, 0)
         self.assertIn("denied", err)

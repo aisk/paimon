@@ -248,7 +248,7 @@ class Agent:
     """
 
     def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
-                 confirm: Optional[ConfirmFn] = None, mode: str = "read",
+                 confirm: Optional[ConfirmFn] = None, mode: str = "yolo",
                  config: Optional[Config] = None,
                  toolset: Optional[dict[str, tools.Tool]] = None,
                  model_override: Optional[str] = None):
@@ -280,7 +280,7 @@ class Agent:
 
     @classmethod
     def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
-             confirm: Optional[ConfirmFn] = None, mode: str = "read",
+             confirm: Optional[ConfirmFn] = None, mode: str = "yolo",
              config: Optional[Config] = None,
              append_system_prompt: Optional[str] = None,
              toolset: Optional[dict[str, tools.Tool]] = None,

@@ -38,12 +38,12 @@ paimon -p "fix the failing test in tests/test_foo.py" \
   pay to read twice.
 - Pick the mode for the task: `read` (analysis plus clearly read-only
   commands like `ls`/`git status`, including `cd dir && …` chains and pipes
-  of recognized commands, the default), `edit` (may edit inside the
-  working directory), `yolo` (may also run commands). `-p` never asks for
-  confirmation: anything the mode disallows is refused and counted in
-  `denied`; a non-zero count usually means rerun with a more permissive
-  mode. `--strict` restores ask-before-every-command, so under `-p` even
-  read-only commands are refused.
+  of recognized commands), `edit` (may edit inside the
+  working directory), `yolo` (may also run commands; the default). `-p` never
+  asks for confirmation: in read/edit anything the mode disallows is refused
+  and counted in `denied`; a non-zero count usually means rerun with a more
+  permissive mode. `--strict` restores ask-before-every-command, so under `-p`
+  even read-only commands are refused.
 - `--model provider:name` overrides the model for this run;
   `--profile NAME` switches to a separately configured account.
 - `--append-system-prompt "You are a code reviewer. Only report findings."`

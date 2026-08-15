@@ -26,7 +26,7 @@ uvx paimon
 
 首次启动会询问 provider、模型、API base 和 key，并保存到 `~/.config/paimon/default/config.json`。之后输入要完成的任务即可。
 
-运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，`ls`、`git status` 这类明确只读的命令除外，会直接执行，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建、分叉或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
+运行时：`Shift+Tab` 切换 agent 的自主程度（**read**：写文件或执行命令前先询问，`ls`、`git status` 这类明确只读的命令除外，会直接执行，**edit**：工作目录内的编辑直接执行，**yolo**：从不询问，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板（切换 provider 或 profile、新建、分叉或恢复会话、显示模型思考、压缩上下文），`Ctrl+C` 退出。
 
 `Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。
 
@@ -70,7 +70,7 @@ paimon log a1b2c3    # 查看会话做了什么，每个事件一行
 ## 其他运行方式
 
 ```bash
-paimon --mode edit                  # 以更宽松的权限模式启动
+paimon --mode read                  # 以更谨慎的权限模式启动（默认为 yolo）
 paimon --strict                     # 每条命令都先询问，包括只读命令
 paimon --web                        # 在浏览器中使用同一套 UI（--port，默认 8000）
 paimon -p "what does cli.py do?"    # 直接在 stdout 输出回答，不启动 UI
@@ -79,7 +79,7 @@ paimon --model zai:glm-4.7          # 仅本次运行使用该模型
 paimon --profile work               # 单独配置的另一个账号
 ```
 
-`-p` 不会停下来询问，当前模式需要确认的操作会被直接拒绝（识别为只读的命令在 read 模式下仍会执行）；如果本次运行需要修改文件，传 `--mode edit` 或 `--mode yolo`。加 `--output-format result` 输出一个包含结果的 JSON 对象（`json` 则每行输出一个事件），用 `--timeout`/`--max-tool-calls` 为无人值守的运行设置上限。
+`-p` 不会停下来询问，默认模式是 `yolo`，因此已经可以修改文件和执行命令；传 `--mode read` 或 `--mode edit` 可以保留确认护栏，此时当前模式需要确认的操作会被直接拒绝（识别为只读的命令在 read 模式下仍会执行）。加 `--output-format result` 输出一个包含结果的 JSON 对象（`json` 则每行输出一个事件），用 `--timeout`/`--max-tool-calls` 为无人值守的运行设置上限。
 
 ## 配置
 

@@ -54,9 +54,10 @@ def main() -> None:
                         help="with --print: add TEXT (e.g. a role definition) to the end of "
                              "the new session's system prompt; persisted with the session, "
                              "so not combinable with --continue/--resume")
-    parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="read",
+    parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="yolo",
                         help="permission mode: read (confirm writes, non-read-only commands and "
-                             "reads outside cwd), edit (auto-approve edits in cwd), yolo (no confirmation)")
+                             "reads outside cwd), edit (auto-approve edits in cwd), "
+                             "yolo (no confirmation; the default)")
     parser.add_argument("--strict", action="store_true",
                         help="always ask before shell commands, even clearly read-only ones "
                              "(overrides the safe_commands config for this run)")
@@ -100,7 +101,7 @@ def main() -> None:
             flags += ["--resume"] if args.resume == "" else ["--resume", args.resume]
         if args.continue_latest:
             flags += ["--continue"]
-        if args.mode != "read":
+        if args.mode != "yolo":
             flags += ["--mode", args.mode]
         if args.strict:
             flags += ["--strict"]

@@ -26,7 +26,7 @@ uvx paimon
 
 The first launch asks for a provider, model, API base and key, and saves them to `~/.config/paimon/default/config.json`. Then just type what you want done.
 
-While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, except clearly read-only ones like `ls` or `git status`, which run without asking, **edit**: edits inside the working directory go through, **yolo**: never ask), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider or profile, new, fork or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read**: ask before writing files or running commands, except clearly read-only ones like `ls` or `git status`, which run without asking, **edit**: edits inside the working directory go through, **yolo**: never ask; the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette (switch provider or profile, new, fork or resume session, show the model's thinking, compact the context), `Ctrl+C` quits.
 
 `Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission.
 
@@ -70,7 +70,7 @@ paimon log a1b2c3    # what a session did, one line per event
 ## Other ways to run it
 
 ```bash
-paimon --mode edit                  # start in a less cautious permission mode
+paimon --mode read                  # start in a more cautious permission mode (yolo is the default)
 paimon --strict                     # ask before every command, even read-only ones
 paimon --web                        # the same UI in a browser (--port, default 8000)
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
@@ -79,7 +79,7 @@ paimon --model zai:glm-4.7          # this model for this run only
 paimon --profile work               # a separately configured account
 ```
 
-`-p` never stops to ask, so anything the current mode would prompt for is refused instead (recognized read-only commands still run in read mode); pass `--mode edit` or `--mode yolo` if the run needs to change files. Add `--output-format result` for a single JSON object with the outcome (or `json` for one event per line), and `--timeout`/`--max-tool-calls` to bound an unattended run.
+`-p` never stops to ask, and the default mode is `yolo`, so it can already write files and run commands; pass `--mode read` or `--mode edit` to keep the guardrails, in which case anything the mode would prompt for is refused instead (recognized read-only commands still run in read mode). Add `--output-format result` for a single JSON object with the outcome (or `json` for one event per line), and `--timeout`/`--max-tool-calls` to bound an unattended run.
 
 ## Configuration
 
