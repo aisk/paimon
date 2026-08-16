@@ -421,12 +421,26 @@ class StatusLineTest(AppTestCase):
 
 
 class CacheHitStatusTest(AppTestCase):
-    async def test_reported_cache_usage_lands_in_the_status_bar(self) -> None:
+    async def test_the_rate_accumulates_across_requests(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             await app.pane._on_event(RequestStats(120, 2.5, 2000, 1600, 300))
             await pilot.pause()
             self.assertIn("cache 80%", str(app.query_one("#statusbar", Static).render()))
+
+            # (1600 + 1500) / (2000 + 3000): the session total, not the last request
+            await app.pane._on_event(RequestStats(100, 2.0, 3000, 1500, 500))
+            await pilot.pause()
+            self.assertIn("cache 62%", str(app.query_one("#statusbar", Static).render()))
+
+    async def test_a_new_session_starts_a_fresh_count(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await app.pane._on_event(RequestStats(120, 2.5, 2000, 1600, 300))
+            await pilot.pause()
+            app.pane.new_session()
+            await pilot.pause()
+            self.assertNotIn("cache", str(app.query_one("#statusbar", Static).render()))
 
     async def test_no_rate_is_shown_when_the_provider_reports_none(self) -> None:
         app = self.make_app()

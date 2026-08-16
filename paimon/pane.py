@@ -315,7 +315,13 @@ class SessionPane(Pane):
         self._queue: list[str] = []
         self._pending_handoff: str | None = None
         self._tps: float | None = None
+        # Cumulative over the session: single-request rates swing with each
+        # round's tool output size, while the running rate reflects what the
+        # cache actually saved and makes server-side invalidation visible as
+        # a steady decline instead of one noisy dip.
         self._cache_hit: float | None = None
+        self._cache_reads = 0
+        self._cache_inputs = 0
 
     @property
     def config(self):
@@ -514,6 +520,14 @@ class SessionPane(Pane):
         self._add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
         self._sync_statusbar(tokens=True)
 
+    def _reset_measurements(self) -> None:
+        """A swapped-in session starts with no measurements of its own."""
+        self._tokens = None
+        self._tps = None
+        self._cache_hit = None
+        self._cache_reads = 0
+        self._cache_inputs = 0
+
     def new_session(self) -> None:
         if self.is_busy:
             return
@@ -526,7 +540,7 @@ class SessionPane(Pane):
         killed = self._retire_agent()
         self._swap_agent(agent)
         self._title = ""
-        self._tokens = None
+        self._reset_measurements()
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
@@ -584,7 +598,7 @@ class SessionPane(Pane):
         killed = self._retire_agent()
         self._swap_agent(agent)
         self._title = agent.session.first_user_text() or ""
-        self._tokens = None
+        self._reset_measurements()
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
@@ -871,7 +885,9 @@ class SessionPane(Pane):
             # Zero on both cache fields means the provider does not report
             # caching, so no rate is shown rather than a misleading 0%.
             if (ev.cache_read_tokens or ev.cache_write_tokens) and ev.input_tokens:
-                self._cache_hit = ev.cache_read_tokens / ev.input_tokens
+                self._cache_reads += ev.cache_read_tokens
+                self._cache_inputs += ev.input_tokens
+                self._cache_hit = self._cache_reads / self._cache_inputs
             self._sync_statusbar(tokens=True)
         elif isinstance(ev, SessionHandoff):
             # the switch happens once the turn is over, in _end_turn, since
