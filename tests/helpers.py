@@ -18,7 +18,7 @@ EVENT_SAMPLES = {
     "ToolEnd": ("call-1", "shell", "out"),
     "TodosUpdate": ([{"content": "a", "status": "pending"}],),
     "SessionHandoff": ("do the next thing",),
-    "RequestStats": (120, 2.5),
+    "RequestStats": (120, 2.5, 2000, 1600, 300),
     "TurnEnd": (),
     "ContextCompacted": (10, 5),
     "ContextCompactionFailed": ("boom",),

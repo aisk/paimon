@@ -23,7 +23,7 @@ from textual.widgets import RichLog, Static
 from textual.widgets.markdown import MarkdownBlock
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import aside, lockfile
-from paimon.agent import Agent, ReasoningDelta, ToolEnd, ToolStart
+from paimon.agent import Agent, ReasoningDelta, RequestStats, ToolEnd, ToolStart
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.jobs import AgentJob, Outcome, Result
 from paimon.pane import SessionPane, _EventRenderer, _session_label
@@ -418,6 +418,24 @@ class StatusLineTest(AppTestCase):
             app.pane._set_status(False)
             await pilot.pause()
             self.assertFalse(status.display)
+
+
+class CacheHitStatusTest(AppTestCase):
+    async def test_reported_cache_usage_lands_in_the_status_bar(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await app.pane._on_event(RequestStats(120, 2.5, 2000, 1600, 300))
+            await pilot.pause()
+            self.assertIn("cache 80%", str(app.query_one("#statusbar", Static).render()))
+
+    async def test_no_rate_is_shown_when_the_provider_reports_none(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await app.pane._on_event(RequestStats(120, 2.5, 2000))
+            await pilot.pause()
+            bar = str(app.query_one("#statusbar", Static).render())
+            self.assertNotIn("cache", bar)
+            self.assertIn("tokens per second", bar)
 
 
 class TodoPanelTest(AppTestCase):

@@ -315,6 +315,7 @@ class SessionPane(Pane):
         self._queue: list[str] = []
         self._pending_handoff: str | None = None
         self._tps: float | None = None
+        self._cache_hit: float | None = None
 
     @property
     def config(self):
@@ -867,6 +868,10 @@ class SessionPane(Pane):
             self._set_state(None if self.config.show_reasoning else "thinking")
         elif isinstance(ev, RequestStats):
             self._tps = ev.output_tokens / ev.seconds
+            # Zero on both cache fields means the provider does not report
+            # caching, so no rate is shown rather than a misleading 0%.
+            if (ev.cache_read_tokens or ev.cache_write_tokens) and ev.input_tokens:
+                self._cache_hit = ev.cache_read_tokens / ev.input_tokens
             self._sync_statusbar(tokens=True)
         elif isinstance(ev, SessionHandoff):
             # the switch happens once the turn is over, in _end_turn, since

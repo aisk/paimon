@@ -93,10 +93,18 @@ class SessionHandoff:
 
 @dataclass
 class RequestStats:
-    """Output speed of one finished model request, from provider-reported usage."""
+    """Output speed and cache usage of one finished model request, from
+    provider-reported usage. ``input_tokens`` includes the cached portion
+    (pydantic-ai normalizes providers that report them separately), so the
+    cache hit rate is ``cache_read_tokens / input_tokens``. Providers that
+    do not report caching leave both cache fields at zero.
+    """
 
     output_tokens: int
     seconds: float
+    input_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -661,9 +669,12 @@ class Agent:
                         response = stream.get()
                         if first_event_at is not None:
                             elapsed = time.monotonic() - first_event_at
-                            output_tokens = response.usage.output_tokens
-                            if output_tokens and elapsed > 0:
-                                stats = RequestStats(output_tokens, elapsed)
+                            usage = response.usage
+                            if usage.output_tokens and elapsed > 0:
+                                stats = RequestStats(usage.output_tokens, elapsed,
+                                                     usage.input_tokens,
+                                                     usage.cache_read_tokens,
+                                                     usage.cache_write_tokens)
                     break
                 except asyncio.CancelledError:
                     # Interrupted mid-stream: keep partial text but drop incomplete
