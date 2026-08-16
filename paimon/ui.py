@@ -11,10 +11,9 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
-from textual.widget import Widget
 from textual.widgets import Markdown, Static, TextArea
 
-from .diff import render_diff
+from .diff import locate_line, render_diff
 
 
 class UserMessage(Static):
@@ -146,6 +145,58 @@ class ToolCall(FoldedText):
             first=lines[0],
             more=str(len(lines) - 1),
         )
+
+
+class EditCall(Vertical):
+    """An edit_file invocation with its diff shown inline.
+
+    Unlike other tool calls the change itself is the interesting part, so the
+    diff starts expanded; clicking anywhere on the widget folds it behind the
+    header line and back.
+    """
+
+    _CLIP = 1_500
+
+    def __init__(self, path: str, old: str, new: str, *,
+                 start_line: int | None = None) -> None:
+        self._path = path
+        self._old = old
+        self._new = new
+        self._start_line = start_line
+        self._expanded = True
+        super().__init__(classes="tool-call edit-call")
+
+    @staticmethod
+    def _clip(text: str, limit: int = _CLIP) -> str:
+        return text if len(text) <= limit else text[:limit] + " …"
+
+    def compose(self) -> ComposeResult:
+        # built here rather than in __init__: the diff colors follow the app
+        # theme, and self.app only exists once the widget is mounted
+        diff = render_diff(
+            self._clip(self._old), self._clip(self._new), path=self._path,
+            start_line=self._start_line,
+            theme=self.app.theme or "",
+            dark=self.app.current_theme.dark,
+        )
+        yield Static(self._header(), classes="edit-call-header")
+        yield Static(diff, classes="edit-call-diff")
+
+    def _header(self) -> Content:
+        if self._expanded:
+            return Content.from_markup(
+                "[$text-accent b]edit_file[/]  [$text-muted]$path[/] [i]click to collapse[/]",
+                path=self._path,
+            )
+        return Content.from_markup(
+            "[$text-accent b]edit_file[/]  [$text-muted]$path[/] [i]… diff — click to expand[/]",
+            path=self._path,
+        )
+
+    def on_click(self) -> None:
+        self._expanded = not self._expanded
+        self.query_one(".edit-call-diff", Static).display = self._expanded
+        self.query_one(".edit-call-header", Static).update(self._header())
 
 
 class PromptInput(TextArea):
@@ -309,12 +360,6 @@ class ConfirmPanel(Vertical, can_focus=True):
     def _clip(text: str, limit: int = _CLIP) -> str:
         return text if len(text) <= limit else text[:limit] + " …"
 
-    def _diff_width(self) -> int:
-        # pane margins + panel padding + border eat ~10 cells. Measured on the
-        # host pane rather than the app: the pane carries the side margins.
-        host = self.parent if isinstance(self.parent, Widget) else self.app
-        return max(60, host.size.width - 10)
-
     def _detail(self) -> RenderableType:
         args = self.args
         if self.tool_name == "shell":
@@ -335,18 +380,28 @@ class ConfirmPanel(Vertical, can_focus=True):
             except OSError:
                 existing = ""
             if existing:
-                diff = render_diff(self._clip(existing), content, width=self._diff_width())
+                diff = render_diff(
+                    self._clip(existing), content, path=path, start_line=1,
+                    theme=self.app.theme or "",
+                    dark=self.app.current_theme.dark,
+                )
                 return Group(Text(path), Text(), diff)
             return Content.from_markup(
                 "$path\n\n[$text-muted]$content[/]", path=path, content=content
             )
         if self.tool_name == "edit_file":
+            path = str(args.get("path") or "")
+            old = str(args.get("old_string") or "")
+            new = str(args.get("new_string") or "")
             diff = render_diff(
-                self._clip(str(args.get("old_string") or "")),
-                self._clip(str(args.get("new_string") or "")),
-                width=self._diff_width(),
+                self._clip(old),
+                self._clip(new),
+                path=path,
+                start_line=locate_line(path, old, new),
+                theme=self.app.theme or "",
+                dark=self.app.current_theme.dark,
             )
-            return Group(Text(str(args.get("path") or "")), Text(), diff)
+            return Group(Text(path), Text(), diff)
         if self.tool_name == "read_file":
             return Content.from_markup(
                 "$path\n[$text-muted]outside the working directory[/]",

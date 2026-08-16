@@ -17,6 +17,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
 from textual.widgets.markdown import MarkdownStream
 
@@ -39,12 +40,14 @@ from .agent import (
     UserInput,
     replay_events,
 )
+from .diff import locate_line
 from .jobs import AgentJob, Outcome, Result, State, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint
 from .ui import (
     AssistantMessage,
     ConfirmPanel,
+    EditCall,
     FoldedText,
     PromptInput,
     RecapMessage,
@@ -671,9 +674,18 @@ class SessionPane(Pane):
         if visible and label:
             status.query_one(".status-label", Static).update(label)
 
-    def _add_tool_start(self, name: str, args: dict) -> ToolCall:
+    def _add_tool_start(self, name: str, args: dict) -> Widget:
         log = self.query_one("#log", VerticalScroll)
-        widget = ToolCall(name, tools.summarize_call(name, args))
+        if name == "edit_file":
+            path = str(args.get("path") or "")
+            old = str(args.get("old_string") or "")
+            new = str(args.get("new_string") or "")
+            widget: Widget = EditCall(
+                path, old, new,
+                start_line=locate_line(path, old, new, cwd=self.cwd),
+            )
+        else:
+            widget = ToolCall(name, tools.summarize_call(name, args))
         log.mount(widget)
         return widget
 

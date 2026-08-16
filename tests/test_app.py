@@ -35,6 +35,7 @@ from paimon.taskpane import TaskPane
 from paimon.ui import (
     AssistantMessage,
     ConfirmPanel,
+    EditCall,
     PromptInput,
     RecapMessage,
     ToolCall,
@@ -536,6 +537,24 @@ class ToolRenderingTest(AppTestCase):
             body = str(app.query(ToolCall).first().render())
             self.assertIn("ls", body)
             self.assertNotIn("click to expand", body)
+
+    async def test_edit_call_shows_diff_expanded_by_default(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app.pane)
+            await renderer.handle(ToolStart("c1", "edit_file", {
+                "path": "a.py", "old_string": "x = 1", "new_string": "x = 2"}))
+            await pilot.pause()
+            widget = app.query(EditCall).first()
+            header = widget.query_one(".edit-call-header", Static)
+            diff = widget.query_one(".edit-call-diff", Static)
+            self.assertIn("a.py", str(header.render()))
+            self.assertTrue(diff.display)
+            widget.on_click()
+            self.assertFalse(diff.display)
+            self.assertIn("click to expand", str(header.render()))
+            widget.on_click()
+            self.assertTrue(diff.display)
 
     async def test_folded_result_names_its_call(self) -> None:
         app = self.make_app()

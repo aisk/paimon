@@ -49,6 +49,8 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .assistant { padding: 0 1; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-disabled; }
+.edit-call { height: auto; }
+.edit-call-diff { margin-top: 1; }
 .todos { padding: 0 1; border-left: solid $primary 45%; }
 /* Unprompted, so it is the quietest block that still has a rule of its own.
    The Markdown widget's own default padding and $foreground would both win
