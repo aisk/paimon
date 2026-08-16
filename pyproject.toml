@@ -5,7 +5,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version"]
 dependencies = [
-    "pydantic-ai-slim[openai,anthropic]>=2.17.0",
+    "pydantic-ai-slim[openai,anthropic]>=2.31.0",
     "textual>=8.2.7",
     "textual-serve>=1.1.3",
 ]
