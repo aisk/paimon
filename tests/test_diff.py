@@ -26,7 +26,7 @@ class RenderDiffTest(unittest.TestCase):
 
     def test_python_code_gets_syntax_colors(self) -> None:
         lines = _highlight("def f():\n    return 1", "m.py", "monokai")
-        self.assertEqual([l.plain for l in lines], ["def f():", "    return 1"])
+        self.assertEqual([line.plain for line in lines], ["def f():", "    return 1"])
         self.assertTrue(lines[0].spans, "keywords should carry color spans")
         self.assertTrue(
             all(s.style.bgcolor is None for s in lines[0].spans

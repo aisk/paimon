@@ -605,7 +605,7 @@ class ReasoningDisplayTest(AppTestCase):
 
     async def test_toggle_flips_and_persists(self) -> None:
         app = self.make_app()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             app.action_toggle_reasoning()
             self.assertTrue(app.config.show_reasoning, "flips before the write lands")
             await app.workers.wait_for_complete()  # the save runs on a thread
@@ -616,7 +616,7 @@ class ReasoningDisplayTest(AppTestCase):
 
     async def test_toggle_recap_flips_persists_and_drops_an_armed_recap(self) -> None:
         app = self.make_app()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             self.assertTrue(app.config.recap_enabled, "on by default")
             app.pane._used_tools = True
             app.pane._arm_recap()
