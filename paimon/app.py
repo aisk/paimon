@@ -544,7 +544,7 @@ class PaimonApp(App):
         if pane._tps is not None:
             parts.append(f"{pane._tps:.0f} tokens per second")
         if pane._cache_hit is not None:
-            parts.append(f"cache {pane._cache_hit:.0%}")
+            parts.append(f"cache hit {pane._cache_hit:.0%}")
         return parts
 
     @work(exclusive=True, group="statusbar")
