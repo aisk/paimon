@@ -49,10 +49,10 @@ DEFAULT_INSTRUCTIONS = (
 # without a terminal.
 RECAP_INSTRUCTIONS = (
     "[recap] The user stepped away and is coming back to a screen full of tool "
-    "output. In two to four short lines, say where things stand: what was just "
-    "done, and the obvious next step. Answer in the language the user has been "
-    "writing in. No headings, no code blocks, no preamble, and do not offer to "
-    "help."
+    "output. In two to five short lines, say where things stand: what this "
+    "session is working toward overall, what was just done, and the obvious "
+    "next step. Answer in the language the user has been writing in. No "
+    "headings, no code blocks, no preamble, and do not offer to help."
 )
 
 RECAP_QUESTION = "Where does this session stand right now?"
