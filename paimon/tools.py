@@ -751,18 +751,61 @@ async def _pump(stream: asyncio.StreamReader, tail: _OutputTail) -> None:
         tail.append(chunk)
 
 
-def _stop_reading(proc: asyncio.subprocess.Process) -> None:
+async def _spawn_shell(
+    command: str, cwd: Path, env: Optional[dict] = None
+) -> tuple[asyncio.subprocess.Process, asyncio.StreamReader, asyncio.ReadTransport]:
+    """Start ``command`` with its output on a pipe asyncio does not manage.
+
+    With stdout=PIPE, Process.wait() on Python 3.11+ also waits for the pipe
+    to reach EOF (gh-88050): a backgrounded descendant that inherited the pipe
+    then holds the turn open long after the command itself exited. Handing the
+    shell the write end of a plain os.pipe() keeps wait() about the shell
+    alone; the read end comes back as a stream plus the transport to close
+    when a descendant will not let go.
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        # start_new_session puts the child in its own process group so the
+        # whole tree (the shell plus anything it spawns) can be killed on
+        # timeout/interrupt.
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(cwd),
+            # Without this a command that reads stdin (a bare "cat") would
+            # block until the timeout, eating the user's keystrokes in the TUI.
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=write_fd,
+            stderr=write_fd,
+            start_new_session=True,
+            env=env,
+        )
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        os.close(write_fd)
+    pipe = os.fdopen(read_fd, "rb", 0)
+    stream = asyncio.StreamReader()
+    try:
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(stream), pipe
+        )
+    except BaseException:
+        pipe.close()
+        raise
+    return proc, stream, transport
+
+
+def _stop_reading(transport: asyncio.ReadTransport) -> None:
     """Close the read end of a pipe a descendant is still holding open.
 
     Without this the event loop keeps draining that pipe into the stream
     buffer for as long as the descendant lives, unbounded and unread.
     """
-    transport = getattr(proc.stdout, "_transport", None)
-    if transport is not None:
-        try:
-            transport.close()
-        except OSError:
-            pass
+    try:
+        transport.close()
+    except OSError:
+        pass
 
 
 async def _drain(reader: asyncio.Task, tail) -> None:
@@ -782,18 +825,23 @@ async def _drain(reader: asyncio.Task, tail) -> None:
                 return
 
 
-async def _stop_reader(reader: asyncio.Task, proc: asyncio.subprocess.Process) -> None:
+async def _stop_reader(reader: asyncio.Task, transport: asyncio.ReadTransport) -> None:
     """End the pump task, closing the pipe if a descendant still holds it open."""
     if not reader.done():
         reader.cancel()
-        _stop_reading(proc)
+        _stop_reading(transport)
     try:
         await reader
     except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup only
         pass
 
 
-async def _collect(proc: asyncio.subprocess.Process, tail: _OutputTail) -> None:
+async def _collect(
+    proc: asyncio.subprocess.Process,
+    stream: asyncio.StreamReader,
+    transport: asyncio.ReadTransport,
+    tail: _OutputTail,
+) -> None:
     """Read output until the command exits, then drain what is still in flight.
 
     Deliberately never waits for stdout EOF. A backgrounded descendant inherits
@@ -801,34 +849,23 @@ async def _collect(proc: asyncio.subprocess.Process, tail: _OutputTail) -> None:
     which would block the turn until the timeout with the command itself long
     finished.
     """
-    reader = asyncio.create_task(_pump(proc.stdout, tail))
+    reader = asyncio.create_task(_pump(stream, tail))
     try:
         await asyncio.wait_for(proc.wait(), timeout=_COMMAND_TIMEOUT)
         await _drain(reader, tail)
     finally:
-        await _stop_reader(reader, proc)
+        await _stop_reader(reader, transport)
 
 
 async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> str:
-    # start_new_session puts the child in its own process group so we can kill
-    # the whole tree (the shell plus anything it spawns) on timeout/interrupt.
-    proc = await asyncio.create_subprocess_shell(
-        args["command"],
-        cwd=str(cwd),
-        # Without this a command that reads stdin (a bare "cat") would block
-        # until the timeout, eating the user's keystrokes in the TUI.
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
-    )
+    proc, stream, transport = await _spawn_shell(args["command"], cwd)
     # The child leads its own group, so the group id is its pid. Recorded here
     # because os.getpgid() stops working the moment that leader is reaped.
     pgid = proc.pid
     tail = _OutputTail()
     try:
         try:
-            await _collect(proc, tail)
+            await _collect(proc, stream, transport, tail)
             status = f"(exit code {proc.returncode})"
         except asyncio.TimeoutError:
             await _kill_tree(proc, pgid)
@@ -921,12 +958,21 @@ def _line_buffered(command: str) -> str:
 class BackgroundCommand:
     """One command running past the end of the turn that started it."""
 
-    def __init__(self, command: str, proc: asyncio.subprocess.Process, pgid: int) -> None:
+    def __init__(
+        self,
+        command: str,
+        proc: asyncio.subprocess.Process,
+        stream: asyncio.StreamReader,
+        transport: asyncio.ReadTransport,
+        pgid: int,
+    ) -> None:
         self.command = command
         self.output = _TaskOutput()
         self.exit_code: Optional[int] = None
         self.killed = False
         self._proc = proc
+        self._stream = stream
+        self._transport = transport
         self._pgid = pgid
         self._reading = asyncio.ensure_future(self._read())
 
@@ -935,12 +981,12 @@ class BackgroundCommand:
         return self.exit_code is None
 
     async def _read(self) -> None:
-        reader = asyncio.create_task(_pump(self._proc.stdout, self.output))
+        reader = asyncio.create_task(_pump(self._stream, self.output))
         try:
             await self._proc.wait()
             await _drain(reader, self.output)
         finally:
-            await _stop_reader(reader, self._proc)
+            await _stop_reader(reader, self._transport)
             self.exit_code = self._proc.returncode
 
     async def wait(self) -> Optional[int]:
@@ -981,18 +1027,14 @@ class BackgroundCommand:
 
 async def start_background(command: str, cwd: Path) -> BackgroundCommand:
     """Start ``command`` detached from the turn, in its own process group."""
-    proc = await asyncio.create_subprocess_shell(
+    proc, stream, transport = await _spawn_shell(
         _line_buffered(command),
-        cwd=str(cwd),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
+        cwd,
         # Python is the one interpreter that can be told to stop block
         # buffering from the outside, and the one this agent starts most.
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
-    return BackgroundCommand(command, proc, proc.pid)
+    return BackgroundCommand(command, proc, stream, transport, proc.pid)
 
 
 def tail_text(data: bytes, dropped: int = 0, limit: int = _SHELL_MAX_BYTES) -> str:
