@@ -11,6 +11,7 @@ import error later.
 
 from __future__ import annotations
 
+import asyncio
 import typing
 from typing import Optional
 
@@ -23,6 +24,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from textual.content import Content
+
+from paimon.errors import PaimonError
 from paimon.llm import is_provider_available
 
 
@@ -200,11 +204,23 @@ class LoginScreen(ModalScreen[bool]):
             self.dismiss(False)
             return
 
-        self.app.config.save(  # type: ignore[attr-defined] — pushed only by PaimonApp
-            model=f"{provider}:{model}",
-            api_base=api_base.strip() or None,
-            api_key=api_key.strip() or None,
-        )
+        config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
+        fields = {
+            "model": f"{provider}:{model}",
+            "api_base": api_base.strip() or None,
+            "api_key": api_key.strip() or None,
+        }
+        try:
+            # On a thread: save() can wait on the cross-process config lock.
+            await asyncio.to_thread(config.save, **fields)
+        except PaimonError as exc:
+            # The credentials just typed must not die with the write. Apply
+            # them to this run and let the user repair the file afterwards.
+            for key, value in fields.items():
+                setattr(config, key, value)
+            self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
+                "[$text-warning b]Logged in for this run only, config not saved:[/] $body",
+                body=str(exc)))
         self.dismiss(True)
 
     def action_cancel(self) -> None:

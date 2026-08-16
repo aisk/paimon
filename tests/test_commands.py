@@ -131,6 +131,23 @@ class LoginTest(CommandTestCase):
         self.assertEqual(data["api_key"], "sk-old")
         self.assertEqual(data["theme"], "dark")
 
+    def test_corrupt_config_is_refused_with_a_force_hint(self) -> None:
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"model": "zai:glm')
+        code, out, err = self._run("login", "--model", "openai:gpt-5")
+        self.assertEqual(code, 1)
+        self.assertIn("--force", err)
+        self.assertEqual(path.read_text(), '{"model": "zai:glm')
+
+    def test_force_replaces_a_corrupt_config(self) -> None:
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"model": "zai:glm')
+        code, out, err = self._run("login", "--model", "openai:gpt-5", "--force")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(path.read_text()), {"model": "openai:gpt-5"})
+
     def test_empty_api_base_clears_the_stored_override(self) -> None:
         self._write_config(model="zai:glm-4.7", api_base="https://old/v1")
         code, out, err = self._run("login", "--model", "openai:gpt-5", "--api-base", "")

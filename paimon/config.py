@@ -10,9 +10,14 @@ provider environment variables are the fallback when unset.
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from . import lockfile
+from .errors import PaimonError
 
 DEFAULT_PROFILE = "default"
 
@@ -21,6 +26,21 @@ DEFAULT_PROFILE = "default"
 UNSET: object = object()
 
 _NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+
+# How long save() waits for another Paimon's write to finish before giving up
+# with a diagnostic. The lock is only held for the few milliseconds of one
+# read-merge-replace, so hitting this means something is genuinely stuck.
+_SAVE_LOCK_TIMEOUT = 10.0
+
+# The sidecar lock keeps processes apart but is reentrant within one process
+# (lockfile refcounts per path), so threads of the same process need their own
+# mutual exclusion. The TUI saves from worker threads.
+_SAVE_MUTEX = threading.Lock()
+
+
+class ConfigError(PaimonError):
+    """The stored config cannot be read or written (corrupt JSON, a lock
+    that never frees, a write that cannot reach the disk)."""
 
 
 def config_root() -> Path:
@@ -58,14 +78,105 @@ def config_path(profile: str = DEFAULT_PROFILE) -> Path:
     return config_dir(profile) / "config.json"
 
 
-def _load_file_config(path: Path) -> dict:
+def _lock_path(path: Path) -> Path:
+    """The sidecar lock for one profile's config.
+
+    Never lock config.json itself: the atomic replace swaps the file's inode,
+    which would strand the lock on the file readers just replaced.
+    """
+    return path.with_name(path.name + ".lock")
+
+
+def _read_file_config(path: Path) -> dict:
+    """The stored JSON object, or {} when no file exists yet.
+
+    Raises ConfigError on a damaged file. Swallowing the parse error here is
+    how one torn write used to become permanent: the next save would happily
+    write "{} plus my fields" over the remains of every other setting.
+    """
     if not path.is_file():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"{path} is not valid JSON ({exc.msg} at line {exc.lineno}). "
+            "The file was left untouched, fix or remove it") from exc
+    except FileNotFoundError:
+        # Deleted between is_file() and the read. Same as never existing.
         return {}
-    return data if isinstance(data, dict) else {}
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path} holds {type(data).__name__}, not a JSON object. "
+                          "The file was left untouched, fix or remove it")
+    return data
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make a completed rename durable; a no-op where directories cannot be
+    opened (Windows) or fsynced (some network filesystems)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """os.replace, waiting out Windows readers holding the destination open.
+
+    The rename is atomic on POSIX regardless of readers. On Windows it fails
+    with PermissionError while another process has config.json open, and
+    load() reads without locking, so briefly retry there.
+    """
+    attempts = 10 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05)
+
+
+def _write_atomic(path: Path, payload: str) -> None:
+    """Replace path's contents in one step. Call only under the profile lock.
+
+    The new bytes go to a sibling temp file that is fsynced and renamed over
+    path, so a reader (load() never locks) always sees either the complete
+    old config or the complete new one, and a crash mid-write leaves the
+    previous config intact instead of a torn one. The temp file name is
+    fixed because writers are serialized by the lock, so an orphan left by
+    a killed writer is simply overwritten by the next save.
+    """
+    # Write through a symlinked config.json (dotfiles setups) instead of
+    # replacing the link itself with a detached plain file.
+    path = Path(os.path.realpath(path))
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            data = memoryview(payload.encode("utf-8"))
+            while data:  # os.write may write fewer bytes than asked for
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # The file may hold an API key. The open mode above is masked by the
+        # umask, so make it private explicitly, before it becomes the config.
+        os.chmod(tmp, 0o600)
+        _replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise ConfigError(f"cannot write {path}: {exc}") from exc
+    _sync_directory(path.parent)
 
 
 @dataclass
@@ -107,7 +218,7 @@ class Config:
         Raises ValueError on an invalid profile name.
         """
         profile = validate_profile(profile)
-        data = _load_file_config(config_path(profile))
+        data = _read_file_config(config_path(profile))
         compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
         return cls(
             profile=profile,
@@ -138,30 +249,37 @@ class Config:
 
         Passing None (or an empty string) removes the stored value; fields not
         passed and other keys already in the file are preserved.
+
+        Writers serialize on a sidecar lock and replace the file atomically,
+        so two Paimons sharing a profile cannot lose each other's fields and
+        a reader never sees a half-written config.
         """
         path = config_path(self.profile)
-        data = _load_file_config(path)
-        passed = [(key, value) for key, value in (
-            ("model", model), ("api_base", api_base), ("api_key", api_key),
-            ("theme", theme),
-            ("show_reasoning", show_reasoning),
-            ("recap_enabled", recap_enabled),
-        ) if value is not UNSET]
-        for key, value in passed:
-            if value is None or value == "":
-                data.pop(key, None)
-            else:
-                data[key] = value
-
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(data, indent=2, ensure_ascii=False)
-        # The file may hold an API key: create it private, repair old copies.
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, payload.encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.chmod(path, 0o600)
+        lock = _lock_path(path)
+        with _SAVE_MUTEX:
+            if not lockfile.acquire(lock, _SAVE_LOCK_TIMEOUT):
+                raise ConfigError(
+                    f"another Paimon held {lock} for over {_SAVE_LOCK_TIMEOUT:.0f}s, "
+                    "nothing was written")
+            try:
+                # Re-read inside the lock: whatever another process saved since
+                # this instance was loaded is merged, not overwritten.
+                data = _read_file_config(path)
+                passed = [(key, value) for key, value in (
+                    ("model", model), ("api_base", api_base), ("api_key", api_key),
+                    ("theme", theme),
+                    ("show_reasoning", show_reasoning),
+                    ("recap_enabled", recap_enabled),
+                ) if value is not UNSET]
+                for key, value in passed:
+                    if value is None or value == "":
+                        data.pop(key, None)
+                    else:
+                        data[key] = value
+                _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+            finally:
+                lockfile.release(lock)
 
         # Only the fields this call wrote are refreshed from the file. A
         # runtime override the caller set on the instance (paimon --model X

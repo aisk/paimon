@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import UNSET, Config, config_path, validate_profile
+from .errors import PaimonError
 from .llm import is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
 from .tools import summarize_call
@@ -78,7 +79,11 @@ def status(argv: list) -> int:
     args = parser.parse_args(argv)
     profile = _resolve_profile(parser, args)
 
-    config = Config.load(profile)
+    try:
+        config = Config.load(profile)
+    except PaimonError as exc:
+        print(f"paimon: {exc}", file=sys.stderr)
+        return 1
     logged_in = bool(config.model)
     if args.json:
         # The api_key itself is deliberately absent: status output is meant
@@ -149,6 +154,8 @@ def login(argv: list) -> int:
                             help="read the API key from this environment variable")
     key_source.add_argument("--api-key-stdin", action="store_true",
                             help="read the API key from stdin")
+    parser.add_argument("--force", action="store_true",
+                        help="discard an unreadable config and log in fresh")
     _profile_option(parser)
     args = parser.parse_args(argv)
     profile = _resolve_profile(parser, args)
@@ -162,12 +169,29 @@ def login(argv: list) -> int:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
 
-    Config.load(profile).save(
-        model=args.model,
-        # An absent flag keeps the stored value; only an explicit '' clears it.
-        api_base=args.api_base if args.api_base is not None else UNSET,
-        api_key=api_key if api_key is not None else UNSET,
-    )
+    try:
+        config = Config.load(profile)
+    except PaimonError as exc:
+        # The only recovery path the CLI offers for a damaged config: without
+        # it the file can only be repaired by hand, since every command
+        # (deliberately) refuses to touch it.
+        if not args.force:
+            print(f"paimon: {exc}", file=sys.stderr)
+            print("paimon: pass --force to discard the unreadable config and log in fresh",
+                  file=sys.stderr)
+            return 1
+        config_path(profile).unlink(missing_ok=True)
+        config = Config(profile=profile)
+    try:
+        config.save(
+            model=args.model,
+            # An absent flag keeps the stored value; only an explicit '' clears it.
+            api_base=args.api_base if args.api_base is not None else UNSET,
+            api_key=api_key if api_key is not None else UNSET,
+        )
+    except PaimonError as exc:
+        print(f"paimon: {exc}", file=sys.stderr)
+        return 1
     print(f"logged in: {args.model}")
     return 0
 

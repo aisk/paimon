@@ -15,6 +15,7 @@ from textual.widgets import ContentSwitcher, Static
 from . import compaction, tools
 from .agent import Agent
 from .config import DEFAULT_PROFILE, Config, list_profiles
+from .errors import PaimonError
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .pane import Pane, SessionPane
 from .session import SessionError
@@ -324,10 +325,28 @@ class PaimonApp(App):
                 self._switch_to(pane)
                 return
 
+    def save_config(self, **fields) -> None:
+        """Persist config fields without blocking or crashing the UI.
+
+        save() waits on the cross-process lock (up to 10s when another
+        instance is stuck) and fsyncs twice, and it raises ConfigError on a
+        corrupt file, so it runs on a worker thread and a failure lands as a
+        notice instead of an exception tearing down the app.
+        """
+        def _write() -> None:
+            try:
+                self.config.save(**fields)
+            except PaimonError as exc:
+                self.call_from_thread(
+                    self.pane.notice,
+                    Content.from_markup("[$text-error b]Config not saved:[/] $body",
+                                        body=str(exc)))
+        self.run_worker(_write, thread=True, group="config-save")
+
     def _watch_theme(self, theme_name: str) -> None:
         super()._watch_theme(theme_name)
         if self._persist_theme_changes:
-            self.config.save(theme=theme_name)
+            self.save_config(theme=theme_name)
 
     def compose(self) -> ComposeResult:
         yield self._tabs
@@ -394,7 +413,10 @@ class PaimonApp(App):
             self.pane.interrupt()
 
     def action_toggle_reasoning(self) -> None:
-        self.config.save(show_reasoning=not self.config.show_reasoning)
+        # Flipped on the instance up front: the write happens on a worker
+        # thread, and the UI must reflect the toggle immediately.
+        self.config.show_reasoning = not self.config.show_reasoning
+        self.save_config(show_reasoning=self.config.show_reasoning)
         state = "streamed live" if self.config.show_reasoning else "folded"
         self.pane.notice(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
 
@@ -404,7 +426,8 @@ class PaimonApp(App):
         Config is process-wide, so one switch covers all panes; turning it off
         also drops recaps already armed, which check the flag only when armed.
         """
-        self.config.save(recap_enabled=not self.config.recap_enabled)
+        self.config.recap_enabled = not self.config.recap_enabled
+        self.save_config(recap_enabled=self.config.recap_enabled)
         if not self.config.recap_enabled:
             for pane in self.sessions:
                 pane._cancel_recap()
@@ -474,7 +497,7 @@ class PaimonApp(App):
             return
         try:
             switched = Config.load(name)
-        except ValueError as exc:
+        except (ValueError, PaimonError) as exc:
             self.pane.notice(Content.from_markup("[$text-error b]Cannot switch:[/] $body", body=str(exc)))
             self.pane._focus_input()
             return

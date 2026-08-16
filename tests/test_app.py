@@ -588,10 +588,11 @@ class ReasoningDisplayTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             app.action_toggle_reasoning()
-            await pilot.pause()
+            self.assertTrue(app.config.show_reasoning, "flips before the write lands")
+            await app.workers.wait_for_complete()  # the save runs on a thread
             self.assertTrue(Config.load().show_reasoning)
-            self.assertTrue(app.config.show_reasoning)
             app.action_toggle_reasoning()
+            await app.workers.wait_for_complete()
             self.assertFalse(Config.load().show_reasoning, "persisted to config.json")
 
     async def test_toggle_recap_flips_persists_and_drops_an_armed_recap(self) -> None:
@@ -602,12 +603,12 @@ class ReasoningDisplayTest(AppTestCase):
             app.pane._arm_recap()
             self.assertIsNotNone(app.pane._recap_timer)
             app.action_toggle_recap()
-            await pilot.pause()
-            self.assertFalse(Config.load().recap_enabled)
             self.assertFalse(app.config.recap_enabled)
             self.assertIsNone(app.pane._recap_timer, "an armed recap is dropped")
+            await app.workers.wait_for_complete()  # the save runs on a thread
+            self.assertFalse(Config.load().recap_enabled)
             app.action_toggle_recap()
-            await pilot.pause()
+            await app.workers.wait_for_complete()
             self.assertTrue(Config.load().recap_enabled)
             # Turning it back on arms nothing by itself: the next turn does.
             self.assertIsNone(app.pane._recap_timer)

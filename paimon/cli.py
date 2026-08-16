@@ -10,6 +10,7 @@ from . import headless as headless_mode
 from .agent import Agent
 from .app import PaimonApp
 from .config import Config
+from .errors import PaimonError
 from .llm import split_model_string
 from .session import SessionError, resume_hint
 
@@ -82,6 +83,9 @@ def main() -> None:
         config = Config.load(args.profile)
     except ValueError as exc:
         parser.error(str(exc))
+    except PaimonError as exc:
+        print(f"paimon: {exc}", file=sys.stderr)
+        sys.exit(1)
     if args.strict:
         config.safe_commands = False  # session-only; save() never persists this key
     if args.model is not None:
