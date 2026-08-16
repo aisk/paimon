@@ -456,15 +456,28 @@ class InsideTest(unittest.TestCase):
             self.assertFalse(_inside(link, cwd))
 
     def test_symlink_loop_confirms_instead_of_raising(self) -> None:
-        """resolve() raises RuntimeError on a loop, outside any tool-call error
-        boundary: it has to come back as a permission decision, not end the turn."""
+        """A loop must come back as a permission decision, not end the turn.
+
+        Before Python 3.13 resolve() raises RuntimeError on a loop, so the path
+        counts as outside and the gate confirms. From 3.13 resolve() returns
+        the path with the loop left in place; that sits inside cwd, the gate
+        allows, and the ELOOP surfaces at open time inside the tool-call error
+        boundary. Either way nothing raises here.
+        """
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory).resolve()
             loop = cwd / "loop"
             loop.symlink_to(loop)
 
-            self.assertFalse(_inside(loop, cwd))
-            self.assertEqual(gate("read_file", {"path": "loop"}, "read", cwd), "confirm")
+            try:
+                loop.resolve()
+            except (OSError, RuntimeError):
+                self.assertFalse(_inside(loop, cwd))
+                expected = "confirm"
+            else:
+                self.assertTrue(_inside(loop, cwd))
+                expected = "allow"
+            self.assertEqual(gate("read_file", {"path": "loop"}, "read", cwd), expected)
 
 
 class GlobSandboxTest(unittest.TestCase):
