@@ -609,6 +609,44 @@ class Agent:
             self._append_message(agents_message(summary))
             yield AgentsNotice(summary)
         self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
+
+        # Every turn leaves exactly one terminal ``turn_end`` record in the
+        # session: success, error (with the exception), max_tool_calls or
+        # interrupted. The record is not a message, so it reaches audits and
+        # ``paimon log`` without an error or a partial answer ever being
+        # replayed to the model as a normal assistant response.
+        outcome_recorded = False
+
+        def record_outcome(outcome: str, *, error: Optional[str] = None,
+                           partial_text: Optional[str] = None) -> None:
+            nonlocal outcome_recorded
+            if outcome_recorded:
+                return
+            outcome_recorded = True
+            self.session.append_meta("turn_end", outcome=outcome, error=error,
+                                     partial_text=partial_text)
+
+        try:
+            async for event in self._run(record_outcome, max_tool_calls):
+                yield event
+            # A session handoff is the one path that ends the loop without
+            # its own record; it ended the turn deliberately.
+            record_outcome("success")
+        except asyncio.CancelledError:
+            record_outcome("interrupted")
+            raise
+        except GeneratorExit:
+            # The consumer abandoned the turn mid-iteration.
+            record_outcome("interrupted")
+            raise
+        except Exception as exc:
+            record_outcome("error", error=f"{type(exc).__name__}: {exc}")
+            raise
+
+    async def _run(self, record_outcome: Callable[..., None],
+                   max_tool_calls: Optional[int]) -> AsyncIterator[AgentEvent]:
+        """The model/tool loop of one turn; ``run`` wraps it to guarantee the
+        terminal ``turn_end`` record whatever way the turn ends."""
         # A compaction that failed for a transient reason is retried on the
         # next step of this turn — the context only keeps growing, so giving
         # up on the first rate limit disables the safety net exactly when it
@@ -636,6 +674,7 @@ class Agent:
                     compaction_failures += 1
                     compaction_off = (not retry.is_transient(exc)
                                       or compaction_failures >= _MAX_COMPACTION_FAILURES)
+                    self.session.append_meta("compaction_failed", error=str(exc))
                     yield ContextCompactionFailed(str(exc))
                 else:
                     compaction_failures = 0
@@ -700,6 +739,7 @@ class Agent:
                     # Interrupted mid-stream: keep partial text but drop incomplete
                     # tool calls and thinking (Z.ai-style preserved thinking must be
                     # replayed complete or not at all) so the history stays valid.
+                    record_outcome("interrupted", partial_text=content or None)
                     self._append_message(ModelResponse(
                         parts=[TextPart(content=content or "(interrupted)")],
                         model_name=model.model_name,
@@ -709,8 +749,15 @@ class Agent:
                 except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
                     attempt += 1
                     if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
+                        # Recorded here rather than in run()'s outer boundary
+                        # because only this scope still holds the partial text
+                        # the user already saw streaming.
+                        record_outcome("error", error=f"{type(exc).__name__}: {exc}",
+                                       partial_text=content or None)
                         raise
                     delay = retry.backoff(attempt)
+                    self.session.append_meta("model_retry", attempt=attempt,
+                                             error=retry.describe(exc))
                     yield ModelRetry(attempt, retry.MAX_ATTEMPTS, delay, retry.describe(exc))
                     await asyncio.sleep(delay)
 
@@ -720,6 +767,7 @@ class Agent:
 
             calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
             if not calls:
+                record_outcome("success")
                 yield TurnEnd()
                 return
 
@@ -788,6 +836,7 @@ class Agent:
                 yield ToolEnd(call.tool_call_id, name, result, denied=denied)
 
             if budget_hit:
+                record_outcome("max_tool_calls")
                 yield ToolBudgetExhausted(max_tool_calls)
                 return
             # loop again so the model can react to tool results

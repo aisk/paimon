@@ -338,6 +338,22 @@ class DriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["subtype"], "error")
         self.assertIn("boom", result["error"])
 
+    async def test_timeout_refines_the_recorded_outcome(self) -> None:
+        """SESSION-1: the result subtype and the session's final turn_end agree."""
+        from pydantic_ai.models.function import FunctionModel
+
+        async def stall(messages, info):
+            await asyncio.sleep(3600)
+            yield "late"
+
+        agent = self._agent(FunctionModel(stream_function=stall))
+        code = await headless._drive(agent, self._renderer(), "hi", timeout=0.1)
+        self.assertEqual(code, 124)
+        records = [json.loads(line) for line in
+                   self.session.path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records[-1]["type"], "turn_end")
+        self.assertEqual(records[-1]["outcome"], "timeout")
+
     async def test_interrupt_exits_130_and_keeps_history_loadable(self) -> None:
         from pydantic_ai.models.function import FunctionModel
 

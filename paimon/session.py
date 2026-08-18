@@ -371,6 +371,18 @@ class Session:
         self.append(record)
         return record_id
 
+    def append_meta(self, kind: str, **fields) -> None:
+        """Persist a lifecycle record that is not part of the conversation.
+
+        Used for turn outcomes (``turn_end``), retries and compaction
+        failures. ``messages()`` ignores every record type it does not know,
+        so these are visible to ``paimon log`` and the history tools without
+        ever entering the LLM context. Fields that are None are dropped.
+        """
+        record = {"type": kind, "timestamp": _now()}
+        record.update({key: value for key, value in fields.items() if value is not None})
+        self.append(record)
+
     def append_compaction(self, summary: str, kept_messages: list[ModelMessage], tokens_before: int) -> None:
         """Persist a checkpoint without deleting any earlier JSONL records."""
         self.append({

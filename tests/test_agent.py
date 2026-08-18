@@ -1,4 +1,6 @@
+import asyncio
 import gc
+import json
 import tempfile
 import threading
 import unittest
@@ -49,6 +51,12 @@ from paimon.session import (
 
 def _config() -> Config:
     return Config(model="test:stub")
+
+
+def _records(session: Session) -> list[dict]:
+    """Every raw record in the session log, in order."""
+    return [json.loads(line) for line in
+            session.path.read_text(encoding="utf-8").splitlines()]
 
 
 class AgentSystemPromptTest(unittest.TestCase):
@@ -764,6 +772,112 @@ class ModelOverrideTest(unittest.TestCase):
             agent = Agent(make_session(Path(directory)), "snapshot",
                           config=Config(model="test:stub"), model_override="claude-x")
             self.assertEqual(compaction.context_window(agent.model_name), 200_000)
+
+
+class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
+    """SESSION-1: every turn leaves a terminal turn_end record, and failures
+    with partial output are persisted without entering the LLM context."""
+
+    def _open(self, cwd: Path, model) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        patcher = patch("paimon.agent.build_model", return_value=model)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return Agent.open(cwd=cwd, session=session, config=_config())
+
+    async def test_success_records_a_turn_end(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory), stub_model())
+            [event async for event in agent.run("go")]
+            last = _records(agent.session)[-1]
+            self.assertEqual((last["type"], last["outcome"]), ("turn_end", "success"))
+
+    async def test_zero_output_failure_records_the_error(self) -> None:
+        async def explode(messages, info):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - makes this an async generator
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory), FunctionModel(stream_function=explode))
+            with self.assertRaises(RuntimeError):
+                [event async for event in agent.run("go")]
+            last = _records(agent.session)[-1]
+            self.assertEqual(last["outcome"], "error")
+            self.assertEqual(last["error"], "RuntimeError: boom")
+            self.assertNotIn("partial_text", last)
+            # No error assistant enters the context: the history ends on the
+            # user request, which is still resumable.
+            self.assertIsInstance(agent.session.messages()[-1], ModelRequest)
+
+    async def test_failure_after_partial_output_persists_the_partial(self) -> None:
+        async def stream(messages, info):
+            yield "half an answer"
+            raise RuntimeError("dropped")
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory), FunctionModel(stream_function=stream))
+            with self.assertRaises(RuntimeError):
+                [event async for event in agent.run("go")]
+            last = _records(agent.session)[-1]
+            self.assertEqual(last["outcome"], "error")
+            self.assertEqual(last["partial_text"], "half an answer")
+            for message in agent.session.messages():
+                if isinstance(message, ModelResponse):
+                    for part in message.parts:
+                        self.assertNotIn("half an answer", getattr(part, "content", ""),
+                                         "the partial must not replay as a normal answer")
+
+    async def test_transient_retries_are_recorded(self) -> None:
+        attempts = 0
+
+        async def stream(messages, info):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("dropped")
+            yield "done"
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("paimon.agent.asyncio.sleep"):
+                agent = self._open(Path(directory), FunctionModel(stream_function=stream))
+                [event async for event in agent.run("go")]
+            records = _records(agent.session)
+            retries = [r for r in records if r["type"] == "model_retry"]
+            self.assertEqual([r["attempt"] for r in retries], [1])
+            self.assertEqual(records[-1]["outcome"], "success")
+
+    async def test_cancellation_records_interrupted(self) -> None:
+        async def stream(messages, info):
+            yield "partial answer"
+            raise asyncio.CancelledError
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory), FunctionModel(stream_function=stream))
+            with self.assertRaises(asyncio.CancelledError):
+                [event async for event in agent.run("go")]
+            ends = [r for r in _records(agent.session) if r["type"] == "turn_end"]
+            self.assertEqual([r["outcome"] for r in ends], ["interrupted"])
+            self.assertEqual(ends[0]["partial_text"], "partial answer")
+
+    async def test_budget_stop_records_max_tool_calls(self) -> None:
+        arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory), stub_model("write_todos", arguments))
+            [event async for event in agent.run("go", max_tool_calls=0)]
+            self.assertEqual(_records(agent.session)[-1]["outcome"], "max_tool_calls")
+
+    async def test_compaction_failure_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("paimon.agent.Agent._maybe_compact",
+                       new=AsyncMock(side_effect=[httpx.ConnectError("dropped"), None])):
+                arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+                agent = self._open(Path(directory), stub_model("write_todos", arguments))
+                [event async for event in agent.run("go")]
+            failures = [r for r in _records(agent.session)
+                        if r["type"] == "compaction_failed"]
+            self.assertEqual(len(failures), 1)
+            self.assertIn("dropped", failures[0]["error"])
 
 
 class CompactionFailureTest(unittest.IsolatedAsyncioTestCase):

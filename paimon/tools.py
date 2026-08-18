@@ -215,6 +215,22 @@ def render_record(seq: int, record: Optional[dict], full: bool) -> list[str]:
         kept = record.get("kept_messages")
         return [f"[{seq}] compacted: {record.get('tokens_before') or 0:,} tokens "
                 f"→ summary + {len(kept) if isinstance(kept, list) else 0} kept"]
+    if kind == "turn_end":
+        line = f"[{seq}] turn_end {record.get('outcome') or '?'}"
+        error = record.get("error")
+        if isinstance(error, str) and error:
+            line += f"  {_clip(error, full)}"
+        lines = [line]
+        partial = record.get("partial_text")
+        if isinstance(partial, str) and partial:
+            lines.append(f"[{seq}] partial  "
+                         + (partial if full else f"({_chars(partial)}) {_clip(partial, False)}"))
+        return lines
+    if kind == "model_retry":
+        return [f"[{seq}] model_retry attempt {record.get('attempt') or '?'}  "
+                f"{_clip(record.get('error') or '', full)}".rstrip()]
+    if kind == "compaction_failed":
+        return [f"[{seq}] compaction_failed  {_clip(record.get('error') or '', full)}".rstrip()]
     return [f"[{seq}] {kind or '?'}"]
 
 

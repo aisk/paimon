@@ -391,6 +391,10 @@ async def _drive(agent: Agent, renderer, text: str, *,
         renderer.finish(subtype="interrupted")
         return 130
     except asyncio.TimeoutError:
+        # The agent recorded the cancellation as "interrupted" — only this
+        # scope knows it was the --timeout deadline, so refine the outcome.
+        agent.session.append_meta("turn_end", outcome="timeout",
+                                  error=f"timed out after --timeout {timeout:g}s")
         renderer.finish(subtype="timeout", error=f"timed out after --timeout {timeout:g}s")
         return 124
     except _ToolBudgetExceeded:

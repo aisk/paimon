@@ -440,6 +440,18 @@ class LogTest(CommandTestCase):
         self.assertNotIn("Interrupted by user.", out)
         self.assertIn("ok (exit code 0)", out)
 
+    def test_turn_end_records_render_with_error_and_partial(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        session.append_meta("turn_end", outcome="error",
+                            error="RuntimeError: boom", partial_text="half an answer")
+        code, out, err = self._run("log")
+        self.assertEqual(code, 0)
+        self.assertIn("turn_end error  RuntimeError: boom", out)
+        self.assertIn("partial", out)
+        code, out, err = self._run("log", "--full")
+        self.assertIn("half an answer", out)
+
     def test_json_merges_seq_into_the_record(self) -> None:
         session = Session.create(Path.cwd())
         session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
