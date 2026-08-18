@@ -417,11 +417,19 @@ class Session:
         return _repair_orphan_tool_calls(loaded)
 
     def system_prompt(self) -> Optional[str]:
-        """Return the system prompt snapshot stored for this session."""
+        """The latest system prompt snapshot stored for this session."""
+        return self.system_prompt_parts()[0]
+
+    def system_prompt_parts(self) -> tuple[Optional[str], Optional[str]]:
+        """(latest prompt snapshot, its user-appended suffix), None when absent."""
+        content: Optional[str] = None
+        appended: Optional[str] = None
         for record in self._iter_records(self.path):
             if record.get("type") == "system_prompt" and isinstance(record.get("content"), str):
-                return record["content"]
-        return None
+                content = record["content"]
+                raw = record.get("appended")
+                appended = raw if isinstance(raw, str) and raw else None
+        return content, appended
 
     def created_at(self) -> Optional[str]:
         """ISO timestamp from the session header record, if present."""
@@ -446,13 +454,23 @@ class Session:
                     return content
         return None
 
-    def append_system_prompt(self, content: str) -> None:
-        """Persist the system prompt generated when the session is first loaded."""
-        self.append({
+    def append_system_prompt(self, content: str, appended: Optional[str] = None) -> None:
+        """Persist a system prompt snapshot.
+
+        ``appended`` is the user-supplied role suffix (--append-system-prompt)
+        stored separately so a resume can rebuild the dynamic parts of the
+        prompt (date, environment, AGENTS.md) while keeping the role intact.
+        The log keeps every snapshot; ``system_prompt()`` reads the latest,
+        the older ones remain as the audit trail of what each turn ran with.
+        """
+        record = {
             "type": "system_prompt",
             "timestamp": _now(),
             "content": content,
-        })
+        }
+        if appended:
+            record["appended"] = appended
+        self.append(record)
 
     def append_message(self, message: ModelMessage, replaces: Optional[str] = None) -> str:
         record_id = str(uuid4())

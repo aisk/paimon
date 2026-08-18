@@ -60,7 +60,9 @@ def _records(session: Session) -> list[dict]:
 
 
 class AgentSystemPromptTest(unittest.TestCase):
-    def test_system_prompt_is_generated_once_then_loaded_from_session(self) -> None:
+    def test_resume_rebuilds_the_prompt_and_records_changed_snapshots(self) -> None:
+        """PROMPT-1: the dynamic prompt (date, environment, AGENTS.md) is
+        rebuilt on resume; the log gains a snapshot only when it changed."""
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             session = make_session(cwd)
@@ -75,12 +77,41 @@ class AgentSystemPromptTest(unittest.TestCase):
             self.assertEqual(session.system_prompt(), "snapshot")
             generate.assert_called_once_with(cwd)
 
+            def snapshots() -> list[str]:
+                return [json.loads(line)["content"]
+                        for line in session.path.read_text(encoding="utf-8").splitlines()
+                        if json.loads(line).get("type") == "system_prompt"]
+
             first.session.unlock()  # a session is only ever open once at a time
-            with patch("paimon.agent.build_system_prompt") as generate:
+            with patch("paimon.agent.build_system_prompt", return_value="snapshot"):
+                resumed = Agent.open(cwd=cwd, session=session, config=_config())
+            self.assertEqual(resumed.system_prompt, "snapshot")
+            self.assertEqual(snapshots(), ["snapshot"], "an unchanged prompt appends nothing")
+
+            resumed.session.unlock()
+            with patch("paimon.agent.build_system_prompt", return_value="fresh snapshot"):
+                fresh = Agent.open(cwd=cwd, session=session, config=_config())
+            self.assertEqual(fresh.system_prompt, "fresh snapshot")
+            self.assertEqual(snapshots(), ["snapshot", "fresh snapshot"],
+                             "the audit trail keeps every snapshot, latest wins")
+            self.assertEqual(session.system_prompt(), "fresh snapshot")
+
+    def test_resume_keeps_the_appended_role_on_a_rebuilt_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            with (
+                patch("paimon.agent.Session.create", return_value=session),
+                patch("paimon.agent.build_system_prompt", return_value="base"),
+            ):
+                first = Agent.open(cwd=cwd, config=_config(),
+                                   append_system_prompt="You are a reviewer.")
+            first.session.unlock()
+
+            with patch("paimon.agent.build_system_prompt", return_value="new base"):
                 resumed = Agent.open(cwd=cwd, session=session, config=_config())
 
-            self.assertEqual(resumed.system_prompt, "snapshot")
-            generate.assert_not_called()
+            self.assertEqual(resumed.system_prompt, "new base\n\nYou are a reviewer.")
 
     def test_append_system_prompt_extends_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

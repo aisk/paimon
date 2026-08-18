@@ -86,7 +86,10 @@ class AsideRequestTest(unittest.IsolatedAsyncioTestCase):
     def _agent(self, cwd: Path) -> Agent:
         session = make_session(cwd)
         session.append_system_prompt("snapshot")
-        return Agent.open(cwd=cwd, session=session, config=_config())
+        # Resume rebuilds the dynamic prompt; pin it so assertions on the
+        # system part stay literal.
+        with patch("paimon.agent.build_system_prompt", return_value="snapshot"):
+            return Agent.open(cwd=cwd, session=session, config=_config())
 
     async def _ask(self, agent: Agent, model, question: str = "what now?") -> str:
         with patch("paimon.agent.build_model", return_value=model):

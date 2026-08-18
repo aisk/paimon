@@ -361,7 +361,12 @@ class Agent:
 
         ``append_system_prompt`` is added to the end of a new session's system
         prompt and persisted with it, so a resumed session keeps it. Resuming
-        with it set raises ``ValueError``: the persisted prompt is immutable.
+        with it set raises ``ValueError``: the persisted role is immutable.
+        The dynamic parts of the prompt (date, environment, AGENTS.md) are
+        rebuilt on resume — a session picked up months later must not keep
+        telling the model the old date or stale project rules — and when they
+        changed, the rebuilt snapshot is appended to the log, so it always
+        records the prompt each turn actually ran with.
         ``parent`` marks the new session as a subagent's, which keeps it out of
         the session listings its parent shows up in.
 
@@ -382,15 +387,21 @@ class Agent:
         # Agent is returned to unlock it, so the lock is released here.
         try:
             if is_new:
+                appended = append_system_prompt.strip() if append_system_prompt else None
                 system_prompt = build_system_prompt(cwd)
-                if append_system_prompt:
-                    system_prompt += f"\n\n{append_system_prompt.strip()}"
-                session.append_system_prompt(system_prompt)
+                if appended:
+                    system_prompt += f"\n\n{appended}"
+                session.append_system_prompt(system_prompt, appended=appended)
             else:
                 session.require_supported_format()
-                system_prompt = session.system_prompt()
-                if system_prompt is None:
+                stored, appended = session.system_prompt_parts()
+                if stored is None:
                     raise SessionIncompleteError("Session does not contain a persisted system prompt")
+                system_prompt = build_system_prompt(cwd)
+                if appended:
+                    system_prompt += f"\n\n{appended}"
+                if system_prompt != stored:
+                    session.append_system_prompt(system_prompt, appended=appended)
             return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
                        config=config, toolset=toolset, model_override=model_override)
         except BaseException:
