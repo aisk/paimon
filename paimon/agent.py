@@ -289,8 +289,9 @@ class Agent:
         # None where nobody can type while a turn runs (headless, tests).
         self.pending: Optional[PendingFn] = None
         # Per-agent tool state, kept off the tool functions so one agent's
-        # shell overflow files stay invisible to the next one.
-        self.tool_context = tools.ToolContext()
+        # shell overflow files stay invisible to the next one. The session
+        # rides along for the history tools.
+        self.tool_context = tools.ToolContext(session=session)
         self.todos: list[dict] = []
         self.session = session
         self.system_prompt = system_prompt

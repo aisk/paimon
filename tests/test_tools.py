@@ -8,6 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from helpers import make_session
+from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
+
 from paimon.tools import (
     MAX_OUTPUT,
     MODES,
@@ -15,6 +18,8 @@ from paimon.tools import (
     _TaskOutput,
     _glob,
     _inside,
+    _read_history,
+    _search_history,
     _shell,
     gate,
     run_tool,
@@ -612,6 +617,115 @@ class BackgroundGateTest(unittest.TestCase):
     def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
         for name in ("read_job", "wait_for_job", "stop_job"):
             self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
+
+
+class HistoryToolsTest(unittest.TestCase):
+    """search_history/read_history see the whole log, compaction included."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        self.session = make_session(self.cwd)
+        self.ctx = ToolContext(session=self.session)
+
+    def _user(self, text: str) -> str:
+        return self.session.append_message(ModelRequest(parts=[UserPromptPart(content=text)]))
+
+    def _tool_return(self, tool_name: str, content: str) -> str:
+        part = ToolReturnPart(tool_name=tool_name, content=content, tool_call_id="call-1")
+        return self.session.append_message(ModelRequest(parts=[part]))
+
+    def test_search_finds_content_from_before_a_compaction(self) -> None:
+        self._user("the database password lives in vault.yaml")
+        self.session.append_compaction("earlier work summarized", [], 1000)
+        self._user("carry on")
+        result = _search_history({"query": "vault"}, self.ctx)
+        self.assertIn("vault.yaml", result)
+        self.assertIn("[2] user", result, "the hit keeps its pre-compaction seq")
+
+    def test_compaction_summaries_match_but_kept_messages_do_not_double_count(self) -> None:
+        message = ModelRequest(parts=[UserPromptPart(content="unique-marker in a kept message")])
+        self.session.append_message(message)
+        self.session.append_compaction("summary mentions unique-marker too", [message], 1000)
+        result = _search_history({"query": "unique-marker"}, self.ctx)
+        self.assertIn("2 matching parts", result,
+                      "one hit for the original record, one for the summary, none for kept_messages")
+        self.assertIn("compaction summary", result)
+
+    def test_a_replaced_record_is_searched_only_in_its_final_form(self) -> None:
+        record_id = self._tool_return("shell", "first-draft output")
+        replacement = ModelRequest(parts=[ToolReturnPart(
+            tool_name="shell", content="final output", tool_call_id="call-1")])
+        self.session.append_message(replacement, replaces=record_id)
+        self.assertIn("No matches", _search_history({"query": "first-draft"}, self.ctx))
+        result = _search_history({"query": "final output"}, self.ctx)
+        self.assertIn("[3]", result, "the hit carries the replacement line's seq")
+
+    def test_the_history_tools_own_output_is_not_searched(self) -> None:
+        self._tool_return("search_history", "[2] user: needle from an earlier search")
+        self._tool_return("shell", "a real needle")
+        result = _search_history({"query": "needle"}, self.ctx)
+        self.assertIn("1 matching part", result)
+        self.assertIn("tool_result shell", result)
+
+    def test_an_invalid_regex_falls_back_to_a_literal_search(self) -> None:
+        self._user("weird chars: a[b")
+        result = _search_history({"query": "a[b"}, self.ctx)
+        self.assertIn("searched literally", result)
+        self.assertIn("a[b", result)
+
+    def test_a_corrupt_line_keeps_later_seq_numbers_in_place(self) -> None:
+        self._user("before the corruption")
+        with self.session.path.open("a", encoding="utf-8") as file:
+            file.write("this is not json\n")
+        self._user("after the corruption")
+        result = _search_history({"query": "after the corruption"}, self.ctx)
+        self.assertIn("[4] user", result)
+        self.assertIn("<corrupt>", _read_history({"seq": 3}, self.ctx))
+
+    def test_max_results_truncation_reports_the_total(self) -> None:
+        for i in range(5):
+            self._user(f"needle number {i}")
+        result = _search_history({"query": "needle", "max_results": 2}, self.ctx)
+        self.assertIn("5 matching parts", result)
+        self.assertIn("showing the first 2", result)
+        self.assertEqual(len(result.splitlines()), 3)
+
+    def test_read_history_returns_full_records_by_seq(self) -> None:
+        self._user("short question")
+        self._tool_return("shell", "line one\nline two")
+        result = _read_history({"seq": 2, "count": 2}, self.ctx)
+        self.assertIn("[2] user  short question", result)
+        self.assertIn("line one\nline two", result, "full mode keeps newlines")
+
+    def test_read_history_rejects_a_seq_outside_the_log(self) -> None:
+        self._user("only entry")
+        self.assertIn("out of range", _read_history({"seq": 99}, self.ctx))
+        self.assertIn("out of range", _read_history({"seq": 0}, self.ctx))
+
+    def test_read_history_stops_at_its_output_budget_with_a_note(self) -> None:
+        self._user("x" * (MAX_OUTPUT - 2000))
+        self._user("y" * (MAX_OUTPUT - 2000))
+        result = _read_history({"seq": 2, "count": 2}, self.ctx)
+        self.assertLess(len(result), MAX_OUTPUT)
+        self.assertIn("stopped before seq 3", result)
+
+    def test_a_single_oversized_record_is_truncated_rather_than_dropped(self) -> None:
+        self._user("z" * (MAX_OUTPUT + 5000))
+        result = _read_history({"seq": 2}, self.ctx)
+        self.assertLess(len(result), MAX_OUTPUT)
+        self.assertIn("record truncated", result)
+
+    def test_both_tools_error_readably_without_a_session(self) -> None:
+        ctx = ToolContext()
+        self.assertEqual(_search_history({"query": "x"}, ctx), "Error: no session log available")
+        self.assertEqual(_read_history({"seq": 1}, ctx), "Error: no session log available")
+
+    def test_history_tools_are_always_allowed_reads(self) -> None:
+        for mode in MODES:
+            self.assertEqual(gate("search_history", {"query": "x"}, mode, self.cwd), "allow")
+            self.assertEqual(gate("read_history", {"seq": 1}, mode, self.cwd), "allow")
 
 
 if __name__ == "__main__":

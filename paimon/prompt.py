@@ -30,6 +30,9 @@ Guidelines:
 - When the earlier conversation is mostly irrelevant to the next phase of work,
   call start_new_session with a self-contained handoff prompt instead of
   continuing in a bloated context.
+- Details lost to context compaction are not gone: the session log keeps the
+  full history. Use search_history to find them and read_history to read the
+  originals instead of guessing from the summary.
 - User @path mentions are expanded into <mentioned_file> tags. A tag with a body
   contains the complete file; a self-closing tag gives only the path, so call
   read_file when you need its contents.

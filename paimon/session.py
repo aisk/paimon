@@ -20,7 +20,8 @@ from .errors import PaimonError
 # A compaction checkpoint is a synthetic user message. Its shape belongs here
 # rather than to whatever decides *when* to compact: replaying a log has to
 # rebuild it, and previews have to recognize it as not-a-user-message.
-SUMMARY_PREFIX = "The conversation before this point was compacted into this checkpoint:\n\n"
+SUMMARY_PREFIX = ("The conversation before this point was compacted into this checkpoint "
+                  "(the full history remains searchable with the search_history tool):\n\n")
 
 # The other synthetic user message: a one-line report on the agents this
 # session started, prepended to a turn so the model learns that one of them
@@ -278,6 +279,24 @@ class Session:
     @staticmethod
     def _read_records(path: Path) -> list[dict]:
         return list(Session._iter_records(path))
+
+    def entries(self) -> list[tuple[int, Optional[dict]]]:
+        """Every physical line of the log as ``(seq, record)``.
+
+        Seq is the 1-based line number, stable because the log is append-only;
+        a corrupt line stays in place as ``(seq, None)`` so numbering never
+        shifts. Unlike _iter_records this raises OSError on an unreadable
+        file: every caller names this specific log and wants the failure.
+        """
+        entries: list[tuple[int, Optional[dict]]] = []
+        with self.path.open(encoding="utf-8") as file:
+            for seq, line in enumerate(file, 1):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    record = None
+                entries.append((seq, record if isinstance(record, dict) else None))
+        return entries
 
     def messages(self) -> list[ModelMessage]:
         raw_messages: list[dict] = []

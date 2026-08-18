@@ -164,6 +164,23 @@ class RequestStatsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(stat.seconds, 0)
 
 
+class HistoryToolWiringTest(unittest.IsolatedAsyncioTestCase):
+    async def test_search_history_reaches_the_agents_own_session_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("search_history", '{"query": "avocado"}')):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("the codeword is avocado")]
+
+            end = next(event for event in events if isinstance(event, ToolEnd))
+            self.assertIn("matching part", end.result)
+            self.assertIn("avocado", end.result)
+
+
 class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
     """The agent consults the gate per tool call: allow skips the confirm hook,
     confirm awaits it. The gate's full decision table is covered in test_tools."""

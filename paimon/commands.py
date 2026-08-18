@@ -22,7 +22,7 @@ from .config import UNSET, Config, config_path, validate_profile
 from .errors import PaimonError
 from .llm import is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
-from .tools import summarize_call
+from .tools import render_record
 
 
 def resolve_session(prefix: str) -> Session:
@@ -228,22 +228,6 @@ def sessions(argv: list) -> int:
     return 0
 
 
-# Compact log lines are collapsed to one line and clipped at this width.
-LOG_DETAIL_WIDTH = 120
-
-
-def _chars(text: str) -> str:
-    n = len(text)
-    return f"{n / 1000:.1f}k chars" if n >= 1000 else f"{n} chars"
-
-
-def _clip(text: object, full: bool) -> str:
-    if full:
-        return str(text)
-    line = " ".join(str(text).split())
-    return line if len(line) <= LOG_DETAIL_WIDTH else line[: LOG_DETAIL_WIDTH - 1] + "…"
-
-
 def _is_turn_start(record: Optional[dict]) -> bool:
     """True for a message that opens a turn: a real user prompt, not a
     compaction summary (same test as Session.first_user_text)."""
@@ -258,66 +242,6 @@ def _is_turn_start(record: Optional[dict]) -> bool:
                 and isinstance(content, str) and not is_synthetic_user_text(content)):
             return True
     return False
-
-
-def _render_message(seq: int, record: dict, full: bool) -> list[str]:
-    lines = []
-    for part in (record.get("message") or {}).get("parts") or []:
-        if not isinstance(part, dict):
-            continue
-        kind = part.get("part_kind")
-        content = part.get("content")
-        if kind == "user-prompt":
-            label, detail = "user", _clip(content, full)
-        elif kind == "text":
-            label, detail = "assistant", _clip(content, full)
-        elif kind == "thinking":
-            text = str(content or "")
-            label, detail = "thinking", text if full else f"({_chars(text)})"
-        elif kind == "tool-call":
-            args = part.get("args")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {"args": args}
-            name = str(part.get("tool_name") or "?")
-            detail = summarize_call(name, args if isinstance(args, dict) else {},
-                                    limit=None if full else LOG_DETAIL_WIDTH)
-            label = f"tool_call {name}"
-        elif kind == "tool-return":
-            text = content if isinstance(content, str) else json.dumps(
-                content, ensure_ascii=False, default=str)
-            label = f"tool_result {part.get('tool_name') or '?'}"
-            detail = text if full else f"({_chars(text)}) {_clip(text, False)}"
-        elif kind == "retry-prompt":
-            label, detail = "retry_prompt", _clip(content, full)
-        else:
-            label, detail = str(kind or "?"), ""
-        lines.append(f"[{seq}] {label}  {detail}".rstrip())
-    replaces = record.get("replaces")
-    if lines and isinstance(replaces, str):
-        lines[0] += f" (replaces {replaces[:8]})"
-    return lines
-
-
-def _render_record(seq: int, record: Optional[dict], full: bool) -> list[str]:
-    if record is None:
-        return [f"[{seq}] <corrupt>"]
-    kind = record.get("type")
-    if kind == "message":
-        return _render_message(seq, record, full)
-    if kind == "session":
-        return [f"[{seq}] session {str(record.get('id') or '')[:8]} "
-                f"created {record.get('created_at') or '?'}"]
-    if kind == "system_prompt":
-        content = str(record.get("content") or "")
-        return [f"[{seq}] system_prompt {content if full else f'({_chars(content)})'}"]
-    if kind == "compaction":
-        kept = record.get("kept_messages")
-        return [f"[{seq}] compacted: {record.get('tokens_before') or 0:,} tokens "
-                f"→ summary + {len(kept) if isinstance(kept, list) else 0} kept"]
-    return [f"[{seq}] {kind or '?'}"]
 
 
 def log(argv: list) -> int:
@@ -358,15 +282,8 @@ def log(argv: list) -> int:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
 
-    entries: list = []  # (seq, record | None for a corrupt line)
     try:
-        with session.path.open(encoding="utf-8") as file:
-            for seq, line in enumerate(file, 1):
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    record = None
-                entries.append((seq, record if isinstance(record, dict) else None))
+        entries = session.entries()
     except OSError as exc:
         print(f"paimon: cannot read {session.path}: {exc}", file=sys.stderr)
         return 1
@@ -384,7 +301,7 @@ def log(argv: list) -> int:
             payload = {"seq": seq, "corrupt": True} if record is None else {"seq": seq, **record}
             print(json.dumps(payload, ensure_ascii=False, default=str))
         else:
-            for line in _render_record(seq, record, args.full):
+            for line in render_record(seq, record, args.full):
                 print(line)
     return 0
 

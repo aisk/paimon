@@ -71,6 +71,28 @@ class PreviewTest(SessionScanTestCase):
         self.assertIsNone(Session.create(self.cwd).first_user_text())
 
 
+class EntriesTest(SessionScanTestCase):
+    def test_seq_is_the_physical_line_number_and_corrupt_lines_hold_their_place(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        with session.path.open("a", encoding="utf-8") as file:
+            file.write("not json\n")
+        session.append_message(ModelResponse(parts=[TextPart(content="hello!")]))
+
+        entries = session.entries()
+
+        self.assertEqual([seq for seq, _ in entries], [1, 2, 3, 4])
+        self.assertEqual(entries[0][1]["type"], "session")
+        self.assertIsNone(entries[2][1], "the corrupt line stays as a placeholder")
+        self.assertEqual(entries[3][1]["type"], "message")
+
+    def test_unreadable_file_raises_instead_of_yielding_nothing(self) -> None:
+        session = Session.create(self.cwd)
+        session.path.unlink()
+        with self.assertRaises(OSError):
+            session.entries()
+
+
 class ForkTest(SessionScanTestCase):
     def test_fork_copies_log_under_a_fresh_id(self) -> None:
         source = Session.create(self.cwd)
