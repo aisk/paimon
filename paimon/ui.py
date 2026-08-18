@@ -14,6 +14,23 @@ from textual.message import Message
 from textual.widgets import Markdown, Static, TextArea
 
 from .diff import locate_line, render_diff
+from .tools import resolve_path
+
+
+def abbreviate(text: str, limit: int) -> str:
+    """Head and tail of an oversized text, with the elision spelled out.
+
+    Never a bare prefix: in a confirmation the dangerous part of a long
+    command or write is as likely to sit at its end (`… && rm -rf /`), so the
+    tail must be part of what the user approves, and the marker names how much
+    was left out.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[: limit // 2]
+    tail = text[-(limit - len(head)):]
+    omitted = len(text) - len(head) - len(tail)
+    return f"{head}\n[… {omitted:,} of {len(text):,} characters not shown …]\n{tail}"
 
 
 class UserMessage(Static):
@@ -168,7 +185,7 @@ class EditCall(Vertical):
 
     @staticmethod
     def _clip(text: str, limit: int = _CLIP) -> str:
-        return text if len(text) <= limit else text[:limit] + " …"
+        return abbreviate(text, limit)
 
     def compose(self) -> ComposeResult:
         # built here rather than in __init__: the diff colors follow the app
@@ -288,22 +305,28 @@ class ConfirmPanel(Vertical, can_focus=True):
     """Inline confirmation for a dangerous tool call, shown in place of the prompt.
 
     Resolves its future with "allow" or "deny". Shows what would actually
-    run/change, not just a path.
+    run/change, not just a path: the detail scrolls, and content too large to
+    render is shown head and tail with the elision named — never a silent
+    prefix, since what gets approved is the whole operation.
     Navigate with Up/Down or 1-2, Enter to confirm, Esc to deny.
     """
 
-    _CLIP = 1_500
+    _CLIP = 20_000
     _OPTIONS = [
         ("allow", "Yes"),
         ("deny", "No (esc)"),
     ]
 
-    def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]") -> None:
+    def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]",
+                 cwd: Path | None = None) -> None:
         # No ID: several panes can have a panel up at once, and a shared ID
         # would make an app-wide query resolve to whichever one is first.
         super().__init__(classes="confirm-panel")
         self.tool_name = tool_name
         self.args = args
+        # The agent's cwd: previews resolve paths against it, exactly like the
+        # execution will, so the file shown is the file touched.
+        self._cwd = cwd
         self._future = future
         self._selected = 0
 
@@ -358,7 +381,10 @@ class ConfirmPanel(Vertical, can_focus=True):
 
     @staticmethod
     def _clip(text: str, limit: int = _CLIP) -> str:
-        return text if len(text) <= limit else text[:limit] + " …"
+        return abbreviate(text, limit)
+
+    def _preview_path(self, path: str) -> Path:
+        return resolve_path(path, self._cwd) if self._cwd is not None and path else Path(path)
 
     def _detail(self) -> RenderableType:
         args = self.args
@@ -376,7 +402,7 @@ class ConfirmPanel(Vertical, can_focus=True):
             path = str(args.get("path") or "")
             content = self._clip(str(args.get("content") or ""))
             try:
-                existing = Path(path).read_text() if path else ""
+                existing = self._preview_path(path).read_text(errors="replace") if path else ""
             except OSError:
                 existing = ""
             if existing:
@@ -397,7 +423,7 @@ class ConfirmPanel(Vertical, can_focus=True):
                 self._clip(old),
                 self._clip(new),
                 path=path,
-                start_line=locate_line(path, old, new),
+                start_line=locate_line(path, old, new, cwd=self._cwd),
                 theme=self.app.theme or "",
                 dark=self.app.current_theme.dark,
             )

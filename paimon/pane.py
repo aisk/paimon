@@ -738,7 +738,7 @@ class SessionPane(Pane):
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        panel = ConfirmPanel(tool_name, args, future)
+        panel = ConfirmPanel(tool_name, args, future, cwd=self.agent.cwd)
         prompt = self.query_one(PromptInput)
         # Removal below is asynchronous, so a panel from the previous confirm
         # (or an interrupted turn) may still be mounted; sweep it first. The

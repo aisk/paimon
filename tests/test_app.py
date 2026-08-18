@@ -126,6 +126,38 @@ class ConfirmPanelTest(AppTestCase):
                     raise AssertionError("confirm panel never appeared")
                 await pilot.press("ctrl+c")
 
+    async def test_long_command_shows_head_and_tail(self) -> None:
+        """UI-2: what gets approved is the whole operation — a dangerous
+        suffix must never be hidden behind a prefix clip."""
+        command = "echo start " + "x" * 60_000 + " && rm -rf tail-danger"
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot, args={"command": command})
+            detail = str(app.query_one("#confirm-detail Static", Static).render())
+            self.assertIn("echo start", detail)
+            self.assertIn("rm -rf tail-danger", detail)
+            self.assertIn("not shown", detail, "the elision is named, not silent")
+            await pilot.press("escape")
+            self.assertFalse(await task)
+
+    async def test_write_preview_resolves_against_the_agent_cwd(self) -> None:
+        from rich.console import Group
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            with tempfile.TemporaryDirectory() as directory:
+                other = Path(directory).resolve()
+                (other / "w.txt").write_text("old body\n")
+                app.pane.agent.cwd = other
+                task = await self._open(app, pilot, "write_file",
+                                        {"path": "w.txt", "content": "new body\n"})
+                panel = app.query_one(ConfirmPanel)
+                self.assertIsInstance(
+                    panel._detail(), Group,
+                    "the existing file is found via the agent's cwd, so the "
+                    "preview is a diff against it")
+                await pilot.press("escape")
+                self.assertFalse(await task)
+
     async def test_start_new_session_detail_shows_the_prompt(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:

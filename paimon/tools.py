@@ -308,6 +308,15 @@ def _resolve(path: str, cwd: Path) -> Path:
     return p if p.is_absolute() else cwd / p
 
 
+def resolve_path(path: str, cwd: Path) -> Path:
+    """The path a tool would actually touch, resolved against the agent's cwd.
+
+    Public so UI previews share the exact resolution the execution uses; two
+    implementations would eventually preview one file and modify another.
+    """
+    return _resolve(path, cwd)
+
+
 def _real(path: Path) -> Optional[Path]:
     """The path with symlinks resolved, or None when it cannot be resolved.
 
