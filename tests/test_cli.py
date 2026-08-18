@@ -274,6 +274,58 @@ class GuardRailTest(CliTestCase):
         self.assertEqual(code, 0)
         self.assertEqual([s.id for s in Session.list(self.cwd)], [session.id])
 
+    def test_unusable_data_home_keeps_the_result_protocol(self) -> None:
+        """HEADLESS-2: a startup failure must still produce the result line."""
+        blocker = self.cwd / "not-a-dir"
+        blocker.write_text("just a file")
+        with patch.dict("os.environ", {"PAIMON_DATA_HOME": str(blocker)}):
+            code, out, err = self._main_output("-p", "hi", "--output-format", "result")
+        self.assertEqual(code, 1)
+        result = json.loads(out)  # stdout is exactly one JSON object
+        self.assertEqual(result["subtype"], "error")
+        self.assertTrue(result["is_error"])
+        self.assertIsNone(result["session_id"])
+        self.assertIsNone(result["log_end"])
+
+    def test_unusable_data_home_keeps_the_json_protocol(self) -> None:
+        blocker = self.cwd / "not-a-dir"
+        blocker.write_text("just a file")
+        with patch.dict("os.environ", {"PAIMON_DATA_HOME": str(blocker)}):
+            code, out, err = self._main_output("-p", "hi", "--output-format", "json")
+        self.assertEqual(code, 1)
+        lines = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual(lines[0]["type"], "init")
+        self.assertIsNone(lines[0]["session_id"])
+        self.assertEqual(lines[-1]["type"], "result")
+
+    def test_corrupt_session_resume_keeps_the_result_protocol(self) -> None:
+        session = self._session("abcd1111-0000-0000-0000-000000000000")
+        session.append_system_prompt("sys")
+        session.append({"type": "message", "id": "bad",
+                        "message": {"kind": "nonsense"}})
+        code, out, err = self._main_output("-r", "abcd", "-p", "go",
+                                           "--output-format", "result")
+        self.assertEqual(code, 1)
+        result = json.loads(out)
+        self.assertEqual(result["subtype"], "error")
+        self.assertEqual(result["session_id"], session.id)
+
+    def test_corrupt_config_keeps_the_result_protocol(self) -> None:
+        config_home = self.cwd / "confighome"
+        (config_home / "default").mkdir(parents=True)
+        (config_home / "default" / "config.json").write_text("{broken")
+        out, err = io.StringIO(), io.StringIO()
+        self._set_stdin(tty=True)
+        with patch.dict("os.environ", {"PAIMON_CONFIG_HOME": str(config_home)}), \
+                patch("sys.argv", ["paimon", "-p", "hi", "--output-format", "result"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main()
+        self.assertEqual(ctx.exception.code, 1)
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["subtype"], "error")
+        self.assertIn("not valid JSON", result["error"])
+
     def test_timeout_without_print_is_rejected(self) -> None:
         code, stderr = self._main_exit("--timeout", "5")
         self.assertEqual(code, 2)

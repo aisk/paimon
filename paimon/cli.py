@@ -84,6 +84,9 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     except PaimonError as exc:
+        if args.output_format != "text":
+            # Machine formats promise init/result lines even for this failure.
+            sys.exit(headless_mode.fail(str(exc), args.output_format))
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)
     if args.strict:

@@ -437,7 +437,10 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
     session's system prompt (the CLI rejects it together with resume).
     """
     _relax_encoding()
-    config = config or Config.load()
+    try:
+        config = config or Config.load()
+    except Exception as exc:  # corrupt config file, unreadable config home
+        return fail(str(exc), output_format)
     if model:
         config.model = model
     renderer = _make_renderer(output_format, config)
@@ -449,8 +452,8 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         renderer.finish(subtype="error", error="no model configured; run 'paimon' once to log in")
         return 1
 
-    text = build_prompt(prompt, piped, cwd)
     try:
+        text = build_prompt(prompt, piped, cwd)
         # No agent tools here: -p runs exactly one turn and asyncio.run tears
         # the loop down the moment it returns, cancelling any agent still
         # working at whatever point it had reached — including, mid-cleanup,
@@ -460,8 +463,18 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
                            append_system_prompt=append_system_prompt,
                            toolset=tools.without(tools.REGISTRY, tools.SUPERVISED_TOOLS))
     except SessionError as exc:  # busy in another process, or no persisted system prompt
-        renderer.begin()
+        renderer.begin(session.id if session else None)
         renderer.finish(subtype="error", error=str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001 — any startup failure must keep the protocol
+        # An unusable data directory, a session whose messages no longer
+        # validate, a failing system prompt build: machine formats promise a
+        # first init line and a final result line no matter what. A session
+        # that was never created leaves session_id and log_end null.
+        # KeyboardInterrupt and SystemExit keep their meaning by staying
+        # outside Exception.
+        renderer.begin(session.id if session else None)
+        renderer.finish(subtype="error", error=f"{type(exc).__name__}: {exc}")
         return 1
 
     renderer.begin(agent.session.id, config.model, mode, cwd, log_path=agent.session.path)
