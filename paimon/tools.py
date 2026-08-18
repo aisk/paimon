@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import subprocess
 import time
 from dataclasses import dataclass, field
 from functools import cache
@@ -988,13 +989,48 @@ class _OutputTail:
 
 
 def _signal_group(pgid: int, sig: int, proc: asyncio.subprocess.Process) -> None:
-    """Send a signal to the whole process group, falling back to the child alone."""
+    """Send a signal to the whole process group, falling back to the child alone.
+
+    Windows has no process groups to signal (os.killpg does not exist there);
+    the tree is handled by the taskkill path in _kill_tree, and this falls
+    back to killing the child itself.
+    """
+    if os.name == "nt":
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        return
     try:
         os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError):
         try:
             proc.send_signal(sig)
         except ProcessLookupError:
+            pass
+
+
+async def _taskkill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Windows tree kill: taskkill /T /F walks the parent-pid tree, the
+    closest equivalent of killing a POSIX process group. Best effort — a
+    child whose parent already exited is re-parented and cannot be found by
+    anything — with a direct kill of the leader as the fallback.
+    """
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill", "/PID", str(proc.pid), "/T", "/F",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(killer.wait(), timeout=_KILL_GRACE + _KILL_TIMEOUT)
+    except (OSError, asyncio.TimeoutError):
+        pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=_KILL_TIMEOUT)
+        except asyncio.TimeoutError:
             pass
 
 
@@ -1005,6 +1041,9 @@ async def _kill_tree(proc: asyncio.subprocess.Process, pgid: int) -> None:
     processes it backgrounded are precisely the ones that outlive it, and on a
     timeout or an interrupt the whole tree has to go.
     """
+    if os.name == "nt":
+        await _taskkill_tree(proc)
+        return
     _signal_group(pgid, signal.SIGTERM, proc)
     if proc.returncode is None:
         try:
@@ -1063,9 +1102,6 @@ async def _spawn_shell(
     """
     read_fd, write_fd = os.pipe()
     try:
-        # start_new_session puts the child in its own process group so the
-        # whole tree (the shell plus anything it spawns) can be killed on
-        # timeout/interrupt.
         options = dict(
             cwd=str(cwd),
             # Without this a command that reads stdin (a bare "cat") would
@@ -1073,9 +1109,17 @@ async def _spawn_shell(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=write_fd,
             stderr=write_fd,
-            start_new_session=True,
             env=env,
         )
+        if os.name == "nt":
+            # A group of its own, so cleanup handles the tree as one unit
+            # (taskkill /T in _kill_tree); start_new_session is POSIX-only.
+            options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            # start_new_session puts the child in its own process group so the
+            # whole tree (the shell plus anything it spawns) can be killed on
+            # timeout/interrupt.
+            options["start_new_session"] = True
         shell = shell_executable()
         if shell is None:
             proc = await asyncio.create_subprocess_shell(command, **options)
@@ -1327,6 +1371,14 @@ class BackgroundCommand:
         """
         self.killed = True
         if self._proc.returncode is None:
+            if os.name == "nt":
+                # Nothing left to await taskkill on; fire it detached so the
+                # tree still goes down after this process is gone.
+                try:
+                    subprocess.Popen(["taskkill", "/PID", str(self._proc.pid), "/T", "/F"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError:
+                    pass
             _signal_group(self._pgid, signal.SIGTERM, self._proc)
             _signal_group(self._pgid, signal.SIGKILL, self._proc)
 

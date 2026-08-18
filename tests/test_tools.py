@@ -19,9 +19,11 @@ from paimon.tools import (
     _TaskOutput,
     _glob,
     _inside,
+    _kill_tree,
     _read_history,
     _search_history,
     _shell,
+    _signal_group,
     gate,
     run_tool,
     safe_command,
@@ -619,6 +621,39 @@ class BackgroundGateTest(unittest.TestCase):
     def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
         for name in ("read_job", "wait_for_job", "stop_job"):
             self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
+
+
+class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):
+    """SHELL-2 (Windows): the cleanup path must not touch POSIX-only APIs.
+
+    Runs on POSIX by patching os.name. taskkill does not exist here, so the
+    tree kill exercises its OSError fallback — proving the nt branch never
+    reaches os.killpg/os.getpgid, which do not exist on Windows.
+    """
+
+    async def test_kill_tree_reaps_the_leader_without_posix_group_calls(self) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "sleep", "30", stdout=asyncio.subprocess.DEVNULL)
+        try:
+            with patch("paimon.tools.os.name", "nt"), \
+                    patch("paimon.tools.os.killpg",
+                          side_effect=AssertionError("killpg called on the nt path")):
+                await _kill_tree(proc, proc.pid)
+            self.assertIsNotNone(proc.returncode)
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+    def test_signal_group_on_windows_kills_the_child_directly(self) -> None:
+        from types import SimpleNamespace
+        calls = []
+        fake = SimpleNamespace(kill=lambda: calls.append("kill"))
+        with patch("paimon.tools.os.name", "nt"), \
+                patch("paimon.tools.os.killpg",
+                      side_effect=AssertionError("killpg called on the nt path")):
+            _signal_group(1234, signal.SIGTERM, fake)
+        self.assertEqual(calls, ["kill"])
 
 
 class ShellExecutableTest(unittest.IsolatedAsyncioTestCase):
