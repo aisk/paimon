@@ -331,9 +331,8 @@ class AgentJob(Job):
             turn.cancel()
 
     def _retire(self) -> None:
-        # Snapshotted before the turn is cancelled: after that the history may
-        # still gain an "(interrupted)" placeholder, but nothing a caller was
-        # waiting to read.
+        # Snapshotted before the turn is cancelled, past which nothing a
+        # caller was waiting to read can arrive.
         self._final = _blocks(self.agent.history)
         self.interrupt()
         # Anything still queued was accepted on the understanding that this

@@ -736,15 +736,12 @@ class Agent:
                                                      usage.cache_write_tokens)
                     break
                 except asyncio.CancelledError:
-                    # Interrupted mid-stream: keep partial text but drop incomplete
-                    # tool calls and thinking (Z.ai-style preserved thinking must be
-                    # replayed complete or not at all) so the history stays valid.
+                    # Interrupted mid-stream: the partial text is persisted in
+                    # the turn_end record for the log, but no ModelResponse is
+                    # appended — a truncated answer replayed as a completed
+                    # one misleads both the resumed UI and the model, and a
+                    # history ending on the user request stays resumable.
                     record_outcome("interrupted", partial_text=content or None)
-                    self._append_message(ModelResponse(
-                        parts=[TextPart(content=content or "(interrupted)")],
-                        model_name=model.model_name,
-                        provider_name=model.system,
-                    ))
                     raise
                 except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
                     attempt += 1

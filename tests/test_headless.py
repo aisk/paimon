@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from helpers import SILENT_EVENTS, agent_events, make_session, stub_model
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelRequest
 
 from paimon import headless, tools
 from paimon.agent import (
@@ -376,12 +376,16 @@ class DriveTest(unittest.IsolatedAsyncioTestCase):
             code = await drive
 
         self.assertEqual(code, 130)
-        # The partial response must still be persisted, or the session log
-        # would end on a request with no answer (see Agent.run's cancel path).
+        # SESSION-2: the partial is persisted for audit in the turn_end record
+        # but never as a completed assistant answer; the history ends on the
+        # user request and stays loadable and resumable.
         last = self.session.messages()[-1]
-        self.assertIsInstance(last, ModelResponse)
-        self.assertIsInstance(last.parts[0], TextPart)
-        self.assertIn("partial", last.parts[0].content)
+        self.assertIsInstance(last, ModelRequest)
+        records = [json.loads(line) for line in
+                   self.session.path.read_text(encoding="utf-8").splitlines()]
+        ends = [r for r in records if r["type"] == "turn_end"]
+        self.assertEqual([r["outcome"] for r in ends], ["interrupted"])
+        self.assertIn("partial", ends[0]["partial_text"])
 
 
 if __name__ == "__main__":

@@ -859,6 +859,9 @@ class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
             ends = [r for r in _records(agent.session) if r["type"] == "turn_end"]
             self.assertEqual([r["outcome"] for r in ends], ["interrupted"])
             self.assertEqual(ends[0]["partial_text"], "partial answer")
+            # SESSION-2: no truncated answer is persisted as a completed one.
+            self.assertIsInstance(agent.session.messages()[-1], ModelRequest)
+            self.assertEqual(agent.history, agent.session.messages())
 
     async def test_budget_stop_records_max_tool_calls(self) -> None:
         arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
