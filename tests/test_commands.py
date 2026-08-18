@@ -377,6 +377,69 @@ class LogTest(CommandTestCase):
         self.assertNotIn("user", out)
         self.assertIn("[4] tool_result shell", out)
 
+    def _make_replaced_tool_turn(self, session: Session, *, replace: bool = True,
+                                 twice: bool = False) -> None:
+        """A turn the agent's placeholder-then-replace persistence produces."""
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="run it")]))
+        session.append_message(ModelResponse(parts=[
+            ToolCallPart(tool_name="shell", args={"command": "printf ok"}, tool_call_id="c1"),
+        ]))
+        record_id = session.append_message(ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="Interrupted by user.", tool_call_id="c1"),
+        ]))
+        if replace:
+            if twice:
+                session.append_message(ModelRequest(parts=[
+                    ToolReturnPart(tool_name="shell", content="halfway snapshot",
+                                   tool_call_id="c1"),
+                ]), replaces=record_id)
+            session.append_message(ModelRequest(parts=[
+                ToolReturnPart(tool_name="shell", content="ok (exit code 0)", tool_call_id="c1"),
+            ]), replaces=record_id)
+
+    def test_replaced_placeholder_is_folded_out_of_the_default_log(self) -> None:
+        """LOG-1: a successful tool shows one result, not a fake interruption."""
+        session = Session.create(Path.cwd())
+        self._make_replaced_tool_turn(session)
+        code, out, err = self._run("log")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Interrupted by user.", out)
+        results = [line for line in out.splitlines() if "tool_result" in line]
+        self.assertEqual(len(results), 1)
+        self.assertIn("ok (exit code 0)", results[0])
+
+    def test_a_real_interruption_still_shows(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_replaced_tool_turn(session, replace=False)
+        code, out, err = self._run("log")
+        self.assertIn("Interrupted by user.", out)
+
+    def test_intermediate_snapshots_are_folded_too(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_replaced_tool_turn(session, twice=True)
+        code, out, err = self._run("log")
+        self.assertNotIn("halfway snapshot", out)
+        self.assertNotIn("Interrupted by user.", out)
+        self.assertIn("ok (exit code 0)", out)
+
+    def test_json_keeps_every_revision_for_audit(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_replaced_tool_turn(session)
+        code, out, err = self._run("log", "--json")
+        self.assertIn("Interrupted by user.", out)
+        self.assertIn("ok (exit code 0)", out)
+
+    def test_after_window_still_folds_across_the_cursor(self) -> None:
+        """The placeholder may precede the --after cursor while its replacement
+        follows it; the map has to be computed over the whole log."""
+        session = Session.create(Path.cwd())
+        self._make_replaced_tool_turn(session)
+        # Cursor right on the placeholder record (seq 4): only the replacement
+        # is in the window, and it renders as the one real result.
+        code, out, err = self._run("log", "--after", "4")
+        self.assertNotIn("Interrupted by user.", out)
+        self.assertIn("ok (exit code 0)", out)
+
     def test_json_merges_seq_into_the_record(self) -> None:
         session = Session.create(Path.cwd())
         session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))

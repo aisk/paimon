@@ -699,6 +699,19 @@ class HistoryToolsTest(unittest.TestCase):
         self.assertIn("[2] user  short question", result)
         self.assertIn("line one\nline two", result, "full mode keeps newlines")
 
+    def test_read_history_does_not_return_a_superseded_revision(self) -> None:
+        """LOG-1: the pre-seeded interrupted placeholder must not be handed to
+        the model as if the interruption really happened."""
+        record_id = self._tool_return("shell", "Interrupted by user.")
+        replacement = ModelRequest(parts=[ToolReturnPart(
+            tool_name="shell", content="ok (exit code 0)", tool_call_id="call-1")])
+        self.session.append_message(replacement, replaces=record_id)
+        result = _read_history({"seq": 2}, self.ctx)
+        self.assertNotIn("Interrupted by user.", result)
+        self.assertIn("superseded revision", result)
+        self.assertIn("seq 3", result)
+        self.assertIn("ok (exit code 0)", _read_history({"seq": 3}, self.ctx))
+
     def test_read_history_rejects_a_seq_outside_the_log(self) -> None:
         self._user("only entry")
         self.assertIn("out of range", _read_history({"seq": 99}, self.ctx))

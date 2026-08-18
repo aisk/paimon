@@ -171,6 +171,34 @@ def _render_message(seq: int, record: dict, full: bool) -> list[str]:
     return lines
 
 
+def superseded_seqs(entries: list) -> dict[int, int]:
+    """Seq of every message revision a later record replaced → the final seq.
+
+    The log is append-only, so a tool result exists first as the pre-seeded
+    "Interrupted by user." placeholder and then as one replacement per
+    completed tool. Only the last revision reflects what actually happened;
+    anything rendering the log as events must skip the seqs mapped here or it
+    shows interruptions and intermediate snapshots that never occurred.
+    """
+    id_seq: dict[str, int] = {}
+    replacements: dict[str, list[int]] = {}
+    for seq, record in entries:
+        if not isinstance(record, dict) or record.get("type") != "message":
+            continue
+        if isinstance(record.get("id"), str):
+            id_seq[record["id"]] = seq
+        replaced = record.get("replaces")
+        if isinstance(replaced, str):
+            replacements.setdefault(replaced, []).append(seq)
+    superseded: dict[int, int] = {}
+    for replaced_id, seqs in replacements.items():
+        final = seqs[-1]
+        for seq in (id_seq.get(replaced_id), *seqs[:-1]):
+            if seq is not None:
+                superseded[seq] = final
+    return superseded
+
+
 def render_record(seq: int, record: Optional[dict], full: bool) -> list[str]:
     if record is None:
         return [f"[{seq}] <corrupt>"]
@@ -747,9 +775,17 @@ def _read_history(args: dict, ctx: ToolContext) -> str:
     entries = ctx.session.entries()
     if seq < 1 or seq > len(entries):
         return f"Error: seq out of range (the log has {len(entries)} records)"
+    superseded = superseded_seqs(entries)
     lines: list[str] = []
     used = 0
     for number, record in entries[seq - 1 : seq - 1 + count]:
+        if number in superseded:
+            # The content at this seq was replaced later (a placeholder or an
+            # intermediate snapshot); returning it would present a result that
+            # never happened as real.
+            lines.append(f"[{number}] (superseded revision; the final version "
+                         f"is at seq {superseded[number]})")
+            continue
         rendered = "\n".join(render_record(number, record, full=True))
         if used + len(rendered) > _READ_BUDGET:
             if not lines:

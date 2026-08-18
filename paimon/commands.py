@@ -24,7 +24,7 @@ from .config import UNSET, Config, config_path, validate_profile
 from .errors import PaimonError
 from .llm import build_model, is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
-from .tools import render_record
+from .tools import render_record, superseded_seqs
 
 
 def resolve_session(prefix: str) -> Session:
@@ -277,12 +277,19 @@ def log(argv: list) -> int:
     append-only; corrupt lines keep their number so cursors never shift. A
     caller that saved ``log_end`` from a ``--output-format result`` run passes
     it to ``--after`` to see exactly what happened since.
+
+    The log stores revisions (a tool result is pre-seeded as an interrupted
+    placeholder and replaced when the tool finishes), which are storage detail
+    rather than events: rendered output folds them, showing only each record's
+    final revision at the seq where it was written. ``--json`` is the audit
+    view and keeps every physical record.
     """
     parser = argparse.ArgumentParser(
         prog="paimon log",
         description="Show a session's event log. Each line is prefixed with its "
                     "seq; pass the highest seq already seen to --after to get "
-                    "only what is new.",
+                    "only what is new. Superseded revisions are folded away; "
+                    "--json shows the raw records including them.",
     )
     parser.add_argument("session", nargs="?", metavar="ID",
                         help="session id prefix (default: the latest session here)")
@@ -314,6 +321,10 @@ def log(argv: list) -> int:
         print(f"paimon: cannot read {session.path}: {exc}", file=sys.stderr)
         return 1
 
+    # Over the whole log, before any window: a --after window may hold the
+    # replacement while the placeholder it supersedes lies before the cursor.
+    superseded = superseded_seqs(entries)
+
     if args.after is not None:
         entries = [entry for entry in entries if entry[0] > args.after]
     elif args.turns is not None:
@@ -327,6 +338,8 @@ def log(argv: list) -> int:
             payload = {"seq": seq, "corrupt": True} if record is None else {"seq": seq, **record}
             print(json.dumps(payload, ensure_ascii=False, default=str))
         else:
+            if seq in superseded:
+                continue
             for line in render_record(seq, record, args.full):
                 print(line)
     return 0
