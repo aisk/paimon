@@ -4,7 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 
 from paimon.session import Session, SessionBusyError, _project_dir
 
@@ -91,6 +98,72 @@ class EntriesTest(SessionScanTestCase):
         session.path.unlink()
         with self.assertRaises(OSError):
             session.entries()
+
+
+class OrphanToolCallTest(SessionScanTestCase):
+    """SESSION-4: a crash between the tool-call response and its pre-seeded
+    results must not leave a history providers reject."""
+
+    def _tool_call_response(self, *ids: str) -> ModelResponse:
+        return ModelResponse(parts=[
+            ToolCallPart(tool_name="shell", args={"command": "ls"}, tool_call_id=call_id)
+            for call_id in ids
+        ])
+
+    def test_a_log_ending_on_a_tool_call_gets_a_synthesized_result(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="go")]))
+        session.append_message(self._tool_call_response("c1", "c2"))
+
+        messages = session.messages()
+
+        last = messages[-1]
+        self.assertIsInstance(last, ModelRequest)
+        returns = [p for p in last.parts if isinstance(p, ToolReturnPart)]
+        self.assertEqual([r.tool_call_id for r in returns], ["c1", "c2"])
+        self.assertIn("Interrupted", returns[0].content)
+        # Deterministic: a second load produces the same repair shape.
+        again = session.messages()
+        self.assertEqual(len(again), len(messages))
+        self.assertEqual([p.tool_call_id for p in again[-1].parts], ["c1", "c2"])
+
+    def test_a_user_prompt_after_the_orphan_stays_after_the_repair(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(self._tool_call_response("c1"))
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="resumed")]))
+
+        messages = session.messages()
+
+        self.assertIsInstance(messages[1], ModelRequest)
+        self.assertEqual(messages[1].parts[0].tool_call_id, "c1")
+        self.assertEqual(messages[2].parts[0].content, "resumed")
+
+    def test_a_partially_answered_batch_is_completed_in_place(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(self._tool_call_response("c1", "c2"))
+        session.append_message(ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="ok", tool_call_id="c1"),
+        ]))
+
+        messages = session.messages()
+
+        self.assertEqual(len(messages), 2, "no extra request is inserted")
+        answered = {p.tool_call_id: p.content for p in messages[1].parts
+                    if isinstance(p, ToolReturnPart)}
+        self.assertEqual(answered["c1"], "ok")
+        self.assertIn("Interrupted", answered["c2"])
+
+    def test_a_complete_batch_is_untouched(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(self._tool_call_response("c1"))
+        session.append_message(ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="fine", tool_call_id="c1"),
+        ]))
+
+        messages = session.messages()
+
+        self.assertEqual(len(messages), 2)
+        self.assertEqual([p.content for p in messages[1].parts], ["fine"])
 
 
 class ForkTest(SessionScanTestCase):

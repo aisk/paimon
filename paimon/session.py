@@ -4,6 +4,7 @@
 # class body, which would otherwise break ``list[dict]`` annotations below it.
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -12,7 +13,16 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 
 from . import lockfile
 from .errors import PaimonError
@@ -101,6 +111,50 @@ def dump_message(message: ModelMessage) -> dict:
 
 def load_messages(raw: list) -> list[ModelMessage]:
     return list(ModelMessagesTypeAdapter.validate_python(raw))
+
+
+def _repair_orphan_tool_calls(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Pair every tool call with a result, healing crash windows.
+
+    The agent persists the assistant's tool-call response and the pre-seeded
+    results as two separate appends, so a SIGKILL or power loss between them
+    leaves a response whose calls have no results — a history most providers
+    reject on resume. Synthesize an explicit error result for any unanswered
+    call. Applied on every load and deterministic, so a repaired history
+    replays the same way each time; normally the pre-seeded placeholders
+    answer everything and this changes nothing.
+    """
+    remaining = list(messages)
+    repaired: list[ModelMessage] = []
+    for index, message in enumerate(remaining):
+        repaired.append(message)
+        if not isinstance(message, ModelResponse):
+            continue
+        calls = [part for part in message.parts if isinstance(part, ToolCallPart)]
+        if not calls:
+            continue
+        following = remaining[index + 1] if index + 1 < len(remaining) else None
+        answered = set()
+        if isinstance(following, ModelRequest):
+            answered = {part.tool_call_id for part in following.parts
+                        if isinstance(part, (ToolReturnPart, RetryPromptPart))}
+        missing = [call for call in calls if call.tool_call_id not in answered]
+        if not missing:
+            continue
+        synthesized = [
+            ToolReturnPart(tool_name=call.tool_name, tool_call_id=call.tool_call_id,
+                           content="Interrupted: the session ended before this tool "
+                                   "call produced a result.")
+            for call in missing
+        ]
+        if answered:
+            # The next request answers some calls of this response: complete
+            # it in place instead of sending two consecutive tool requests.
+            remaining[index + 1] = dataclasses.replace(
+                following, parts=[*synthesized, *following.parts])
+        else:
+            repaired.append(ModelRequest(parts=synthesized))
+    return repaired
 
 
 def data_dir() -> Path:
@@ -323,7 +377,7 @@ class Session:
                 if isinstance(record.get("id"), str):
                     positions[record["id"]] = len(raw_messages)
                 raw_messages.append(message)
-        return load_messages(raw_messages)
+        return _repair_orphan_tool_calls(load_messages(raw_messages))
 
     def system_prompt(self) -> Optional[str]:
         """Return the system prompt snapshot stored for this session."""
