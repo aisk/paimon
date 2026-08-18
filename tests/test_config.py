@@ -56,10 +56,9 @@ class ConfigProfileTest(unittest.TestCase):
 
         data = json.loads(config_path().read_text())
         self.assertEqual(data["model"], "test:m2")
-        self.assertNotIn("api_base", data)
-        self.assertEqual(data["api_key"], "sk-old")
-        self.assertIsNone(config.api_base)
-        self.assertEqual(Config.load().api_key, "sk-old")
+        self.assertEqual(data["providers"], {"test": {"api_key": "sk-old"}})
+        self.assertEqual(config.provider_auth(), (None, "sk-old"))
+        self.assertEqual(Config.load().provider_auth(), (None, "sk-old"))
 
     def test_unrelated_save_keeps_a_runtime_override(self) -> None:
         """paimon --model X assigns the field on the live instance; persisting a
@@ -71,16 +70,41 @@ class ConfigProfileTest(unittest.TestCase):
 
         self.assertEqual(config.model, "test:override")
         self.assertEqual(config.theme, "nord")
-        self.assertEqual(config.api_key, "sk-stored")
+        self.assertEqual(config.provider_auth(), (None, "sk-stored"))
         stored = json.loads(config_path().read_text())
         self.assertEqual(stored["model"], "test:stored", "the override is not persisted")
         self.assertEqual(stored["theme"], "nord")
 
     def test_save_empty_string_clears_too(self) -> None:
         config = Config.load()
-        config.save(api_base="https://old/v1")
+        config.save(model="test:m", api_base="https://old/v1")
         config.save(api_base="")
-        self.assertNotIn("api_base", json.loads(config_path().read_text()))
+        self.assertNotIn("providers", json.loads(config_path().read_text()))
+
+    def test_credentials_are_scoped_to_their_provider(self) -> None:
+        """AUTH-1: each provider keeps its own key; switching models must not
+        overwrite or reuse another provider's credentials."""
+        config = Config.load()
+        config.save(model="zai:glm-5.2", api_key="sk-zai", api_base="https://z/v4")
+        config.save(model="deepseek:deepseek-chat", api_key="sk-deep")
+
+        self.assertEqual(config.provider_auth(), (None, "sk-deep"))
+        self.assertEqual(config.provider_auth("zai:glm-5.2"), ("https://z/v4", "sk-zai"))
+        self.assertEqual(config.provider_auth("deepseek:other-model"), (None, "sk-deep"))
+        self.assertEqual(config.provider_auth("openai:gpt-5"), (None, None))
+        stored = json.loads(config_path().read_text())["providers"]
+        self.assertEqual(stored, {"zai": {"api_key": "sk-zai", "api_base": "https://z/v4"},
+                                  "deepseek": {"api_key": "sk-deep"}})
+
+    def test_saving_credentials_without_a_model_is_refused(self) -> None:
+        with self.assertRaises(ConfigError):
+            Config.load().save(api_key="sk-nowhere")
+        self.assertFalse(config_path().exists() and
+                         "sk-nowhere" in config_path().read_text())
+
+    def test_provider_auth_without_a_model_is_empty(self) -> None:
+        self.assertEqual(Config.load().provider_auth(), (None, None))
+        self.assertEqual(Config.load().provider_auth("unqualified"), (None, None))
 
     def test_save_persists_show_reasoning_false(self) -> None:
         config = Config.load()
@@ -163,8 +187,9 @@ class ConfigDurableWriteTest(unittest.TestCase):
 
         stored = json.loads(config_path().read_text())
         self.assertEqual(stored["model"], "test:base")
-        for field in ("theme", "api_base", "show_reasoning"):
+        for field in ("theme", "show_reasoning"):
             self.assertTrue(str(stored[field]).startswith(f"{field}-"), stored)
+        self.assertTrue(stored["providers"]["test"]["api_base"].startswith("api_base-"), stored)
 
     def test_interrupted_write_leaves_previous_config_intact(self) -> None:
         config = Config.load()
@@ -184,7 +209,7 @@ class ConfigDurableWriteTest(unittest.TestCase):
         # The old config is complete, and the temp file was cleaned up.
         stored = json.loads(config_path().read_text())
         self.assertEqual(stored["model"], "test:old")
-        self.assertEqual(stored["api_key"], "sk-old")
+        self.assertEqual(stored["providers"], {"test": {"api_key": "sk-old"}})
         leftovers = [p.name for p in config_path().parent.iterdir() if ".tmp" in p.name]
         self.assertEqual(leftovers, [])
 
@@ -201,7 +226,7 @@ class ConfigDurableWriteTest(unittest.TestCase):
             config.save(model="test:m", api_key="sk-x")
 
         stored = json.loads(config_path().read_text())
-        self.assertEqual(stored, {"model": "test:m", "api_key": "sk-x"})
+        self.assertEqual(stored, {"model": "test:m", "providers": {"test": {"api_key": "sk-x"}}})
 
     def test_save_writes_through_a_symlinked_config(self) -> None:
         """A config.json symlinked from a dotfiles repo keeps being a link."""

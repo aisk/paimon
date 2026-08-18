@@ -699,7 +699,9 @@ class ModelOverrideTest(unittest.TestCase):
     def test_the_override_wins_and_the_shared_config_is_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
-            config = Config(model="test:stub", api_base="https://example/v1", api_key="k")
+            config = Config(model="test:stub",
+                            providers={"test": {"api_base": "https://example/v1",
+                                                "api_key": "k"}})
             plain = Agent(make_session(cwd), "snapshot", config=config)
             overridden = Agent(make_session(cwd), "snapshot", config=config,
                                model_override="test:other")

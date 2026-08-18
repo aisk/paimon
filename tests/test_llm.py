@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from paimon.llm import build_model, is_provider_available, split_model_string
 
@@ -40,6 +41,24 @@ class BuildModelTest(unittest.TestCase):
         self.assertEqual(type(anthropic_style).__name__, "AnthropicModel")
         self.assertEqual(anthropic_style.model_name, "glm-5.2")
         self.assertEqual(anthropic_style.base_url, "https://api.z.ai/api/anthropic/")
+
+    def test_custom_base_falls_back_to_the_providers_env_key(self) -> None:
+        """AUTH-1: a custom endpoint must not mask ZAI_API_KEY and friends."""
+        with patch.dict("os.environ", {"ZAI_API_KEY": "sk-from-env"}):
+            model = build_model("zai:glm-5.2", api_base="http://localhost:8080/v4")
+        self.assertEqual(model.client.api_key, "sk-from-env")
+
+    def test_custom_base_prefers_the_configured_key_over_env(self) -> None:
+        with patch.dict("os.environ", {"ZAI_API_KEY": "sk-from-env"}):
+            model = build_model("zai:glm-5.2", api_base="http://localhost:8080/v4",
+                                api_key="sk-configured")
+        self.assertEqual(model.client.api_key, "sk-configured")
+
+    def test_custom_base_without_any_key_still_builds(self) -> None:
+        """Local endpoints that need no auth keep working on a placeholder."""
+        with patch.dict("os.environ", {}, clear=True):
+            model = build_model("zai:glm-5.2", api_base="http://localhost:8080/v4")
+        self.assertEqual(model.client.api_key, "unset")
 
     def test_missing_sdk_reports_the_provider_by_name(self) -> None:
         with self.assertRaises(ValueError) as caught:

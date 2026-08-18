@@ -56,14 +56,17 @@ class StatusTest(CommandTestCase):
         self.assertIn("not logged in", out)
 
     def test_configured_exits_0(self) -> None:
-        self._write_config(model="zai:glm-4.7", api_key="sk-secret")
+        self._write_config(model="zai:glm-4.7",
+                           providers={"zai": {"api_key": "sk-secret"}})
         code, out, err = self._run("status")
         self.assertEqual(code, 0)
         self.assertIn("zai:glm-4.7", out)
         self.assertIn("api key set", out)
 
     def test_json_reports_state_without_the_key(self) -> None:
-        self._write_config(model="zai:glm-4.7", api_key="sk-secret", api_base="https://x/v1")
+        self._write_config(model="zai:glm-4.7",
+                           providers={"zai": {"api_key": "sk-secret",
+                                              "api_base": "https://x/v1"}})
         code, out, err = self._run("status", "--json")
         self.assertEqual(code, 0)
         payload = json.loads(out)
@@ -73,6 +76,16 @@ class StatusTest(CommandTestCase):
         self.assertTrue(payload["api_key_set"])
         self.assertEqual(payload["sessions_here"], 0)
         self.assertNotIn("sk-secret", out)
+
+    def test_status_reports_the_current_providers_credentials_only(self) -> None:
+        """AUTH-1: a key stored for another provider is not this model's key."""
+        self._write_config(model="zai:glm-4.7",
+                           providers={"openai": {"api_key": "sk-openai",
+                                                 "api_base": "https://o/v1"}})
+        code, out, err = self._run("status", "--json")
+        payload = json.loads(out)
+        self.assertFalse(payload["api_key_set"])
+        self.assertIsNone(payload["api_base"])
 
     def test_json_unconfigured(self) -> None:
         code, out, err = self._run("status", "--json")
@@ -91,13 +104,14 @@ class LoginTest(CommandTestCase):
         self.assertEqual(code, 0)
         data = json.loads(config_path().read_text())
         self.assertEqual(data["model"], "openai:gpt-5")
-        self.assertEqual(data["api_key"], "sk-abc")
+        self.assertEqual(data["providers"]["openai"]["api_key"], "sk-abc")
 
     def test_key_from_stdin(self) -> None:
         code, out, err = self._run("login", "--model", "openai:gpt-5",
                                    "--api-key-stdin", stdin="sk-piped\n")
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(config_path().read_text())["api_key"], "sk-piped")
+        data = json.loads(config_path().read_text())
+        self.assertEqual(data["providers"]["openai"]["api_key"], "sk-piped")
 
     def test_unset_env_var_is_refused(self) -> None:
         code, out, err = self._run("login", "--model", "openai:gpt-5",
@@ -123,12 +137,13 @@ class LoginTest(CommandTestCase):
         self.assertIn("nosuchprovider", err)
 
     def test_unpassed_fields_keep_their_values(self) -> None:
-        self._write_config(model="zai:glm-4.7", api_key="sk-old", theme="dark")
+        self._write_config(model="zai:glm-4.7", theme="dark",
+                           providers={"zai": {"api_key": "sk-old"}})
         code, out, err = self._run("login", "--model", "openai:gpt-5")
         self.assertEqual(code, 0)
         data = json.loads(config_path().read_text())
         self.assertEqual(data["model"], "openai:gpt-5")
-        self.assertEqual(data["api_key"], "sk-old")
+        self.assertEqual(data["providers"]["zai"]["api_key"], "sk-old")
         self.assertEqual(data["theme"], "dark")
 
     def test_corrupt_config_is_refused_with_a_force_hint(self) -> None:
@@ -149,10 +164,22 @@ class LoginTest(CommandTestCase):
         self.assertEqual(json.loads(path.read_text()), {"model": "openai:gpt-5"})
 
     def test_empty_api_base_clears_the_stored_override(self) -> None:
-        self._write_config(model="zai:glm-4.7", api_base="https://old/v1")
-        code, out, err = self._run("login", "--model", "openai:gpt-5", "--api-base", "")
+        self._write_config(model="zai:glm-4.7",
+                           providers={"zai": {"api_base": "https://old/v1"}})
+        code, out, err = self._run("login", "--model", "zai:glm-5.2", "--api-base", "")
         self.assertEqual(code, 0)
-        self.assertNotIn("api_base", json.loads(config_path().read_text()))
+        self.assertNotIn("providers", json.loads(config_path().read_text()))
+
+    def test_login_leaves_other_providers_credentials_alone(self) -> None:
+        self._write_config(model="zai:glm-4.7",
+                           providers={"zai": {"api_key": "sk-zai"}})
+        with patch.dict("os.environ", {"MY_KEY": "sk-openai"}):
+            code, out, err = self._run("login", "--model", "openai:gpt-5",
+                                       "--api-key-env", "MY_KEY")
+        self.assertEqual(code, 0)
+        data = json.loads(config_path().read_text())
+        self.assertEqual(data["providers"]["zai"], {"api_key": "sk-zai"})
+        self.assertEqual(data["providers"]["openai"], {"api_key": "sk-openai"})
 
 
 class ProfileTest(CommandTestCase):
@@ -162,7 +189,8 @@ class ProfileTest(CommandTestCase):
                                        "openai:gpt-5", "--api-key-env", "WORK_KEY")
         self.assertEqual(code, 0)
         profile_config = self.home / "config" / "work" / "config.json"
-        self.assertEqual(json.loads(profile_config.read_text())["api_key"], "sk-work")
+        stored = json.loads(profile_config.read_text())
+        self.assertEqual(stored["providers"]["openai"]["api_key"], "sk-work")
 
         code, out, err = self._run("status", "--profile", "work", "--json")
         self.assertEqual(code, 0)

@@ -216,8 +216,15 @@ class LoginScreen(ModalScreen[bool]):
         except PaimonError as exc:
             # The credentials just typed must not die with the write. Apply
             # them to this run and let the user repair the file afterwards.
-            for key, value in fields.items():
-                setattr(config, key, value)
+            config.model = fields["model"]
+            entry = config.providers.setdefault(provider, {})
+            for key in ("api_base", "api_key"):
+                if fields[key] is None:
+                    entry.pop(key, None)
+                else:
+                    entry[key] = fields[key]
+            if not entry:
+                config.providers.pop(provider, None)
             self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
                 "[$text-warning b]Logged in for this run only, config not saved:[/] $body",
                 body=str(exc)))

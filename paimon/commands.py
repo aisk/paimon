@@ -85,6 +85,7 @@ def status(argv: list) -> int:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
     logged_in = bool(config.model)
+    api_base, api_key = config.provider_auth()
     if args.json:
         # The api_key itself is deliberately absent: status output is meant
         # to be pasted into logs and other agents' contexts.
@@ -92,18 +93,18 @@ def status(argv: list) -> int:
             "version": version(),
             "logged_in": logged_in,
             "model": config.model,
-            "api_base": config.api_base,
-            "api_key_set": bool(config.api_key),
+            "api_base": api_base,
+            "api_key_set": bool(api_key),
             "safe_commands": config.safe_commands,
             "config_path": str(config_path(profile)),
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
     elif logged_in:
-        key_note = "api key set" if config.api_key else "no api key stored"
+        key_note = "api key set" if api_key else "no api key stored"
         print(f"paimon {version()}")
         print(f"model: {config.model} ({key_note})")
-        if config.api_base:
-            print(f"api base: {config.api_base}")
+        if api_base:
+            print(f"api base: {api_base}")
         if not config.safe_commands:
             print("safe read-only commands: off (strict)")
         print(f"config: {config_path(profile)}")

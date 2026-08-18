@@ -69,6 +69,20 @@ def split_model_string(model: str) -> tuple[str, str]:
     return provider, name
 
 
+def _provider_resolved_key(provider_cls) -> str:
+    """The api key the provider itself resolves (its environment variables).
+
+    Used when a custom api_base forces building the OpenAI client by hand,
+    which would otherwise mask DEEPSEEK_API_KEY and friends. Providers raise
+    when they find no key; fall back to a placeholder then, so endpoints that
+    need no auth (local servers) keep working.
+    """
+    try:
+        return provider_cls().client.api_key
+    except Exception:
+        return "unset"
+
+
 def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None) -> Model:
     provider_name, model_name = split_model_string(model)
     provider_cls = provider_class(provider_name)
@@ -83,7 +97,8 @@ def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[st
             # moonshotai, ...) only take a custom endpoint via a full client.
             from openai import AsyncOpenAI
 
-            kwargs["openai_client"] = AsyncOpenAI(base_url=api_base, api_key=api_key or "unset")
+            kwargs["openai_client"] = AsyncOpenAI(
+                base_url=api_base, api_key=api_key or _provider_resolved_key(provider_cls))
         else:
             raise ValueError(f"Provider {provider_name!r} does not support a custom api_base")
     if api_key and "openai_client" not in kwargs and "api_key" in parameters:

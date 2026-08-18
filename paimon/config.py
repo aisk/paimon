@@ -1,10 +1,13 @@
 """Model settings loaded from a JSON config file.
 
 $PAIMON_CONFIG_HOME (default ~/.config/paimon/) holds one directory per
-profile, each fully independent — model, key, theme, everything. The profile
-named "default" is used unless another one is activated. The stored
-model/api_base/api_key are turned into a pydantic-ai model by paimon.llm;
-provider environment variables are the fallback when unset.
+profile, each fully independent — model, keys, theme, everything. The profile
+named "default" is used unless another one is activated. Credentials are
+scoped per provider ("providers": {"zai": {"api_base": ..., "api_key": ...}}),
+so one profile holds an account per provider and switching models never
+borrows another provider's key. The stored model plus its provider's
+credentials are turned into a pydantic-ai model by paimon.llm; provider
+environment variables are the fallback when unset.
 """
 
 import json
@@ -12,7 +15,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +44,30 @@ _SAVE_MUTEX = threading.Lock()
 class ConfigError(PaimonError):
     """The stored config cannot be read or written (corrupt JSON, a lock
     that never frees, a write that cannot reach the disk)."""
+
+
+def _provider_of(model: str) -> str:
+    """The provider half of a qualified model string.
+
+    Imported lazily: pulling paimon.llm (and with it pydantic-ai) at module
+    import would slow down every subcommand that only reads the config.
+    """
+    from .llm import split_model_string
+
+    return split_model_string(model)[0]
+
+
+def _parse_providers(raw: object) -> dict:
+    """The stored per-provider credential map, dropping malformed entries."""
+    providers: dict = {}
+    if isinstance(raw, dict):
+        for name, entry in raw.items():
+            if isinstance(entry, dict):
+                fields = {key: value for key, value in entry.items()
+                          if key in ("api_base", "api_key") and isinstance(value, str)}
+                if fields:
+                    providers[name] = fields
+    return providers
 
 
 def config_root() -> Path:
@@ -190,8 +217,10 @@ class Config:
 
     profile: str = DEFAULT_PROFILE
     model: Optional[str] = None
-    api_base: Optional[str] = None
-    api_key: Optional[str] = None
+    # Per-provider credentials: {"zai": {"api_base": ..., "api_key": ...}}.
+    # Keyed by provider so switching models never sends one provider's key
+    # to another provider's endpoint.
+    providers: dict = field(default_factory=dict)
     theme: Optional[str] = None
     # Stream reasoning expanded in the TUI (it folds once the block ends) and
     # print it in headless mode. When off the TUI folds it behind a line-count
@@ -223,8 +252,7 @@ class Config:
         return cls(
             profile=profile,
             model=data.get("model"),
-            api_base=data.get("api_base"),
-            api_key=data.get("api_key"),
+            providers=_parse_providers(data.get("providers")),
             theme=data.get("theme"),
             show_reasoning=data.get("show_reasoning", cls.show_reasoning),
             safe_commands=data.get("safe_commands", cls.safe_commands),
@@ -235,6 +263,23 @@ class Config:
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
             compaction_context_window=compaction.get("context_window"),
         )
+
+    def provider_auth(self, model: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+        """The stored (api_base, api_key) for the model's provider.
+
+        Defaults to the configured model. A provider without a stored entry
+        (or no model at all) yields (None, None), which paimon.llm turns into
+        the provider's own environment-variable resolution.
+        """
+        model = model or self.model
+        if not model:
+            return None, None
+        try:
+            provider = _provider_of(model)
+        except ValueError:
+            return None, None
+        entry = self.providers.get(provider) or {}
+        return entry.get("api_base"), entry.get("api_key")
 
     def save(
         self,
@@ -248,12 +293,29 @@ class Config:
         """Persist the fields passed to config.json and update self.
 
         Passing None (or an empty string) removes the stored value; fields not
-        passed and other keys already in the file are preserved.
+        passed and other keys already in the file are preserved. api_base and
+        api_key are stored under the provider of the model being saved (the
+        model argument, else the configured model), so every provider keeps
+        its own credentials.
 
         Writers serialize on a sidecar lock and replace the file atomically,
         so two Paimons sharing a profile cannot lose each other's fields and
         a reader never sees a half-written config.
         """
+        auth_passed = [(key, value) for key, value in (
+            ("api_base", api_base), ("api_key", api_key),
+        ) if value is not UNSET]
+        provider = None
+        if auth_passed:
+            target = model if model is not UNSET and model else self.model
+            if not target:
+                raise ConfigError("credentials need a model to scope them to a provider; "
+                                  "pass a model along with the api base/key")
+            try:
+                provider = _provider_of(target)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+
         path = config_path(self.profile)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock = _lock_path(path)
@@ -267,7 +329,7 @@ class Config:
                 # this instance was loaded is merged, not overwritten.
                 data = _read_file_config(path)
                 passed = [(key, value) for key, value in (
-                    ("model", model), ("api_base", api_base), ("api_key", api_key),
+                    ("model", model),
                     ("theme", theme),
                     ("show_reasoning", show_reasoning),
                     ("recap_enabled", recap_enabled),
@@ -277,6 +339,26 @@ class Config:
                         data.pop(key, None)
                     else:
                         data[key] = value
+                if provider is not None:
+                    providers = data.get("providers")
+                    if not isinstance(providers, dict):
+                        providers = {}
+                    entry = providers.get(provider)
+                    if not isinstance(entry, dict):
+                        entry = {}
+                    for key, value in auth_passed:
+                        if value is None or value == "":
+                            entry.pop(key, None)
+                        else:
+                            entry[key] = value
+                    if entry:
+                        providers[provider] = entry
+                    else:
+                        providers.pop(provider, None)
+                    if providers:
+                        data["providers"] = providers
+                    else:
+                        data.pop("providers", None)
                 _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
             finally:
                 lockfile.release(lock)
@@ -287,3 +369,5 @@ class Config:
         # persisting a theme change.
         for key, _ in passed:
             setattr(self, key, data.get(key, getattr(type(self), key)))
+        if provider is not None:
+            self.providers = _parse_providers(data.get("providers"))

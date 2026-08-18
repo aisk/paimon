@@ -381,7 +381,8 @@ class Agent:
         name = self.model_name
         if not name:
             raise NoModelError("No model configured; log in first")
-        key = (name, self.config.api_base, self.config.api_key)
+        api_base, api_key = self.config.provider_auth(name)
+        key = (name, api_base, api_key)
         if self._cached_model is None or self._cached_model[0] != key:
             self._cached_model = (key, build_model(*key))
         return self._cached_model[1]
