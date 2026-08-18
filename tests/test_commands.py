@@ -70,7 +70,9 @@ class StatusTest(CommandTestCase):
         code, out, err = self._run("status", "--json")
         self.assertEqual(code, 0)
         payload = json.loads(out)
-        self.assertTrue(payload["logged_in"])
+        self.assertTrue(payload["configured"])
+        self.assertTrue(payload["ready"])
+        self.assertIsNone(payload["error"])
         self.assertEqual(payload["model"], "zai:glm-4.7")
         self.assertEqual(payload["api_base"], "https://x/v1")
         self.assertTrue(payload["api_key_set"])
@@ -91,9 +93,37 @@ class StatusTest(CommandTestCase):
         code, out, err = self._run("status", "--json")
         self.assertEqual(code, 1)
         payload = json.loads(out)
-        self.assertFalse(payload["logged_in"])
+        self.assertFalse(payload["configured"])
+        self.assertFalse(payload["ready"])
         self.assertIsNone(payload["model"])
         self.assertFalse(payload["api_key_set"])
+
+    def test_configured_model_without_credentials_is_not_ready(self) -> None:
+        """CLI-1: a model whose credentials cannot resolve must not exit 0."""
+        self._write_config(model="zai:glm-4.7")
+        with patch.dict("os.environ", {"ZAI_API_KEY": ""}):
+            code, out, err = self._run("status", "--json")
+        self.assertEqual(code, 1)
+        payload = json.loads(out)
+        self.assertTrue(payload["configured"])
+        self.assertFalse(payload["ready"])
+        self.assertIn("ZAI_API_KEY", payload["error"])
+
+    def test_environment_credentials_make_it_ready_without_leaking(self) -> None:
+        self._write_config(model="zai:glm-4.7")
+        with patch.dict("os.environ", {"ZAI_API_KEY": "sk-env-secret"}):
+            code, out, err = self._run("status", "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["ready"])
+        self.assertFalse(payload["api_key_set"], "the key came from env, not the config")
+        self.assertNotIn("sk-env-secret", out)
+
+    def test_unconstructible_provider_is_reported_in_text_mode(self) -> None:
+        self._write_config(model="nosuchprovider:m")
+        code, out, err = self._run("status")
+        self.assertEqual(code, 1)
+        self.assertIn("not ready:", out)
 
 
 class LoginTest(CommandTestCase):
@@ -202,7 +232,7 @@ class ProfileTest(CommandTestCase):
                       "--api-key-env", "WORK_KEY")
         code, out, err = self._run("status", "--json")
         self.assertEqual(code, 1)
-        self.assertFalse(json.loads(out)["logged_in"])
+        self.assertFalse(json.loads(out)["configured"])
 
     def test_traversal_in_profile_name_is_rejected(self) -> None:
         code, out, err = self._run("status", "--profile", "../evil")

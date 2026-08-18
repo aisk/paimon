@@ -19,8 +19,11 @@ and exits; the conversation is persisted and can be resumed later.
 paimon status --json
 ```
 
-Exit 0 means ready; 1 means not logged in — report that to the user instead of
-guessing credentials. If the user provided them:
+Exit 0 means ready: the configured model can be constructed and its
+credentials resolve (stored or via environment variables), checked without a
+network request. Exit 1 means not ready — `ready` is false and `error` says
+why (no model configured, missing key, unknown provider). Report that to the
+user instead of guessing credentials. If the user provided them:
 `paimon login --model provider:name --api-key-env SOME_VAR`.
 
 ## One-shot run

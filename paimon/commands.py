@@ -2,10 +2,12 @@
 
 These exist so another program (a shell script, a calling code agent) can
 check whether Paimon is ready and log it in non-interactively. Nothing here
-talks to the network: ``login`` validates shape and persists, the first real
-turn is what proves the credentials.
+talks to the network: ``status`` constructs the configured model offline to
+prove the provider SDK and its credentials resolve, ``login`` validates shape
+and persists, the first real turn is what proves the credentials work.
 
-Exit codes: ``status`` exits 0 when a model is configured and 1 when not;
+Exit codes: ``status`` exits 0 when the configured model is constructible
+with resolvable credentials and 1 when not;
 ``login`` exits 0 on success and 1 on any refusal, with the reason on stderr;
 ``log`` exits 0 on success and 1 when the session cannot be found.
 """
@@ -20,7 +22,7 @@ from typing import Optional
 
 from .config import UNSET, Config, config_path, validate_profile
 from .errors import PaimonError
-from .llm import is_provider_available, split_model_string
+from .llm import build_model, is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
 from .tools import render_record
 
@@ -67,12 +69,29 @@ def version() -> str:
         return "unknown"
 
 
+def _ready_error(config: Config) -> Optional[str]:
+    """Why the configured model cannot be constructed, or None when it can.
+
+    Construction is offline: it resolves the provider SDK and its credentials
+    (stored or environment variables) without sending a request, so a missing
+    key is caught here instead of mid-turn. The credential values themselves
+    never appear in the message.
+    """
+    api_base, api_key = config.provider_auth()
+    try:
+        build_model(config.model, api_base=api_base, api_key=api_key)
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
 def status(argv: list) -> int:
     """Report whether Paimon is ready to run, without creating anything."""
     parser = argparse.ArgumentParser(
         prog="paimon status",
-        description="Show login state and configuration. Exits 0 when a model "
-                    "is configured, 1 when login is still needed.",
+        description="Show login state and configuration. Exits 0 when the "
+                    "configured model can be constructed with resolvable "
+                    "credentials, 1 when login or credentials are still needed.",
     )
     parser.add_argument("--json", action="store_true", help="one JSON object on stdout")
     _profile_option(parser)
@@ -84,14 +103,18 @@ def status(argv: list) -> int:
     except PaimonError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
-    logged_in = bool(config.model)
+    configured = bool(config.model)
+    error = _ready_error(config) if configured else "no model configured"
+    ready = error is None
     api_base, api_key = config.provider_auth()
     if args.json:
         # The api_key itself is deliberately absent: status output is meant
         # to be pasted into logs and other agents' contexts.
         print(json.dumps({
             "version": version(),
-            "logged_in": logged_in,
+            "configured": configured,
+            "ready": ready,
+            "error": error,
             "model": config.model,
             "api_base": api_base,
             "api_key_set": bool(api_key),
@@ -99,7 +122,7 @@ def status(argv: list) -> int:
             "config_path": str(config_path(profile)),
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
-    elif logged_in:
+    elif configured:
         key_note = "api key set" if api_key else "no api key stored"
         print(f"paimon {version()}")
         print(f"model: {config.model} ({key_note})")
@@ -109,11 +132,13 @@ def status(argv: list) -> int:
             print("safe read-only commands: off (strict)")
         print(f"config: {config_path(profile)}")
         print(f"sessions here: {len(Session.list(Path.cwd()))}")
+        if not ready:
+            print(f"not ready: {error}")
     else:
         print(f"paimon {version()}")
         print("not logged in — run 'paimon' for interactive setup, or "
               "'paimon login --model provider:name --api-key-env VAR'")
-    return 0 if logged_in else 1
+    return 0 if ready else 1
 
 
 def _read_api_key(args: argparse.Namespace) -> Optional[str]:
