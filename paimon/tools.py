@@ -101,6 +101,72 @@ def render_todos(todos: list[dict]) -> str:
     return "\n".join(f"{_TODO_MARKERS.get(t.get('status'), '[ ]')} {t.get('content', '')}" for t in todos)
 
 
+def _validate_value(value: object, schema: dict, path: str) -> Optional[str]:
+    expected = schema.get("type")
+    if expected == "string":
+        if not isinstance(value, str):
+            return f"'{path}' must be a string"
+    elif expected == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"'{path}' must be an integer"
+    elif expected == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"'{path}' must be a number"
+    elif expected == "boolean":
+        if not isinstance(value, bool):
+            return f"'{path}' must be a boolean"
+    elif expected == "array":
+        if not isinstance(value, list):
+            return f"'{path}' must be an array"
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for index, element in enumerate(value):
+                error = _validate_value(element, items, f"{path}[{index}]")
+                if error is not None:
+                    return error
+    elif expected == "object":
+        if not isinstance(value, dict):
+            return f"'{path}' must be an object"
+        return _validate_object(value, schema, path)
+    enum = schema.get("enum")
+    if enum is not None and value not in enum:
+        choices = ", ".join(repr(choice) for choice in enum)
+        return f"'{path}' must be one of {choices}"
+    return None
+
+
+def _validate_object(value: dict, schema: dict, path: str = "") -> Optional[str]:
+    for key in schema.get("required") or []:
+        if key not in value:
+            where = f" in '{path}'" if path else ""
+            return f"missing required argument '{key}'{where}"
+    properties = schema.get("properties") or {}
+    for key, item in value.items():
+        subschema = properties.get(key)
+        if isinstance(subschema, dict):
+            error = _validate_value(item, subschema, f"{path}.{key}" if path else key)
+            if error is not None:
+                return error
+    return None
+
+
+def validate_args(name: str, args: dict, toolset: dict) -> Optional[str]:
+    """Why ``args`` do not fit the tool's declared schema, or None when they do.
+
+    The one validation layer every ToolCallPart passes before gating or
+    dispatch, agent-handled tools included, so a malformed argument becomes a
+    tool error result instead of an exception ending the turn. Covers exactly
+    the JSON-schema subset REGISTRY declares (types, required, enum, array
+    items); unknown extra arguments pass — models add stray keys, and
+    rejecting them costs more than ignoring them.
+    """
+    tool = toolset.get(name)
+    if tool is None:
+        return f"unknown tool {name!r}"
+    parameters = (tool.schema.get("function") or {}).get("parameters") or {}
+    return _validate_object(args, parameters)
+
+
 def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
     """One-line detail for a tool call, shared by the TUI and headless output.
 

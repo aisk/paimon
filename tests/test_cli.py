@@ -408,6 +408,7 @@ class HeadlessRunTest(CliTestCase):
     def test_denied_tool_still_exits_0(self) -> None:
         code, out, err = self._main_output(
             "-p", "run it", "--mode", "read", tool="shell", model="test:stub",
+            arguments='{"command": "rm -rf build"}',
         )
         self.assertEqual(code, 0)
         self.assertIn("denied", err)

@@ -15,6 +15,7 @@ from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
 from paimon.tools import (
     MAX_OUTPUT,
     MODES,
+    REGISTRY,
     ToolContext,
     _TaskOutput,
     _glob,
@@ -31,6 +32,7 @@ from paimon.tools import (
     shell_output_dir,
     start_background,
     tail_text,
+    validate_args,
 )
 
 
@@ -621,6 +623,45 @@ class BackgroundGateTest(unittest.TestCase):
     def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
         for name in ("read_job", "wait_for_job", "stop_job"):
             self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
+
+
+class ValidateArgsTest(unittest.TestCase):
+    """TOOLS-1: one schema check gates every tool call, agent-handled included."""
+
+    def test_valid_args_pass(self) -> None:
+        self.assertIsNone(validate_args("shell", {"command": "ls"}, REGISTRY))
+        self.assertIsNone(validate_args(
+            "write_todos",
+            {"todos": [{"content": "x", "status": "pending"}]}, REGISTRY))
+
+    def test_missing_required_argument(self) -> None:
+        self.assertIn("missing required argument 'command'",
+                      validate_args("shell", {}, REGISTRY))
+        self.assertIn("missing required argument 'job_id'",
+                      validate_args("read_job", {}, REGISTRY))
+
+    def test_wrong_top_level_type(self) -> None:
+        self.assertIn("'todos' must be an array",
+                      validate_args("write_todos", {"todos": "oops"}, REGISTRY))
+        self.assertIn("'command' must be a string",
+                      validate_args("shell", {"command": 42}, REGISTRY))
+
+    def test_wrong_array_item_shape(self) -> None:
+        self.assertIn("'todos[0]' must be an object",
+                      validate_args("write_todos", {"todos": ["x"]}, REGISTRY))
+        self.assertIn("missing required argument 'status'",
+                      validate_args("write_todos", {"todos": [{"content": "x"}]}, REGISTRY))
+
+    def test_wrong_enum_value(self) -> None:
+        error = validate_args(
+            "write_todos", {"todos": [{"content": "x", "status": "bogus"}]}, REGISTRY)
+        self.assertIn("must be one of", error)
+
+    def test_unknown_extra_keys_pass(self) -> None:
+        self.assertIsNone(validate_args("shell", {"command": "ls", "stray": 1}, REGISTRY))
+
+    def test_unknown_tool_is_reported(self) -> None:
+        self.assertIn("unknown tool", validate_args("nope", {}, REGISTRY))
 
 
 class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):

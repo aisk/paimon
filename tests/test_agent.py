@@ -315,6 +315,22 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.todos, [])
             self.assertTrue([e for e in events if isinstance(e, ToolBudgetExhausted)])
 
+    async def test_malformed_agent_handled_args_are_a_tool_error(self) -> None:
+        """TOOLS-1: agent-handled tools go through the same validation
+        contract; missing arguments never raise out of the loop."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with patch("paimon.agent.build_model", return_value=stub_model("read_job", "{}")):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go")]
+
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertIn("invalid arguments for read_job", end.result)
+            self.assertIn("job_id", end.result)
+            self.assertTrue([e for e in events if isinstance(e, TurnEnd)])
+
     async def test_malformed_todos_are_a_tool_error_the_turn_survives(self) -> None:
         """The model writes these arguments, so the wrong shape must reach it as a
         tool error instead of raising out of the agent loop and killing the turn."""

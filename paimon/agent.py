@@ -909,6 +909,19 @@ class Agent:
                     yield ToolEnd(call.tool_call_id, name, slot.content)
                     continue
 
+                # One schema validation for every call — before gating and
+                # before the agent-handled dispatch below — so a malformed
+                # argument is a tool error the model can react to, never an
+                # exception ending the turn (TOOLS-1).
+                invalid = tools.validate_args(name, args, self.toolset)
+                if invalid is not None:
+                    yield ToolStart(call.tool_call_id, name, args)
+                    slot.content = f"Error: invalid arguments for {name}: {invalid}"
+                    slot.outcome = "failed"
+                    persist()
+                    yield ToolEnd(call.tool_call_id, name, slot.content)
+                    continue
+
                 handler = self._AGENT_HANDLED.get(name)
                 if handler is not None:
                     async for event in handler(self, call, args, slot, persist):
