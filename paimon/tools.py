@@ -15,6 +15,7 @@ import shutil
 import signal
 import time
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -1030,6 +1031,24 @@ async def _pump(stream: asyncio.StreamReader, tail: _OutputTail) -> None:
         tail.append(chunk)
 
 
+@cache
+def shell_executable() -> Optional[str]:
+    """The shell the shell tool actually runs commands with.
+
+    Bash is preferred when installed, so the bashisms models habitually write
+    ([[ ]], process substitution) behave; /bin/sh is the fallback. None means
+    the platform default (cmd.exe via ComSpec on Windows). The system prompt
+    reports this same value — the model must never be told a shell the tool
+    does not use (previously it reported $SHELL while running /bin/sh).
+    """
+    if os.name == "nt":
+        return None
+    for candidate in ("/bin/bash", "/usr/bin/bash"):
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("bash") or "/bin/sh"
+
+
 async def _spawn_shell(
     command: str, cwd: Path, env: Optional[dict] = None
 ) -> tuple[asyncio.subprocess.Process, asyncio.StreamReader, asyncio.ReadTransport]:
@@ -1047,8 +1066,7 @@ async def _spawn_shell(
         # start_new_session puts the child in its own process group so the
         # whole tree (the shell plus anything it spawns) can be killed on
         # timeout/interrupt.
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        options = dict(
             cwd=str(cwd),
             # Without this a command that reads stdin (a bare "cat") would
             # block until the timeout, eating the user's keystrokes in the TUI.
@@ -1058,6 +1076,14 @@ async def _spawn_shell(
             start_new_session=True,
             env=env,
         )
+        shell = shell_executable()
+        if shell is None:
+            proc = await asyncio.create_subprocess_shell(command, **options)
+        else:
+            # Exec form rather than create_subprocess_shell's executable
+            # override: the override would run bash with argv[0] "sh", which
+            # flips it into POSIX mode.
+            proc = await asyncio.create_subprocess_exec(shell, "-c", command, **options)
     except BaseException:
         os.close(read_fd)
         raise
@@ -1231,7 +1257,8 @@ def _line_buffered(command: str) -> str:
     """
     if not shutil.which("stdbuf"):
         return command
-    return f"stdbuf -oL -eL sh -c {shlex.quote(command)}"
+    shell = shell_executable() or "sh"
+    return f"stdbuf -oL -eL {shlex.quote(shell)} -c {shlex.quote(command)}"
 
 
 class BackgroundCommand:

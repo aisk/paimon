@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import signal
 import tempfile
 import time
@@ -24,6 +25,7 @@ from paimon.tools import (
     gate,
     run_tool,
     safe_command,
+    shell_executable,
     shell_output_dir,
     start_background,
     tail_text,
@@ -617,6 +619,32 @@ class BackgroundGateTest(unittest.TestCase):
     def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
         for name in ("read_job", "wait_for_job", "stop_job"):
             self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
+
+
+class ShellExecutableTest(unittest.IsolatedAsyncioTestCase):
+    """SHELL-3: the executing shell is explicit, and the system prompt reports
+    that shell rather than the user's login shell."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    def test_prompt_reports_the_shell_the_tool_uses(self) -> None:
+        from paimon.prompt import _shell_description
+        with patch.dict("os.environ", {"SHELL": "/bin/some-login-shell"}):
+            self.assertEqual(_shell_description(), shell_executable())
+
+    async def test_commands_run_in_the_reported_shell(self) -> None:
+        result = await _shell({"command": "echo shell=$0"}, self.cwd)
+        self.assertIn(f"shell={shell_executable()}", result)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    async def test_bashisms_work_when_bash_is_installed(self) -> None:
+        self.assertIn("bash", shell_executable())
+        result = await _shell({"command": "[[ 1 == 1 ]] && echo yes-bash"}, self.cwd)
+        self.assertIn("yes-bash", result)
+        self.assertIn("(exit code 0)", result)
 
 
 class HistoryToolsTest(unittest.TestCase):

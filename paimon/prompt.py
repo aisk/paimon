@@ -56,10 +56,17 @@ def _terminal_description() -> str:
     return ", ".join(details)
 
 
-def _shell_description(system: str) -> str:
-    # Windows has no SHELL convention; ComSpec is the closest equivalent.
-    variable = "ComSpec" if system == "Windows" else "SHELL"
-    return os.environ.get(variable) or "unknown"
+def _shell_description() -> str:
+    # The shell the shell tool actually uses — never $SHELL, which names the
+    # user's login shell and used to make the prompt promise bash while the
+    # tool ran /bin/sh.
+    from .tools import shell_executable
+
+    shell = shell_executable()
+    if shell is not None:
+        return shell
+    # Windows: create_subprocess_shell uses ComSpec, defaulting to cmd.exe.
+    return os.environ.get("ComSpec") or "cmd.exe"
 
 
 def _runtime_flags(system: str) -> str:
@@ -91,7 +98,7 @@ def environment_context() -> str:
         f"Runtime: {_runtime_flags(system)}",
         f"Locale/encoding: {locale.getlocale()[0] or 'unknown'} / {locale.getpreferredencoding(False)}",
         f"Terminal: {_terminal_description()}",
-        f"Shell: {_shell_description(system)}",
+        f"Shell: {_shell_description()}",
     ])
 
 
