@@ -387,6 +387,7 @@ class Agent:
                     system_prompt += f"\n\n{append_system_prompt.strip()}"
                 session.append_system_prompt(system_prompt)
             else:
+                session.require_supported_format()
                 system_prompt = session.system_prompt()
                 if system_prompt is None:
                     raise SessionIncompleteError("Session does not contain a persisted system prompt")

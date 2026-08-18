@@ -38,6 +38,12 @@ SUMMARY_PREFIX = ("The conversation before this point was compacted into this ch
 # finished without anything having to interrupt the user.
 AGENTS_PREFIX = "[agents] "
 
+# The session log format this build writes and the highest it reads. Bump it
+# when a change would make older Paimons misread the log; headers without a
+# version are format 1, from before the field existed. A log from a NEWER
+# format refuses to resume instead of being silently misread.
+SESSION_FORMAT_VERSION = 1
+
 
 class SessionError(PaimonError):
     """A session cannot be opened. Callers catch this to report and move on."""
@@ -239,7 +245,7 @@ class Session:
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         session = cls(directory / f"{timestamp}-{session_id[:8]}.jsonl", session_id, cwd, parent)
-        header = {"type": "session", "id": session_id,
+        header = {"type": "session", "version": SESSION_FORMAT_VERSION, "id": session_id,
                   "cwd": str(session.cwd), "created_at": _now()}
         if parent:
             header["parent"] = parent
@@ -255,7 +261,7 @@ class Session:
         session_id = str(uuid4())
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = self.path.parent / f"{timestamp}-{session_id[:8]}.jsonl"
-        header = {"type": "session", "id": session_id,
+        header = {"type": "session", "version": SESSION_FORMAT_VERSION, "id": session_id,
                   "cwd": str(self.cwd), "created_at": _now()}
         # A fork of a subagent's transcript is still subagent material, so it
         # inherits the parent and stays out of the listings for the same reason.
@@ -352,6 +358,28 @@ class Session:
                 entries.append((seq, record if isinstance(record, dict) else None))
         return entries
 
+    def format_version(self) -> int:
+        """The log format the header declares; pre-versioning logs are 1."""
+        header = next(self._iter_records(self.path), None)
+        if header is None or header.get("type") != "session":
+            return SESSION_FORMAT_VERSION
+        version = header.get("version")
+        return version if isinstance(version, int) and version > 0 else 1
+
+    def require_supported_format(self) -> None:
+        """Refuse to resume a log written in a newer format.
+
+        Raises SessionError; reading commands (log, sessions) stay usable on
+        best effort, but resuming would append records a newer Paimon then
+        misreads, so that is where the door closes.
+        """
+        version = self.format_version()
+        if version > SESSION_FORMAT_VERSION:
+            raise SessionError(
+                f"session {self.id[:8]} uses log format v{version}, written by a newer "
+                f"Paimon; this build reads up to v{SESSION_FORMAT_VERSION}. "
+                "The log was left untouched.")
+
     def messages(self) -> list[ModelMessage]:
         raw_messages: list[dict] = []
         positions: dict[str, int] = {}
@@ -377,7 +405,16 @@ class Session:
                 if isinstance(record.get("id"), str):
                     positions[record["id"]] = len(raw_messages)
                 raw_messages.append(message)
-        return _repair_orphan_tool_calls(load_messages(raw_messages))
+        try:
+            loaded = load_messages(raw_messages)
+        except Exception as exc:
+            # Most likely a pydantic-ai upgrade changed the message schema:
+            # surface it as the session-level condition it is, with the log
+            # intact, instead of a validation traceback.
+            raise SessionError(
+                f"session {self.id[:8]} holds messages this Paimon cannot parse "
+                f"({type(exc).__name__}); the log was left untouched") from exc
+        return _repair_orphan_tool_calls(loaded)
 
     def system_prompt(self) -> Optional[str]:
         """Return the system prompt snapshot stored for this session."""

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -13,7 +14,13 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from paimon.session import Session, SessionBusyError, _project_dir
+from paimon.session import (
+    SESSION_FORMAT_VERSION,
+    Session,
+    SessionBusyError,
+    SessionError,
+    _project_dir,
+)
 
 
 class SessionScanTestCase(unittest.TestCase):
@@ -98,6 +105,89 @@ class EntriesTest(SessionScanTestCase):
         session.path.unlink()
         with self.assertRaises(OSError):
             session.entries()
+
+
+# One complete session log frozen as text, exactly as a v1 Paimon wrote it.
+# Never regenerate this from live code: its whole point is to prove that a
+# dependency upgrade still reads what was written before the upgrade.
+_V1_FIXTURE = "\n".join([
+    '{"type": "session", "version": 1, "id": "fix11111-0000-0000-0000-000000000000", '
+    '"cwd": "/tmp/project", "created_at": "2026-08-18T00:00:00+00:00"}',
+    '{"type": "system_prompt", "timestamp": "2026-08-18T00:00:00+00:00", "content": "snapshot"}',
+    '{"type": "message", "id": "m1", "timestamp": "2026-08-18T00:00:01+00:00", "message": '
+    '{"parts": [{"content": "list the files", "timestamp": "2026-08-18T00:00:01Z", '
+    '"part_kind": "user-prompt"}], "kind": "request"}}',
+    '{"type": "message", "id": "m2", "timestamp": "2026-08-18T00:00:02+00:00", "message": '
+    '{"parts": [{"content": "Listing.", "part_kind": "text"}, {"tool_name": "shell", '
+    '"args": {"command": "ls"}, "tool_call_id": "c1", "part_kind": "tool-call"}], '
+    '"model_name": "glm-5.2", "timestamp": "2026-08-18T00:00:02Z", "kind": "response", '
+    '"provider_name": "zai"}}',
+    '{"type": "message", "id": "m3", "timestamp": "2026-08-18T00:00:03+00:00", "message": '
+    '{"parts": [{"tool_name": "shell", "content": "a.py", "tool_call_id": "c1", '
+    '"timestamp": "2026-08-18T00:00:03Z", "outcome": "success", '
+    '"part_kind": "tool-return"}], "kind": "request"}}',
+    '{"type": "turn_end", "timestamp": "2026-08-18T00:00:04+00:00", "outcome": "success"}',
+]) + "\n"
+
+
+class FormatVersionTest(SessionScanTestCase):
+    """SESSION-6: the log format is versioned, a newer format refuses to
+    resume, and a frozen v1 log keeps loading across dependency upgrades."""
+
+    def test_new_sessions_declare_the_current_format(self) -> None:
+        session = Session.create(self.cwd)
+        header = json.loads(session.path.read_text().splitlines()[0])
+        self.assertEqual(header["version"], SESSION_FORMAT_VERSION)
+        self.assertEqual(session.format_version(), SESSION_FORMAT_VERSION)
+        session.require_supported_format()
+
+    def test_forks_carry_the_current_format(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))
+        fork = session.fork()
+        header = json.loads(fork.path.read_text().splitlines()[0])
+        self.assertEqual(header["version"], SESSION_FORMAT_VERSION)
+
+    def test_pre_versioning_logs_read_as_format_1(self) -> None:
+        path = _project_dir(self.cwd) / "old.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"type": "session", "id": "old11111", "cwd": "x"}\n')
+        session = Session(path, "old11111", self.cwd)
+        self.assertEqual(session.format_version(), 1)
+        session.require_supported_format()
+
+    def test_a_newer_format_refuses_to_resume(self) -> None:
+        path = _project_dir(self.cwd) / "future.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "type": "session", "version": SESSION_FORMAT_VERSION + 1,
+            "id": "fut11111", "cwd": "x"}) + "\n")
+        session = Session(path, "fut11111", self.cwd)
+        with self.assertRaises(SessionError) as caught:
+            session.require_supported_format()
+        self.assertIn("newer", str(caught.exception))
+
+    def test_unparseable_messages_raise_a_session_error(self) -> None:
+        session = Session.create(self.cwd)
+        session.append({"type": "message", "id": "bad",
+                        "message": {"kind": "nonsense"}})
+        with self.assertRaises(SessionError) as caught:
+            session.messages()
+        self.assertIn("cannot parse", str(caught.exception))
+
+    def test_the_frozen_v1_fixture_still_loads(self) -> None:
+        path = _project_dir(self.cwd) / "fixture.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_V1_FIXTURE)
+        session = Session(path, "fix11111-0000-0000-0000-000000000000", self.cwd)
+
+        session.require_supported_format()
+        self.assertEqual(session.system_prompt(), "snapshot")
+        messages = session.messages()
+        self.assertEqual(len(messages), 3)
+        self.assertIsInstance(messages[0], ModelRequest)
+        self.assertIsInstance(messages[1], ModelResponse)
+        self.assertEqual(messages[2].parts[0].content, "a.py")
 
 
 class OrphanToolCallTest(SessionScanTestCase):
