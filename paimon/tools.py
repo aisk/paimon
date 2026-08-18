@@ -6,6 +6,7 @@ permission gating. Adding a tool means adding one registry entry.
 """
 
 import asyncio
+import codecs
 import inspect
 import json
 import os
@@ -664,11 +665,39 @@ async def run_tool(name: str, args: dict, cwd: Path, mode: str,
     return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx), False
 
 
+def _decode_preserving(raw: bytes) -> tuple[str, str, bool]:
+    """(LF-normalized text, line ending to restore, had a UTF-8 BOM).
+
+    The model reads and writes LF, so matching and editing happen on the LF
+    copy; the original ending and BOM are put back on write, and a CRLF file
+    stays CRLF with only the target span changed. Reading and writing bytes
+    keeps this independent of the platform and its locale — text mode would
+    normalize every line ending in the file just for touching one line.
+    Mixed-ending files are re-written uniformly with the majority ending.
+    """
+    bom = raw.startswith(codecs.BOM_UTF8)
+    if bom:
+        raw = raw[len(codecs.BOM_UTF8):]
+    text = raw.decode("utf-8", errors="replace")
+    crlf = text.count("\r\n")
+    bare = text.count("\n") - crlf
+    newline = "\r\n" if crlf > bare else "\n"
+    return text.replace("\r\n", "\n"), newline, bom
+
+
+def _encode_preserving(text: str, newline: str, bom: bool) -> bytes:
+    if newline != "\n":
+        text = text.replace("\n", newline)
+    raw = text.encode("utf-8")
+    return codecs.BOM_UTF8 + raw if bom else raw
+
+
 def _read_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
         return f"Error: file not found: {path}"
-    lines = path.read_text(errors="replace").splitlines()
+    text, _, _ = _decode_preserving(path.read_bytes())
+    lines = text.splitlines()
     offset = max(1, int(args.get("offset", 1)))
     limit = args.get("limit")
     end = offset - 1 + int(limit) if limit else len(lines)
@@ -681,9 +710,18 @@ def _read_file(args: dict, cwd: Path) -> str:
 
 def _write_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
+    content = str(args["content"]).replace("\r\n", "\n")
+    newline, bom = "\n", False
+    if path.is_file():
+        # A full rewrite keeps the file's own conventions, the same way an
+        # edit does; new files are plain LF UTF-8.
+        try:
+            _, newline, bom = _decode_preserving(path.read_bytes())
+        except OSError:
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(args["content"])
-    n = args["content"].count("\n") + 1
+    path.write_bytes(_encode_preserving(content, newline, bom))
+    n = content.count("\n") + 1
     return f"Wrote {n} lines to {path}"
 
 
@@ -691,14 +729,15 @@ def _edit_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
         return f"Error: file not found: {path}"
-    text = path.read_text()
-    old = args["old_string"]
+    text, newline, bom = _decode_preserving(path.read_bytes())
+    old = str(args["old_string"]).replace("\r\n", "\n")
+    new = str(args["new_string"]).replace("\r\n", "\n")
     count = text.count(old)
     if count == 0:
         return "Error: old_string not found in file."
     if count > 1:
         return f"Error: old_string is not unique (found {count} times). Add more context to make it unique."
-    path.write_text(text.replace(old, args["new_string"], 1))
+    path.write_bytes(_encode_preserving(text.replace(old, new, 1), newline, bom))
     return f"Edited {path}"
 
 

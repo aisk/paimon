@@ -625,6 +625,66 @@ class BackgroundGateTest(unittest.TestCase):
             self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
 
 
+class LineEndingPreservationTest(unittest.TestCase):
+    """TOOLS-2: editing changes the target span only — line endings, a missing
+    final newline and a UTF-8 BOM all survive."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        self.path = self.cwd / "f.txt"
+
+    def _edit(self, old: str, new: str) -> str:
+        from paimon.tools import _edit_file
+        return _edit_file({"path": "f.txt", "old_string": old, "new_string": new}, self.cwd)
+
+    def test_crlf_file_stays_crlf(self) -> None:
+        self.path.write_bytes(b"a\r\nb\r\nc\r\n")
+        self.assertIn("Edited", self._edit("b", "B"))
+        self.assertEqual(self.path.read_bytes(), b"a\r\nB\r\nc\r\n")
+
+    def test_lf_file_stays_lf(self) -> None:
+        self.path.write_bytes(b"a\nb\nc\n")
+        self._edit("b", "B")
+        self.assertEqual(self.path.read_bytes(), b"a\nB\nc\n")
+
+    def test_missing_final_newline_is_not_added(self) -> None:
+        self.path.write_bytes(b"a\nb")
+        self._edit("b", "B")
+        self.assertEqual(self.path.read_bytes(), b"a\nB")
+
+    def test_utf8_bom_survives(self) -> None:
+        self.path.write_bytes(b"\xef\xbb\xbfx\ny\n")
+        self._edit("x", "X")
+        self.assertEqual(self.path.read_bytes(), b"\xef\xbb\xbfX\ny\n")
+
+    def test_lf_old_string_matches_a_crlf_file(self) -> None:
+        """The model reads LF (read_file normalizes), so its old_string spans
+        lines with LF; the match must still land on a CRLF file."""
+        self.path.write_bytes(b"a\r\nb\r\nc\r\n")
+        self._edit("b\nc", "B\nC")
+        self.assertEqual(self.path.read_bytes(), b"a\r\nB\r\nC\r\n")
+
+    def test_write_file_keeps_an_existing_files_conventions(self) -> None:
+        from paimon.tools import _write_file
+        self.path.write_bytes(b"\xef\xbb\xbfold\r\n")
+        _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
+        self.assertEqual(self.path.read_bytes(), b"\xef\xbb\xbfp\r\nq\r\n")
+
+    def test_write_file_creates_new_files_as_plain_lf_utf8(self) -> None:
+        from paimon.tools import _write_file
+        _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
+        self.assertEqual(self.path.read_bytes(), b"p\nq\n")
+
+    def test_read_file_shows_crlf_files_without_stray_carriage_returns(self) -> None:
+        from paimon.tools import _read_file
+        self.path.write_bytes(b"a\r\nb\r\n")
+        result = _read_file({"path": "f.txt"}, self.cwd)
+        self.assertNotIn("\r", result)
+        self.assertIn("a", result)
+
+
 class ValidateArgsTest(unittest.TestCase):
     """TOOLS-1: one schema check gates every tool call, agent-handled included."""
 
