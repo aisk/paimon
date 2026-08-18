@@ -30,6 +30,7 @@ from paimon.agent import (
     SessionHandoff,
     TextDelta,
     TodosUpdate,
+    ToolBudgetExhausted,
     ToolEnd,
     ToolStart,
     TurnEnd,
@@ -262,6 +263,49 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(todos.todos, [{"content": "x", "status": "pending"}])
             self.assertEqual(agent.todos, todos.todos)
 
+
+    async def test_looping_write_todos_stops_at_the_tool_budget(self) -> None:
+        """HEADLESS-1: agent-handled tools count against max_tool_calls, and
+        the refusal is persisted explicitly rather than as an interrupted
+        placeholder."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+
+            async def stream(messages, info):
+                # Calls write_todos on every request, forever.
+                yield {0: DeltaToolCall(name="write_todos", json_args=arguments,
+                                        tool_call_id=f"call-{len(messages)}")}
+
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go", max_tool_calls=1)]
+
+            self.assertEqual(len([e for e in events if isinstance(e, TodosUpdate)]), 1)
+            budget = [e for e in events if isinstance(e, ToolBudgetExhausted)]
+            self.assertEqual([b.limit for b in budget], [1])
+            last = session.messages()[-1]
+            self.assertIn("Not executed", last.parts[0].content)
+            self.assertIn("max_tool_calls=1", last.parts[0].content)
+
+    async def test_zero_budget_refuses_every_tool_including_agent_handled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("write_todos", arguments)):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go", max_tool_calls=0)]
+
+            self.assertFalse([e for e in events if isinstance(e, TodosUpdate)])
+            self.assertEqual(agent.todos, [])
+            self.assertTrue([e for e in events if isinstance(e, ToolBudgetExhausted)])
 
     async def test_malformed_todos_are_a_tool_error_the_turn_survives(self) -> None:
         """The model writes these arguments, so the wrong shape must reach it as a

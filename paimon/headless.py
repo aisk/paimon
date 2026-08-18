@@ -56,6 +56,7 @@ from .agent import (
     ReasoningDelta,
     TextDelta,
     TodosUpdate,
+    ToolBudgetExhausted,
     ToolEnd,
     ToolStart,
 )
@@ -367,17 +368,14 @@ class _ToolBudgetExceeded(Exception):
 
 async def _run_turn(agent: Agent, renderer, text: str,
                     max_tool_calls: Optional[int] = None) -> None:
-    calls = 0
     try:
-        async for ev in agent.run(text, expand=False):
+        # The budget itself is enforced inside Agent.run, at the point every
+        # tool call is dispatched — counting renderer events here would miss
+        # the agent-handled tools that never produce a ToolStart.
+        async for ev in agent.run(text, expand=False, max_tool_calls=max_tool_calls):
             await renderer.handle(ev)
-            if isinstance(ev, ToolStart):
-                calls += 1
-                if max_tool_calls is not None and calls > max_tool_calls:
-                    # Abandoning the generator at this yield point means the
-                    # over-budget tool never executes; its pre-seeded
-                    # placeholder result keeps the session resumable.
-                    raise _ToolBudgetExceeded
+            if isinstance(ev, ToolBudgetExhausted):
+                raise _ToolBudgetExceeded
     finally:
         await renderer.close()
 

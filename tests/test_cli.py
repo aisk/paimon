@@ -55,12 +55,13 @@ class CliTestCase(unittest.TestCase):
         return ctx.exception.code, stderr.getvalue()
 
     def _main_output(self, *argv: str, model: str | None = "test:stub",
-                     tool: str | None = None, stub=None) -> tuple[int, str, str]:
+                     tool: str | None = None, stub=None,
+                     arguments: str = "{}") -> tuple[int, str, str]:
         """Run main() headless against a stubbed model, capturing both streams."""
         out, err = io.StringIO(), io.StringIO()
         with patch("sys.argv", ["paimon", *argv]), \
                 patch("paimon.headless.Config.load", return_value=Config(model=model)), \
-                patch("paimon.agent.build_model", return_value=stub or stub_model(tool)), \
+                patch("paimon.agent.build_model", return_value=stub or stub_model(tool, arguments)), \
                 patch("paimon.agent.build_system_prompt", return_value="sys"), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as ctx:
@@ -248,7 +249,23 @@ class GuardRailTest(CliTestCase):
         self.assertEqual(lines[-1]["subtype"], "max_tool_calls")
         types = [line["type"] for line in lines]
         self.assertIn("tool_use", types)  # the caller sees which call blew the budget
-        self.assertNotIn("tool_result", types)  # ... and that it never executed
+        results = [line for line in lines if line["type"] == "tool_result"]
+        # ... and an explicit refusal proving it never executed
+        self.assertTrue(results)
+        for result in results:
+            self.assertIn("Not executed", result["result"])
+
+    def test_tool_budget_counts_agent_handled_tools(self) -> None:
+        """HEADLESS-1: write_todos produces no ToolStart but must still count."""
+        arguments = '{"todos": [{"content": "x", "status": "pending"}]}'
+        code, out, err = self._main_output("-p", "plan it", "--output-format", "json",
+                                           "--max-tool-calls", "0",
+                                           tool="write_todos", arguments=arguments)
+        self.assertEqual(code, 4)
+        lines = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual(lines[-1]["subtype"], "max_tool_calls")
+        self.assertNotIn("todos", [line["type"] for line in lines],
+                         "the refused write_todos must not update the todo list")
 
     def test_session_is_resumable_after_a_budget_stop(self) -> None:
         self._main_output("-p", "run it", "--max-tool-calls", "0", tool="shell")

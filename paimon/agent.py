@@ -108,6 +108,15 @@ class RequestStats:
 
 
 @dataclass
+class ToolBudgetExhausted:
+    """The turn hit its tool-call budget: the remaining calls were refused
+    with an explicit result and the turn ends without another model request.
+    """
+
+    limit: int
+
+
+@dataclass
 class TurnEnd:
     pass
 
@@ -161,9 +170,9 @@ class AgentsNotice:
 # on isinstance; the alias exists so a type checker can flag an unhandled one.
 AgentEvent = (
     TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
-    | SessionHandoff | RequestStats | TurnEnd | ContextCompacted
-    | ContextCompactionFailed | ModelRetry | UserInput | CompactionNotice
-    | AgentsNotice
+    | SessionHandoff | RequestStats | ToolBudgetExhausted | TurnEnd
+    | ContextCompacted | ContextCompactionFailed | ModelRetry | UserInput
+    | CompactionNotice | AgentsNotice
 )
 
 
@@ -575,12 +584,20 @@ class Agent:
         "stop_job": _run_supervised,
     }
 
-    async def run(self, user_input: str, *, expand: bool = True) -> AsyncIterator[AgentEvent]:
+    async def run(self, user_input: str, *, expand: bool = True,
+                  max_tool_calls: Optional[int] = None) -> AsyncIterator[AgentEvent]:
         """Run one user turn to completion, yielding events along the way.
 
         ``expand=False`` skips @path expansion, for callers that assembled the
         prompt themselves and must not have unrelated text rewritten (piped
         stdin, where a line like ``@foo.py`` is data rather than a mention).
+
+        ``max_tool_calls`` bounds the tool calls this turn may execute. It is
+        enforced here, where every ToolCallPart is dispatched — including the
+        agent-handled tools like write_todos that produce no ToolStart — so no
+        tool can slip past the budget. On the budget every remaining call gets
+        an explicit refusal persisted as its result, ToolBudgetExhausted is
+        yielded and the turn ends.
         """
         prompt = expand_mentions(user_input, self.cwd) if expand else user_input
         # Agents this session started report in here, at the top of the next
@@ -599,6 +616,7 @@ class Agent:
         # for the rest of the turn instead of paying for it every step.
         compaction_off = False
         compaction_failures = 0
+        calls_made = 0  # every dispatched ToolCallPart counts, whatever its kind
 
         while True:
             # Messages the user queued while this turn was already running.
@@ -721,9 +739,23 @@ class Agent:
                 """Re-persist the tool request with the slots filled so far."""
                 self._replace_message(record_id, tool_request)
 
+            budget_hit = False
             for slot, call in zip(returns, calls):
                 args = _parse_args(call.args)
                 name = call.tool_name
+
+                # The budget check comes before any dispatch, agent-handled
+                # tools included: a refused call never executes, and its slot
+                # records why instead of a generic interrupted placeholder.
+                if max_tool_calls is not None and calls_made >= max_tool_calls:
+                    budget_hit = True
+                    yield ToolStart(call.tool_call_id, name, args)
+                    slot.content = (f"Not executed: the run reached its tool call "
+                                    f"budget (max_tool_calls={max_tool_calls}).")
+                    persist()
+                    yield ToolEnd(call.tool_call_id, name, slot.content)
+                    continue
+                calls_made += 1
 
                 # A name outside this agent's tool set is rejected before the
                 # agent-handled table below, so excluding write_todos or
@@ -754,4 +786,8 @@ class Agent:
                 slot.content = result
                 persist()
                 yield ToolEnd(call.tool_call_id, name, result, denied=denied)
+
+            if budget_hit:
+                yield ToolBudgetExhausted(max_tool_calls)
+                return
             # loop again so the model can react to tool results
