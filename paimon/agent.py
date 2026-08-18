@@ -193,12 +193,14 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     """Persisted messages replayed as the events a live ``Agent.run`` yields.
 
     Lets a UI render resumed history through the same code path as live turns.
+    Tools run serially, so each call replays as its ToolStart immediately
+    followed by its ToolEnd (looked up in the next request), matching the live
+    order — not all starts of a batch first. The persisted ``outcome`` field
+    restores denied styling.
     """
     events: list[AgentEvent] = []
-    # write_todos calls whose arguments never made a todo update: they were
-    # rejected live as a normal tool error, so they replay as one.
-    rejected_todos: set[str] = set()
-    for message in messages:
+    consumed: set[str] = set()  # tool returns already replayed with their call
+    for index, message in enumerate(messages):
         if is_summary_message(message):
             events.append(CompactionNotice())
             continue
@@ -209,11 +211,20 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
             for part in message.parts:
                 if isinstance(part, UserPromptPart) and isinstance(part.content, str) and part.content:
                     events.append(UserInput(part.content))
-                elif isinstance(part, ToolReturnPart) and (part.tool_name != "write_todos"
-                                                           or part.tool_call_id in rejected_todos):
+                elif (isinstance(part, ToolReturnPart)
+                      and part.tool_call_id not in consumed
+                      and part.tool_name != "write_todos"):
+                    # A return whose call is gone (compaction cut mid-turn):
+                    # better an unpaired result than a silent hole.
                     events.append(ToolEnd(part.tool_call_id, part.tool_name,
-                                          str(part.content or "(no output)")))
+                                          str(part.content or "(no output)"),
+                                          denied=part.outcome == "denied"))
         elif isinstance(message, ModelResponse):
+            following = messages[index + 1] if index + 1 < len(messages) else None
+            returns: dict[str, ToolReturnPart] = {}
+            if isinstance(following, ModelRequest):
+                returns = {part.tool_call_id: part for part in following.parts
+                           if isinstance(part, ToolReturnPart)}
             for part in message.parts:
                 if isinstance(part, ThinkingPart) and part.content:
                     events.append(ReasoningDelta(part.content))
@@ -221,14 +232,22 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                     events.append(TextDelta(part.content))
                 elif isinstance(part, ToolCallPart):
                     args = _parse_args(part.args)
-                    todos = (tools.normalize_todos(args.get("todos"))
-                             if part.tool_name == "write_todos" else None)
-                    if todos is not None:
-                        events.append(TodosUpdate(todos))
-                    else:
-                        if part.tool_name == "write_todos":
-                            rejected_todos.add(part.tool_call_id)
-                        events.append(ToolStart(part.tool_call_id, part.tool_name, args))
+                    result = returns.get(part.tool_call_id)
+                    if result is not None:
+                        consumed.add(part.tool_call_id)
+                    if part.tool_name == "write_todos":
+                        todos = tools.normalize_todos(args.get("todos"))
+                        # Live, a write_todos that actually ran yields only a
+                        # TodosUpdate; one that was rejected or never executed
+                        # yields a normal failed call.
+                        if todos is not None and (result is None or result.outcome == "success"):
+                            events.append(TodosUpdate(todos))
+                            continue
+                    events.append(ToolStart(part.tool_call_id, part.tool_name, args))
+                    if result is not None:
+                        events.append(ToolEnd(part.tool_call_id, part.tool_name,
+                                              str(result.content or "(no output)"),
+                                              denied=result.outcome == "denied"))
     return events
 
 
@@ -517,11 +536,13 @@ class Agent:
             yield ToolStart(call.tool_call_id, call.tool_name, args)
             slot.content = ("Error: 'todos' must be an array of "
                             "{content, status} objects.")
+            slot.outcome = "failed"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
         self.todos = todos
         slot.content = tools.render_todos(self.todos)
+        slot.outcome = "success"
         persist()
         yield TodosUpdate(list(self.todos))
 
@@ -535,16 +556,19 @@ class Agent:
         prompt_text = str(args.get("prompt") or "").strip()
         if not prompt_text:
             slot.content = "Error: prompt is required."
+            slot.outcome = "failed"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
         if not await self._permitted(call.tool_name, args):
             slot.content = "User denied this operation."
+            slot.outcome = "denied"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
             return
         slot.content = ("Handoff accepted: this session ended here and a new "
                         "session continued with the provided prompt.")
+        slot.outcome = "success"
         persist()
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
         yield SessionHandoff(prompt_text)
@@ -576,13 +600,16 @@ class Agent:
         if self.supervisor is None:
             slot.content = ("Error: this only works in the interactive UI; "
                             "do the work yourself instead.")
+            slot.outcome = "failed"
         elif not await self._permitted(call.tool_name, args):
             slot.content = "User denied this operation."
+            slot.outcome = "denied"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
             return
         else:
             slot.content = await self.supervisor.handle(call.tool_name, args, caller=self)
+            slot.outcome = "success"
         persist()
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
 
@@ -787,7 +814,7 @@ class Agent:
             # keep this placeholder.
             returns = [
                 ToolReturnPart(tool_name=call.tool_name, content="Interrupted by user.",
-                               tool_call_id=call.tool_call_id)
+                               tool_call_id=call.tool_call_id, outcome="interrupted")
                 for call in calls
             ]
             tool_request = ModelRequest(parts=returns)
@@ -821,6 +848,7 @@ class Agent:
                 if name not in self.toolset:
                     yield ToolStart(call.tool_call_id, name, args)
                     slot.content = f"Error: unknown tool {name!r}"
+                    slot.outcome = "failed"
                     persist()
                     yield ToolEnd(call.tool_call_id, name, slot.content)
                     continue
@@ -842,6 +870,7 @@ class Agent:
                                                       ctx=self.tool_context)
 
                 slot.content = result
+                slot.outcome = "denied" if denied else "success"
                 persist()
                 yield ToolEnd(call.tool_call_id, name, result, denied=denied)
 

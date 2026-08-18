@@ -144,7 +144,7 @@ def _repair_orphan_tool_calls(messages: list[ModelMessage]) -> list[ModelMessage
         synthesized = [
             ToolReturnPart(tool_name=call.tool_name, tool_call_id=call.tool_call_id,
                            content="Interrupted: the session ended before this tool "
-                                   "call produced a result.")
+                                   "call produced a result.", outcome="interrupted")
             for call in missing
         ]
         if answered:

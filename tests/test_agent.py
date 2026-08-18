@@ -659,11 +659,13 @@ class ReplayEventsTest(unittest.TestCase):
 
         events = replay_events(messages)
 
+        # SESSION-5: each call is followed by its own result, as live serial
+        # execution orders them, not all starts of a batch first.
         self.assertEqual(
             [type(event) for event in events],
-            [UserInput, ReasoningDelta, TextDelta, ToolStart, TodosUpdate, ToolEnd, TextDelta],
+            [UserInput, ReasoningDelta, TextDelta, ToolStart, ToolEnd, TodosUpdate, TextDelta],
         )
-        tool_end = events[5]
+        tool_end = events[4]
         self.assertEqual((tool_end.id, tool_end.name, tool_end.result), ("c1", "shell", "a.py"))
 
     def test_compaction_summary_becomes_notice(self) -> None:
@@ -772,6 +774,66 @@ class ModelOverrideTest(unittest.TestCase):
             agent = Agent(make_session(Path(directory)), "snapshot",
                           config=Config(model="test:stub"), model_override="claude-x")
             self.assertEqual(compaction.context_window(agent.model_name), 200_000)
+
+
+class LiveReplayParityTest(unittest.IsolatedAsyncioTestCase):
+    """SESSION-5: resumed history replays with the live event order and the
+    live denied styling."""
+
+    @staticmethod
+    def _tool_events(events: list) -> list[tuple]:
+        return [(type(e).__name__, e.id, getattr(e, "denied", None))
+                for e in events if isinstance(e, (ToolStart, ToolEnd))]
+
+    async def test_a_serial_tool_batch_replays_in_live_order(self) -> None:
+        requests = 0
+
+        async def stream(messages, info):
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                yield {0: DeltaToolCall(name="shell", json_args='{"command": "true"}',
+                                        tool_call_id="c1"),
+                       1: DeltaToolCall(name="shell", json_args='{"command": "true"}',
+                                        tool_call_id="c2")}
+            else:
+                yield "done"
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                live = [event async for event in agent.run("go")]
+
+            live_order = self._tool_events(live)
+            self.assertEqual([item[:2] for item in live_order],
+                             [("ToolStart", "c1"), ("ToolEnd", "c1"),
+                              ("ToolStart", "c2"), ("ToolEnd", "c2")])
+            replayed = replay_events(session.messages())
+            self.assertEqual(self._tool_events(replayed), live_order)
+
+    async def test_a_denied_tool_still_replays_as_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            arguments = '{"path": "a.txt", "content": "hi"}'
+            confirm = AsyncMock(return_value=False)
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("write_file", arguments)):
+                agent = Agent.open(cwd=cwd, session=session, config=_config(),
+                                   confirm=confirm, mode="read")
+                live = [event async for event in agent.run("go")]
+
+            live_end = next(e for e in live if isinstance(e, ToolEnd))
+            self.assertTrue(live_end.denied)
+            replayed_end = next(e for e in replay_events(session.messages())
+                                if isinstance(e, ToolEnd))
+            self.assertTrue(replayed_end.denied,
+                            "the denied state survives persistence and replay")
 
 
 class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
