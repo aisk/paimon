@@ -233,11 +233,17 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
 
 
 def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[ModelMessage]:
-    """Drop thinking parts produced by a different provider/model.
+    """Adapt thinking parts produced by a different provider/model.
 
     Preserved thinking is only valid replayed verbatim to the model that
-    produced it; other endpoints may reject or misread it (cf. pi's
-    transformMessages: same model keeps thinking, a changed model strips it).
+    produced it, so a foreign message's readable thinking is converted to a
+    plain text block — the rationale it carries is still context — while its
+    signatures and encrypted/redacted payloads are dropped, never sent to a
+    provider that did not produce them (cf. pi's transformMessages, which
+    converts rather than deletes readable thinking).
+
+    Only the request being built is touched; the persisted history keeps the
+    original parts.
     """
     current = (model.system, model.model_name)
     sanitized: list[ModelMessage] = []
@@ -245,9 +251,16 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
         if (isinstance(message, ModelResponse)
                 and (message.provider_name, message.model_name) != current
                 and any(isinstance(part, ThinkingPart) for part in message.parts)):
-            message = dataclasses.replace(
-                message, parts=[part for part in message.parts if not isinstance(part, ThinkingPart)]
-            )
+            parts = []
+            for part in message.parts:
+                if not isinstance(part, ThinkingPart):
+                    parts.append(part)
+                elif part.content:
+                    parts.append(TextPart(content=f"<thinking>\n{part.content}\n</thinking>"))
+                # else: encrypted or redacted thinking with nothing readable
+            if not parts:
+                continue  # nothing a different provider can use
+            message = dataclasses.replace(message, parts=parts)
         sanitized.append(message)
     return sanitized
 

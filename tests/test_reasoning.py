@@ -133,8 +133,14 @@ class StripForeignThinkingTest(unittest.IsolatedAsyncioTestCase):
             with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 _ = [event async for event in agent.run("hi")]
 
+            # AGENT-1: the readable rationale survives the model switch as
+            # text, but never as reasoning_content, which providers treat as
+            # the current model's own preserved thinking.
+            assistants = [m for m in requests[0]["messages"] if m["role"] == "assistant"]
+            self.assertNotIn("deepseek thoughts", json.dumps(
+                [m.get("reasoning_content") for m in assistants]))
             body = json.dumps(requests[0]["messages"])
-            self.assertNotIn("deepseek thoughts", body)
+            self.assertIn("deepseek thoughts", body)
             self.assertIn("old answer", body)
 
     def test_matching_model_keeps_thinking(self) -> None:
@@ -147,12 +153,45 @@ class StripForeignThinkingTest(unittest.IsolatedAsyncioTestCase):
             model_name="glm-5.2", provider_name="zai",
         )
         foreign = ModelResponse(
-            parts=[ThinkingPart(content="drop me"), TextPart(content="b")],
+            parts=[ThinkingPart(content="convert me"), TextPart(content="b")],
             model_name="glm-5", provider_name="zai",
         )
         stripped = _strip_foreign_thinking([matching, foreign], model)
         self.assertTrue(any(isinstance(p, ThinkingPart) for p in stripped[0].parts))
         self.assertFalse(any(isinstance(p, ThinkingPart) for p in stripped[1].parts))
+        converted = [p for p in stripped[1].parts if isinstance(p, TextPart)]
+        self.assertIn("convert me", "".join(p.content for p in converted),
+                      "readable foreign thinking becomes text, not nothing")
+
+    def test_foreign_signatures_and_redacted_thinking_are_dropped(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:  # never called
+            raise AssertionError
+
+        model = _zai_model(handler)
+        foreign = ModelResponse(
+            parts=[ThinkingPart(content="visible rationale", signature="sig-abc",
+                                provider_name="anthropic"),
+                   ThinkingPart(content="", signature="sig-redacted",
+                                provider_name="anthropic"),
+                   TextPart(content="answer")],
+            model_name="claude-x", provider_name="anthropic",
+        )
+        stripped = _strip_foreign_thinking([foreign], model)
+        rendered = json.dumps([str(p) for p in stripped[0].parts])
+        self.assertIn("visible rationale", rendered)
+        self.assertNotIn("sig-abc", rendered)
+        self.assertNotIn("sig-redacted", rendered)
+
+    def test_a_thinking_only_foreign_message_disappears_when_unreadable(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:  # never called
+            raise AssertionError
+
+        model = _zai_model(handler)
+        foreign = ModelResponse(
+            parts=[ThinkingPart(content="", signature="sig", provider_name="anthropic")],
+            model_name="claude-x", provider_name="anthropic",
+        )
+        self.assertEqual(_strip_foreign_thinking([foreign], model), [])
 
 
 if __name__ == "__main__":
