@@ -55,12 +55,18 @@ class CliTestCase(unittest.TestCase):
         return ctx.exception.code, stderr.getvalue()
 
     def _main_output(self, *argv: str, model: str | None = "test:stub",
-                     tool: str | None = None, stub=None,
-                     arguments: str = "{}") -> tuple[int, str, str]:
-        """Run main() headless against a stubbed model, capturing both streams."""
+                     tool: str | None = None, stub=None, arguments: str = "{}",
+                     config: Config | None = None) -> tuple[int, str, str]:
+        """Run main() headless against a stubbed model, capturing both streams.
+
+        Compaction is off by default: the stub model has no known context
+        window, and the warning that state prints would land in every test's
+        stderr (it has a test of its own).
+        """
+        config = config or Config(model=model, compaction_enabled=False)
         out, err = io.StringIO(), io.StringIO()
         with patch("sys.argv", ["paimon", *argv]), \
-                patch("paimon.headless.Config.load", return_value=Config(model=model)), \
+                patch("paimon.headless.Config.load", return_value=config), \
                 patch("paimon.agent.build_model", return_value=stub or stub_model(tool, arguments)), \
                 patch("paimon.agent.build_system_prompt", return_value="sys"), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -343,6 +349,21 @@ class GuardRailTest(CliTestCase):
 
 
 class HeadlessRunTest(CliTestCase):
+    def test_unknown_window_disables_compaction_with_a_warning(self) -> None:
+        """COMPACT-1: 'enabled but silently inert' must announce itself."""
+        code, out, err = self._main_output("-p", "hi", config=Config(model="test:stub"))
+        self.assertEqual(code, 0)
+        self.assertIn("context window unknown", err)
+        self.assertIn("auto-compaction is off", err)
+        self.assertEqual(out, "done\n", "the warning stays off stdout")
+
+    def test_a_configured_window_prints_no_warning(self) -> None:
+        code, out, err = self._main_output(
+            "-p", "hi", config=Config(model="test:stub",
+                                      compaction_context_window=100_000))
+        self.assertEqual(code, 0)
+        self.assertNotIn("context window unknown", err)
+
     def test_missing_model_exits_1_without_creating_a_session(self) -> None:
         code, out, err = self._main_output("-p", "hi", model=None)
         self.assertEqual(code, 1)

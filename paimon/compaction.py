@@ -37,6 +37,12 @@ class CompactionError(PaimonError):
 
 _TOOL_RESULT_LIMIT = 2_000
 
+# Output budget of the summary request itself.
+_SUMMARY_MAX_TOKENS = 2_048
+
+# Input bound for the summary request when the model's window is unknown.
+_DEFAULT_SUMMARY_INPUT_TOKENS = 60_000
+
 # How many compactions may be in flight at once. Every agent in the process
 # shares one event loop, and compaction is the largest request any of them
 # sends: without a ceiling, eight panes filling up together fire eight
@@ -193,6 +199,31 @@ def _serialize_messages(messages: list[ModelMessage]) -> str:
     return "\n".join(serialized)
 
 
+def _bounded(serialized: str, window: Optional[int]) -> str:
+    """Fit the serialized conversation into the summary request's own window.
+
+    The compaction request must never itself overflow — it is what runs when
+    the context is already too big. Keep the head (the goal, the constraints)
+    and the tail (recent work) and elide the middle, cut at message-line
+    boundaries.
+    """
+    budget_tokens = (window - _SUMMARY_MAX_TOKENS - 2_000 if window
+                     else _DEFAULT_SUMMARY_INPUT_TOKENS)
+    budget_chars = max(8_000, budget_tokens * 4)
+    if len(serialized) <= budget_chars:
+        return serialized
+    head = serialized[: budget_chars // 4]
+    if "\n" in head:
+        head = head[: head.rfind("\n")]
+    tail = serialized[-(budget_chars - len(head)):]
+    cut = tail.find("\n")
+    if cut != -1:
+        tail = tail[cut + 1:]
+    omitted = len(serialized) - len(head) - len(tail)
+    return (f"{head}\n[... roughly {omitted} characters from the middle of the "
+            f"conversation omitted so this summary request fits the model ...]\n{tail}")
+
+
 async def compact(
     messages: list[ModelMessage],
     *,
@@ -201,8 +232,13 @@ async def compact(
     tokens_before: int,
     tool_schemas: Optional[list[dict]] = None,
     system_prompt: Optional[str] = None,
+    window: Optional[int] = None,
 ) -> Optional[CompactionResult]:
-    """Summarize the old prefix and return a new effective context."""
+    """Summarize the old prefix and return a new effective context.
+
+    ``window`` bounds the summary request's own input (see ``_bounded``); when
+    None a conservative default applies.
+    """
     cut = find_cut_index(messages, keep_recent_tokens)
     if cut <= 0:
         return None
@@ -222,7 +258,7 @@ Use these sections:
 ## Critical Context
 
 <conversation>
-{_serialize_messages(old_messages)}
+{_bounded(_serialize_messages(old_messages), window)}
 </conversation>"""
 
     async with _slot():
@@ -232,7 +268,8 @@ Use these sections:
                 SystemPromptPart(content="You create context checkpoint summaries for an AI coding agent."),
                 UserPromptPart(content=prompt),
             ])],
-            model_settings={"max_tokens": 2_048, "extra_headers": {"User-Agent": user_agent()}},
+            model_settings={"max_tokens": _SUMMARY_MAX_TOKENS,
+                            "extra_headers": {"User-Agent": user_agent()}},
             model_request_parameters=ModelRequestParameters(allow_text_output=True),
         )
     summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))

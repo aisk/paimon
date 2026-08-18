@@ -38,6 +38,26 @@ class RetryPolicyTest(unittest.TestCase):
         self.assertGreater(len({retry.backoff(4) for _ in range(20)}), 1)
 
 
+class ContextOverflowTest(unittest.TestCase):
+    """COMPACT-1: provider overflow errors are recognized for compact-and-retry."""
+
+    def test_400_with_an_overflow_message_matches(self) -> None:
+        exc = ModelHTTPError(400, "m", {
+            "message": "This model's maximum context length is 8192 tokens"})
+        self.assertTrue(retry.is_context_overflow(exc))
+        self.assertTrue(retry.is_context_overflow(
+            ModelHTTPError(400, "m", {"code": "context_length_exceeded"})))
+
+    def test_unrelated_400s_do_not_match(self) -> None:
+        self.assertFalse(retry.is_context_overflow(
+            ModelHTTPError(400, "m", {"message": "invalid tool schema"})))
+
+    def test_other_statuses_and_exceptions_do_not_match(self) -> None:
+        self.assertFalse(retry.is_context_overflow(
+            ModelHTTPError(429, "m", {"message": "context length exceeded"})))
+        self.assertFalse(retry.is_context_overflow(ConnectionError("context length")))
+
+
 def _failing_model(failures: int, exc: Exception) -> FunctionModel:
     """Fails the first ``failures`` requests, then streams a normal turn."""
     attempts = 0

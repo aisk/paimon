@@ -46,7 +46,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import tools
+from . import compaction, tools
 from .agent import (
     Agent,
     AgentsNotice,
@@ -482,6 +482,14 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         return 1
 
     renderer.begin(agent.session.id, config.model, mode, cwd, log_path=agent.session.path)
+    # Auto-compaction silently doing nothing looks exactly like it working —
+    # until the context overflows. An unattended run deserves the warning up
+    # front; stderr, so the stdout protocols are untouched.
+    if (config.compaction_enabled and compaction.context_window(
+            agent.model_name, config.compaction_context_window) is None):
+        _write(sys.stderr,
+               f"paimon: context window unknown for {agent.model_name}; auto-compaction "
+               "is off (set compaction.context_window in the config to enable it)\n")
     try:
         return asyncio.run(_drive(agent, renderer, text,
                                   timeout=timeout, max_tool_calls=max_tool_calls))

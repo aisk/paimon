@@ -945,6 +945,120 @@ class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("dropped", failures[0]["error"])
 
 
+class UsageAnchorTest(unittest.IsolatedAsyncioTestCase):
+    """COMPACT-1: provider-reported usage drives the context count when
+    available; the chars/4 heuristic only covers what came after it."""
+
+    def _agent(self, cwd: Path) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        return Agent.open(cwd=cwd, session=session, config=_config())
+
+    async def test_count_prefers_the_anchor_and_estimates_only_the_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory))
+            agent._append_message(ModelRequest(parts=[UserPromptPart(content="x" * 100_000)]))
+            agent._usage_anchor = (len(agent.history), 5_000)
+
+            self.assertEqual(await agent.count_context_tokens(), 5_000)
+
+            agent._append_message(ModelRequest(parts=[UserPromptPart(content="y" * 400)]))
+            count = await agent.count_context_tokens()
+            self.assertGreater(count, 5_000)
+            self.assertLess(count, 5_600, "only the appended suffix is estimated")
+
+    async def test_a_completed_request_sets_the_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                agent = self._agent(Path(directory))
+                [event async for event in agent.run("go")]
+            self.assertIsNotNone(agent._usage_anchor)
+            self.assertEqual(agent._usage_anchor[0], len(agent.history))
+
+    async def test_compaction_drops_the_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory))
+            agent._append_message(ModelRequest(parts=[UserPromptPart(content="old")]))
+            recent = ModelResponse(parts=[TextPart(content="recent")])
+            agent._append_message(recent)
+            agent._usage_anchor = (2, 9_000)
+            result = compaction.CompactionResult("checkpoint", [recent], 100, 0)
+            with patch("paimon.agent.build_model", return_value=stub_model()), \
+                    patch("paimon.agent.compaction.compact", new=AsyncMock(return_value=result)):
+                await agent.compact_now()
+            self.assertIsNone(agent._usage_anchor)
+
+
+class OverflowRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    """COMPACT-1: a provider context-overflow compacts and retries once."""
+
+    async def test_overflow_compacts_and_retries_once(self) -> None:
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        attempts = 0
+
+        async def stream(messages, info):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ModelHTTPError(400, "stub", {"message": "context length exceeded"})
+            yield "done"
+
+        result = compaction.CompactionResult("checkpoint", [], 100, 10)
+
+        async def fake_compact(force: bool = False):
+            return result if force else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with (
+                patch("paimon.agent.build_model",
+                      return_value=FunctionModel(stream_function=stream)),
+                patch("paimon.agent.Agent._maybe_compact", new=AsyncMock(side_effect=fake_compact)),
+            ):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                events = [event async for event in agent.run("go")]
+
+            self.assertEqual(attempts, 2, "the request is retried after compaction")
+            self.assertEqual("".join(e.text for e in events if isinstance(e, TextDelta)), "done")
+            records = _records(session)
+            self.assertTrue([r for r in records if r["type"] == "context_overflow"])
+            self.assertEqual(records[-1]["outcome"], "success")
+
+    async def test_a_second_overflow_is_raised_not_looped(self) -> None:
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        attempts = 0
+
+        async def stream(messages, info):
+            nonlocal attempts
+            attempts += 1
+            raise ModelHTTPError(400, "stub", {"message": "context length exceeded"})
+            yield  # pragma: no cover - makes this an async generator
+
+        result = compaction.CompactionResult("checkpoint", [], 100, 10)
+
+        async def fake_compact(force: bool = False):
+            return result if force else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with (
+                patch("paimon.agent.build_model",
+                      return_value=FunctionModel(stream_function=stream)),
+                patch("paimon.agent.Agent._maybe_compact", new=AsyncMock(side_effect=fake_compact)),
+            ):
+                agent = Agent.open(cwd=cwd, session=session, config=_config())
+                with self.assertRaises(ModelHTTPError):
+                    [event async for event in agent.run("go")]
+
+            self.assertEqual(attempts, 2, "exactly one retry, then the error surfaces")
+
+
 class CompactionFailureTest(unittest.IsolatedAsyncioTestCase):
     """A failed compaction must not silently disable the safety net for the turn."""
 

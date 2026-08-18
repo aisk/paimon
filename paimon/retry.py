@@ -33,6 +33,33 @@ def is_transient(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.TransportError, ConnectionError, asyncio.TimeoutError))
 
 
+# Provider phrasings that mean the request exceeded the model's context
+# window. Deliberately broad: a miss only costs the compact-and-retry chance,
+# while a false positive costs one extra compaction attempt.
+_OVERFLOW_HINTS = (
+    "context length",
+    "context window",
+    "maximum context",
+    "context_length_exceeded",
+    "prompt is too long",
+    "input is too long",
+    "too many tokens",
+    "token limit",
+    "tokens exceed",
+    "exceeds the maximum",
+    "request too large",
+)
+
+
+def is_context_overflow(exc: BaseException) -> bool:
+    """Whether the provider rejected the request for exceeding its context
+    window — the one 400 that can get better, after compaction."""
+    if not isinstance(exc, ModelHTTPError) or exc.status_code not in (400, 413):
+        return False
+    text = str(exc).lower()
+    return any(hint in text for hint in _OVERFLOW_HINTS)
+
+
 def backoff(attempt: int) -> float:
     """Seconds to wait before ``attempt`` (1 is the first retry).
 

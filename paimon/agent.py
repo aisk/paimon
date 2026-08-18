@@ -342,6 +342,12 @@ class Agent:
         self.tool_schemas = tools.schemas(self.toolset)
         self._tool_definitions = tools.definitions(self.toolset)
         self._cached_model: Optional[tuple[tuple, Model]] = None
+        # (history length, provider-reported tokens) after the last completed
+        # request: the authoritative context size at that point, used by
+        # count_context_tokens so the chars/4 heuristic only covers what was
+        # appended since. None until a request reports usage, and again after
+        # compaction reshapes the history.
+        self._usage_anchor: Optional[tuple[int, int]] = None
 
     @classmethod
     def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
@@ -448,11 +454,11 @@ class Agent:
         the recent window, and so returns None on a history short enough that
         there is nothing to summarize.
         """
+        window = compaction.context_window(self.model_name,
+                                           self.config.compaction_context_window)
         if not force:
             if not self.config.compaction_enabled:
                 return None
-            window = compaction.context_window(self.model_name,
-                                               self.config.compaction_context_window)
             # Nothing to compare against, so counting would be wasted work: an
             # unknown window disables auto-compaction outright.
             if window is None:
@@ -470,6 +476,7 @@ class Agent:
             tokens_before=tokens_before,
             tool_schemas=self.tool_schemas,
             system_prompt=self.system_prompt,
+            window=window,
         )
         if result is None:
             return None
@@ -478,17 +485,33 @@ class Agent:
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.history = result.messages
+        # The provider's count described the old context; drop the anchor so
+        # the fresh estimate below covers the compacted shape.
+        self._usage_anchor = None
         result.tokens_after = await self.count_context_tokens()
         return result
 
     async def count_context_tokens(self) -> int:
-        """Estimate the tokens of everything the next request would send.
+        """Tokens of everything the next request would send.
 
-        Off the event loop: the count serializes the whole history, which is
-        hundreds of kilobytes on a long session.  It runs at the top of every
-        model step, and every agent shares one loop, so counting inline stalls
-        every other agent's streaming output for as long as it takes.
+        Anchored on the provider-reported usage of the last completed request
+        when one exists — the provider's own count is authoritative and
+        already includes the system prompt and tool schemas — with the chars/4
+        heuristic applied only to messages appended since. Without an anchor
+        the heuristic covers everything.
+
+        Off the event loop: the count serializes history, which is hundreds of
+        kilobytes on a long session.  It runs at the top of every model step,
+        and every agent shares one loop, so counting inline stalls every other
+        agent's streaming output for as long as it takes.
         """
+        anchor = self._usage_anchor
+        if anchor is not None and anchor[0] <= len(self.history):
+            index, tokens = anchor
+            suffix = list(self.history[index:])
+            if not suffix:
+                return tokens
+            return tokens + await asyncio.to_thread(compaction.count_tokens, suffix)
         return await asyncio.to_thread(
             compaction.count_tokens, list(self.history), self.tool_schemas, self.system_prompt)
 
@@ -695,6 +718,10 @@ class Agent:
         compaction_off = False
         compaction_failures = 0
         calls_made = 0  # every dispatched ToolCallPart counts, whatever its kind
+        # A provider context-overflow error triggers one forced compaction and
+        # one retry per turn; a second overflow means compaction cannot make
+        # the request fit, and retrying again would loop.
+        overflow_retried = False
 
         while True:
             # Messages the user queued while this turn was already running.
@@ -722,10 +749,14 @@ class Agent:
                         yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
 
             model = self._model()
-            request_messages: list[ModelMessage] = [
-                ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
-                *_strip_foreign_thinking(self.history, model),
-            ]
+
+            def build_request() -> list[ModelMessage]:
+                return [
+                    ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
+                    *_strip_foreign_thinking(self.history, model),  # noqa: B023 — rebuilt each step
+                ]
+
+            request_messages = build_request()
             parameters = ModelRequestParameters(
                 function_tools=self._tool_definitions, allow_text_output=True
             )
@@ -785,6 +816,25 @@ class Agent:
                     raise
                 except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
                     attempt += 1
+                    if (not started and not overflow_retried
+                            and retry.is_context_overflow(exc)):
+                        # The provider says the request exceeded the window:
+                        # compact and retry once, with an audit record of the
+                        # overflow that triggered it.
+                        overflow_retried = True
+                        self.session.append_meta("context_overflow",
+                                                 error=f"{type(exc).__name__}: {exc}")
+                        try:
+                            compacted = await self._maybe_compact(force=True)
+                        except Exception as compact_exc:  # noqa: BLE001 — original error still raises below
+                            self.session.append_meta("compaction_failed",
+                                                     error=str(compact_exc))
+                            compacted = None
+                        if compacted:
+                            yield ContextCompacted(compacted.tokens_before,
+                                                   compacted.tokens_after)
+                            request_messages = build_request()
+                            continue
                     if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
                         # Recorded here rather than in run()'s outer boundary
                         # because only this scope still holds the partial text
@@ -799,6 +849,12 @@ class Agent:
                     await asyncio.sleep(delay)
 
             self._append_message(response)
+            usage = response.usage
+            if usage.input_tokens:
+                # The provider's own count of this request plus its response —
+                # the authoritative context size at this history length.
+                self._usage_anchor = (len(self.history),
+                                      usage.input_tokens + (usage.output_tokens or 0))
             if stats is not None:
                 yield stats
 

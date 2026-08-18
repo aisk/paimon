@@ -107,6 +107,48 @@ class CompactTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.kept_messages, messages[1:])
 
 
+class BoundedSummaryInputTest(unittest.TestCase):
+    """COMPACT-1: the summary request must itself fit the model's window."""
+
+    def test_small_input_passes_through(self) -> None:
+        self.assertEqual(compaction._bounded("line1\nline2", 128_000), "line1\nline2")
+
+    def test_oversized_input_keeps_head_and_tail(self) -> None:
+        lines = [f"msg-{i:06d} " + "x" * 90 for i in range(2_000)]
+        serialized = "\n".join(lines)
+        window = 8_192
+        bounded = compaction._bounded(serialized, window)
+        budget_chars = max(8_000, (window - 2_048 - 2_000) * 4)
+        self.assertLessEqual(len(bounded), budget_chars + 200)
+        self.assertIn("msg-000000", bounded, "the goal at the start survives")
+        self.assertIn("msg-001999", bounded, "the recent work at the end survives")
+        self.assertIn("omitted", bounded)
+
+    def test_unknown_window_uses_the_default_budget(self) -> None:
+        bounded = compaction._bounded("y" * 1_000_000, None)
+        self.assertLess(len(bounded), 60_000 * 4 + 500)
+
+    def test_compact_sends_a_bounded_prompt(self) -> None:
+        import asyncio
+
+        response = ModelResponse(parts=[TextPart(content="## Goal\nsummary")])
+        request_mock = AsyncMock(return_value=response)
+        messages = [_user("goal statement " + "x" * 500_000),
+                    _assistant("middle answer"),
+                    _user("recent request")]
+        with (
+            patch("paimon.compaction.count_tokens", return_value=10),
+            patch("paimon.compaction.model_request", new=request_mock),
+        ):
+            asyncio.run(compaction.compact(
+                messages, model=object(), keep_recent_tokens=15,
+                tokens_before=100, window=8_192,
+            ))
+        sent = request_mock.await_args.args[1][0].parts[1].content
+        self.assertLess(len(sent), 30_000)
+        self.assertIn("omitted", sent)
+
+
 class SessionCompactionTest(unittest.TestCase):
     def test_session_replays_from_latest_compaction_but_keeps_old_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
