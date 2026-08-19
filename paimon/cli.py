@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import commands
 from . import headless as headless_mode
+from . import telemetry
 from .agent import Agent
 from .app import PaimonApp
 from .config import Config
@@ -20,6 +21,7 @@ def main() -> None:
     # argument sets and none of the launch-mode logic below applies to them.
     argv = sys.argv[1:]
     if argv and argv[0] in commands.REGISTRY:
+        telemetry.record_launch(argv[0])
         sys.exit(commands.REGISTRY[argv[0]](argv[1:]))
 
     parser = argparse.ArgumentParser(
@@ -117,6 +119,7 @@ def main() -> None:
         if args.profile:
             flags += ["--profile", args.profile]
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
+        telemetry.record_launch("web", model=args.model or config.model)
         Server(command, port=args.port).serve()
         return
 
@@ -156,6 +159,7 @@ def main() -> None:
         piped = headless_mode.read_stdin() if piped_stdin else ""
         if not (args.prompt or "").strip() and not piped.strip():
             parser.error("nothing to do: pass a prompt to --print or pipe one on stdin")
+        telemetry.record_launch("headless", model=args.model or config.model)
         sys.exit(headless_mode.run(
             prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
             session=resume_session, output_format=args.output_format, config=config,
@@ -165,6 +169,9 @@ def main() -> None:
 
     if args.model:
         config.model = args.model
+    # The --tui relaunch under --web was already counted by the server.
+    if not args.tui:
+        telemetry.record_launch("tui", model=config.model)
     try:
         agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config)
     except SessionError as exc:

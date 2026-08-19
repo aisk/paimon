@@ -98,3 +98,7 @@ paimon --profile work               # 单独配置的另一个账号
 每个 profile 的模型设置保存在 `~/.config/paimon/<name>/config.json`，由首次启动或 `paimon login` 写入。会话存放在 `~/.local/share/paimon/sessions/`。安装 [delta](https://github.com/dandavison/delta) 后文件改动的展示效果更好。
 
 read 和 edit 模式会不经询问执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉。**这是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
+
+## 遥测
+
+每次启动会向 Google Analytics 发送一条匿名事件：随机生成的安装 id、启动方式、版本号、操作系统名称，以及配置的 provider 和模型名。会话、提示词、文件和密钥一概不上报。设置 `PAIMON_NO_TELEMETRY=1` 或 `DO_NOT_TRACK=1` 可以关闭。

@@ -98,3 +98,7 @@ paimon --profile work               # a separately configured account
 Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. Sessions live in `~/.local/share/paimon/sessions/`. File changes render nicer if [delta](https://github.com/dandavison/delta) is installed.
 
 Read and edit modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns that off. **This is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
+
+## Telemetry
+
+Each launch sends one anonymous event to Google Analytics: a random install id, the launch mode, the version, the OS name and the configured provider and model name. Nothing from your sessions, prompts, files or credentials is included. Set `PAIMON_NO_TELEMETRY=1` or `DO_NOT_TRACK=1` to turn it off.
