@@ -9,6 +9,9 @@ import os
 import platform
 from datetime import date
 from pathlib import Path
+from typing import Sequence
+
+from .skills import Skill, format_skills_for_prompt
 
 CONTEXT_FILE = "AGENTS.md"
 
@@ -124,7 +127,7 @@ def load_context_files(cwd: Path) -> list[tuple[Path, str]]:
     return found
 
 
-def build_system_prompt(cwd: Path) -> str:
+def build_system_prompt(cwd: Path, skills: Sequence[Skill] = ()) -> str:
     prompt = INSTRUCTIONS
 
     context_files = load_context_files(cwd)
@@ -133,6 +136,10 @@ def build_system_prompt(cwd: Path) -> str:
         for path, content in context_files:
             prompt += f'<project_instructions path="{path}">\n{content}\n</project_instructions>\n\n'
         prompt += "</project_context>"
+
+    skills_block = format_skills_for_prompt(skills)
+    if skills_block:
+        prompt += f"\n\n{skills_block}"
 
     prompt += "\n\n<environment>"
     prompt += f"\nCurrent date: {date.today().isoformat()}"

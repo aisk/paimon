@@ -60,6 +60,8 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
    block, and the breathing room the log gives blocks is enough for it. */
 .recap MarkdownHeader { color: $text-muted; margin: 0 0 1 0; text-style: b; }
 .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
+/* The expanded body of a /skill:name turn, folded above the user's words. */
+.skill-invocation { color: $text-muted; padding: 0 2; }
 .user-message {
     width: 100%;
     height: auto;

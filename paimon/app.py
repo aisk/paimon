@@ -6,6 +6,8 @@ conversation lives in ``SessionPane``, and everything belonging to one
 background command in ``TaskPane``.
 """
 
+from functools import partial
+
 from textual import events, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
@@ -23,6 +25,7 @@ from .jobs import CommandJob, Job
 from .supervisor import Supervisor, SupervisorError
 from .tabs import PaneTabs
 from .taskpane import TaskPane
+from .ui import PromptInput
 
 # Every pane holds a live agent and its context, or a live process, so panes
 # cost model requests, memory and file descriptors, not just a row in the
@@ -85,7 +88,31 @@ class PaimonApp(App):
             SystemCommand("New pane", "Open another session alongside this one",
                           self.action_new_pane),
             SystemCommand("Close pane", "Close this session's pane", self.action_close_pane),
+            *self._skill_commands(),
         ]
+
+    def _skill_commands(self) -> list[SystemCommand]:
+        """One palette entry per skill the current conversation knows.
+
+        Picking one types ``/skill:name `` into the prompt rather than sending
+        it, so arguments can follow; Enter then expands it.
+        """
+        pane = self._session()
+        if pane is None:
+            return []
+        return [
+            SystemCommand(f"Skill: {skill.name}", skill.description,
+                          partial(self.action_use_skill, skill.name))
+            for skill in pane.agent.skills
+        ]
+
+    def action_use_skill(self, name: str) -> None:
+        if (pane := self._session()) is None:
+            return
+        prompt = pane.query_one(PromptInput)
+        prompt.clear()
+        prompt.insert(f"/skill:{name} ")
+        prompt.focus()
 
     def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False) -> None:
         self._persist_theme_changes = False

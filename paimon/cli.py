@@ -64,6 +64,10 @@ def main() -> None:
     parser.add_argument("--strict", action="store_true",
                         help="always ask before shell commands, even clearly read-only ones "
                              "(overrides the safe_commands config for this run)")
+    parser.add_argument("--skill", action="append", default=[], metavar="PATH", dest="skills",
+                        help="load skills from this SKILL.md file or directory too (repeatable)")
+    parser.add_argument("--no-skills", action="store_true",
+                        help="skip the default skill locations (--skill paths still load)")
     parser.add_argument("--web", action="store_true",
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
@@ -83,6 +87,11 @@ def main() -> None:
     # so everything downstream just carries the instance.
     try:
         config = Config.load(args.profile)
+        # Per-run skill options ride on the shared config like --model does, so
+        # every Agent.open in the process (new session, fork, subagents) sees them.
+        config.skills = [*config.skills, *args.skills]
+        if args.no_skills:
+            config.include_default_skills = False
     except ValueError as exc:
         parser.error(str(exc))
     except PaimonError as exc:

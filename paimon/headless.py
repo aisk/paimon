@@ -44,7 +44,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from . import compaction, tools
 from .agent import (
@@ -62,6 +62,7 @@ from .agent import (
 )
 from .config import Config
 from .mentions import expand_mentions
+from .skills import Skill, expand_skill_command
 from .session import Session, SessionError, resume_hint
 
 # Piped stdin beyond this is truncated rather than pushed into the context
@@ -92,17 +93,21 @@ def read_stdin(stream=None) -> str:
     return text
 
 
-def build_prompt(prompt: str, piped: str, cwd: Path) -> str:
+def build_prompt(prompt: str, piped: str, cwd: Path, skills: Sequence[Skill] = ()) -> str:
     """Combine the -p prompt with piped stdin into one user message.
 
-    Only the prompt gets @path expansion: piped content is data, and a line
-    that happens to read ``@foo.py`` must not be swapped for that file.
-    The instruction goes last, after the material it applies to.
+    Only the prompt gets /skill:name and @path expansion: piped content is
+    data, and a line that happens to read ``@foo.py`` must not be swapped for
+    that file. The instruction goes last, after the material it applies to.
     """
     prompt = prompt.strip()
     piped = piped.strip()
     if prompt:
-        prompt = expand_mentions(prompt, cwd)
+        def mentions(part: str) -> str:
+            return expand_mentions(part, cwd)
+
+        expanded = expand_skill_command(prompt, skills, expand_args=mentions)
+        prompt = mentions(prompt) if expanded is prompt else expanded
     if not piped:
         return prompt
     block = f"<{PIPED_TAG}>\n{piped}\n</{PIPED_TAG}>"
@@ -457,7 +462,6 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         return 1
 
     try:
-        text = build_prompt(prompt, piped, cwd)
         # No agent tools here: -p runs exactly one turn and asyncio.run tears
         # the loop down the moment it returns, cancelling any agent still
         # working at whatever point it had reached — including, mid-cleanup,
@@ -466,6 +470,7 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
                            append_system_prompt=append_system_prompt,
                            toolset=tools.without(tools.REGISTRY, tools.SUPERVISED_TOOLS))
+        text = build_prompt(prompt, piped, cwd, agent.skills)
     except SessionError as exc:  # busy in another process, or no persisted system prompt
         renderer.begin(session.id if session else None)
         renderer.finish(subtype="error", error=str(exc))
@@ -482,6 +487,8 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         return 1
 
     renderer.begin(agent.session.id, config.model, mode, cwd, log_path=agent.session.path)
+    for diagnostic in agent.skill_diagnostics:
+        _write(sys.stderr, f"paimon: skill warning: {diagnostic.path}: {diagnostic.message}\n")
     # Auto-compaction silently doing nothing looks exactly like it working —
     # until the context overflows. An unattended run deserves the warning up
     # front; stderr, so the stdout protocols are untouched.

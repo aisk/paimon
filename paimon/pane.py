@@ -44,6 +44,7 @@ from .diff import locate_line
 from .jobs import AgentJob, Outcome, Result, State, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint
+from .skills import parse_skill_block
 from .ui import (
     AssistantMessage,
     ConfirmPanel,
@@ -425,6 +426,12 @@ class SessionPane(Pane):
         self._refresh_mode()
         if self._resumed:
             await self._show_resumed()
+        if self.agent.skill_diagnostics:
+            first = self.agent.skill_diagnostics[0]
+            count = len(self.agent.skill_diagnostics)
+            more = f" (+{count - 1} more)" if count > 1 else ""
+            self.notify(f"{first.path}: {first.message}{more}", title="Skill warnings",
+                        severity="warning")
 
     def on_key(self, event: events.Key) -> None:
         """Route stray typing back into the prompt.
@@ -664,6 +671,12 @@ class SessionPane(Pane):
 
     def _add_user(self, body: str) -> UserMessage:
         log = self.query_one("#log", VerticalScroll)
+        # A replayed /skill:name turn is stored expanded; show it folded
+        # behind the skill's name, followed by whatever the user added.
+        block = parse_skill_block(body)
+        if block is not None:
+            log.mount(FoldedText(block.body, classes="skill-invocation", label=f"skill {block.name}"))
+            body = block.user_message or f"/skill:{block.name}"
         widget = UserMessage(body)
         log.mount(widget)
         return widget

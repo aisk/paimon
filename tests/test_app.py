@@ -27,6 +27,7 @@ from paimon.agent import Agent, ReasoningDelta, RequestStats, ToolEnd, ToolStart
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.jobs import AgentJob, Outcome, Result
 from paimon.pane import SessionPane, _EventRenderer, _session_label
+from paimon import skills
 from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
 from paimon.session import Session, is_agents_message
@@ -1745,3 +1746,28 @@ class RecapTest(AppTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillPaletteTest(AppTestCase):
+    async def test_palette_entry_types_the_command_and_replay_folds_the_block(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "demo" / "SKILL.md"
+        path.parent.mkdir()
+        path.write_text("---\nname: demo\ndescription: Demo skill.\n---\nLine one\nLine two")
+        config = Config(model="test-model", skills=[str(path.parent)])
+        app = self.make_app(config=config)
+        async with app.run_test() as pilot:
+            commands = {c.title: c for c in app.get_system_commands(app.screen)}
+            self.assertIn("Skill: demo", commands)
+            self.assertEqual(commands["Skill: demo"].help, "Demo skill.")
+            commands["Skill: demo"].callback()
+            await pilot.pause()
+            self.assertEqual(app.pane.query_one(PromptInput).text, "/skill:demo ")
+
+            body = skills.expand_skill_command("/skill:demo and more", app.pane.agent.skills)
+            app.pane._add_user(body)
+            await pilot.pause()
+            folded = app.pane.query(".skill-invocation")
+            self.assertEqual(len(folded), 1)
+            self.assertEqual(str(app.pane.query(UserMessage).last().render()), "and more")

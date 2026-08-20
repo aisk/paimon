@@ -30,6 +30,10 @@ While it runs: `Shift+Tab` switches how much the agent may do on its own (**read
 
 `Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can open panes itself: ask for two independent things and it starts a second agent in its own tab. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
 
+## Skills
+
+Paimon loads [Agent Skills](https://agentskills.io) from `~/.config/paimon/skills`, `~/.agents/skills` and every `.agents/skills` from the working directory up to the repository root. Only each skill's name and description go into the system prompt; the model reads the `SKILL.md` when a task matches, and `/skill:name args` sends it explicitly (the `/` command palette lists them). More locations go in `config.json` as `"skills": ["~/.claude/skills"]` or on the command line with `--skill PATH`; `--no-skills` skips the default locations. When two skills share a name, explicit paths beat the project's, which beat the global ones.
+
 ## Using Paimon as a subagent
 
 Frontier models are good at planning and reviewing; the steps in between are often mechanical. Point Paimon at a cheaper model and let Claude Code or Codex write the plan and check the result. A profile keeps that model's account separate:

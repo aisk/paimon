@@ -30,6 +30,10 @@ uvx paimon
 
 `Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 自己也能开 pane：让它同时做两件互不相干的事，它会在新 tab 里起第二个 agent。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
 
+## Skills
+
+Paimon 会从 `~/.config/paimon/skills`、`~/.agents/skills` 以及工作目录到仓库根之间每一层的 `.agents/skills` 加载 [Agent Skills](https://agentskills.io)。system prompt 里只放每个 skill 的名字和描述，任务匹配时模型自己去读 `SKILL.md`，也可以用 `/skill:name 参数` 显式发送（`/` 命令面板里列出了它们）。其他位置可以写进 `config.json` 的 `"skills": ["~/.claude/skills"]`，或者用命令行参数 `--skill PATH`；`--no-skills` 跳过默认位置。同名时显式指定的优先于项目的，项目的优先于全局的。
+
 ## 当作 subagent 使用
 
 前沿模型擅长制定计划和验收结果，中间的执行步骤往往比较机械。让 Paimon 使用成本较低的模型执行，由 Claude Code 或 Codex 制定计划并检查结果。用一个 profile 单独保存该模型的账号：

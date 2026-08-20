@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import io
 import json
 import tempfile
@@ -21,6 +22,7 @@ from paimon.agent import (
     ToolStart,
 )
 from paimon.config import Config
+from paimon.skills import Skill
 
 
 def _config(**kwargs) -> Config:
@@ -412,3 +414,32 @@ class HeadlessToolsetTest(unittest.TestCase):
             names = [schema["function"]["name"] for schema in agent.tool_schemas]
             self.assertNotIn("spawn_agent", names)
             self.assertIn("shell", names, "the ordinary tools are all still there")
+
+
+class SkillPromptTest(unittest.TestCase):
+    def test_skill_command_expands_before_mentions_and_piped_input_stays(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / "demo").mkdir()
+            path = cwd / "demo" / "SKILL.md"
+            path.write_text("---\nname: demo\ndescription: d\n---\nBody here")
+            skill = Skill("demo", "d", path, path.parent)
+            built = headless.build_prompt("/skill:demo go", "/skill:demo", cwd, [skill])
+        self.assertIn("<piped_input>\n/skill:demo\n</piped_input>", built)
+        self.assertIn(f'<skill name="demo" location="{path}">', built)
+        self.assertTrue(built.endswith("</skill>\n\ngo"))
+
+    def test_diagnostics_go_to_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            config = _config()
+            config.skills = [str(cwd / "missing")]
+            renderer = headless.JsonRenderer(io.StringIO(), config)
+            stderr = io.StringIO()
+            with patch.object(headless, "_drive", return_value=0) as drive, \
+                    patch.object(headless, "_make_renderer", return_value=renderer), \
+                    contextlib.redirect_stderr(stderr):
+                headless.run(prompt="hi", piped="", cwd=cwd, mode="read", session=None, config=config)
+            self.addCleanup(drive.call_args[0][0].session.unlock)
+        self.assertIn("skill warning", stderr.getvalue())
+        self.assertIn("skill path does not exist", stderr.getvalue())

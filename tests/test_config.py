@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon.config import Config, ConfigError, config_path
+from paimon.config import DEFAULT_PROFILE, Config, ConfigError, config_path
 
 
 def _hammer_save(config_home: str, field: str, rounds: int) -> None:
@@ -286,3 +286,28 @@ class ConfigDurableWriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigSkillsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict("os.environ", {"PAIMON_CONFIG_HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_skills_list_is_read_and_non_lists_are_ignored(self) -> None:
+        path = config_path(DEFAULT_PROFILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"skills": ["~/.claude/skills", "/abs/one"]}))
+        self.assertEqual(Config.load().skills, ["~/.claude/skills", "/abs/one"])
+        path.write_text(json.dumps({"skills": "not-a-list"}))
+        self.assertEqual(Config.load().skills, [])
+        self.assertTrue(Config.load().include_default_skills)
+
+    def test_skills_survive_a_save_without_being_written(self) -> None:
+        config = Config.load()
+        config.skills = ["x"]
+        config.model = "test:stub"
+        config.save()
+        self.assertNotIn("skills", json.loads(config_path(DEFAULT_PROFILE).read_text()))

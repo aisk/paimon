@@ -10,7 +10,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Callable, Optional, Sequence
 
 from pydantic_ai.direct import model_request_stream
 from pydantic_ai.messages import (
@@ -35,6 +35,7 @@ from .config import Config
 from .llm import NoModelError, build_model, user_agent
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
+from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
 from .session import (
     Session,
     SessionIncompleteError,
@@ -312,8 +313,14 @@ class Agent:
                  confirm: Optional[ConfirmFn] = None, mode: str = "yolo",
                  config: Optional[Config] = None,
                  toolset: Optional[dict[str, tools.Tool]] = None,
-                 model_override: Optional[str] = None):
+                 model_override: Optional[str] = None,
+                 skills: Sequence[Skill] = (),
+                 skill_diagnostics: Sequence[SkillDiagnostic] = ()):
         self.cwd = Path(cwd or Path.cwd())
+        # The skills listed in the system prompt and expandable by /skill:name,
+        # with whatever discovery had to complain about (for the UI to show).
+        self.skills = list(skills)
+        self.skill_diagnostics = list(skill_diagnostics)
         self.confirm = confirm
         self.mode = mode
         self.config = config or Config.load()
@@ -362,11 +369,11 @@ class Agent:
         ``append_system_prompt`` is added to the end of a new session's system
         prompt and persisted with it, so a resumed session keeps it. Resuming
         with it set raises ``ValueError``: the persisted role is immutable.
-        The dynamic parts of the prompt (date, environment, AGENTS.md) are
-        rebuilt on resume — a session picked up months later must not keep
-        telling the model the old date or stale project rules — and when they
-        changed, the rebuilt snapshot is appended to the log, so it always
-        records the prompt each turn actually ran with.
+        The dynamic parts of the prompt (date, environment, AGENTS.md, the
+        skill list) are rebuilt on resume — a session picked up months later
+        must not keep telling the model the old date or stale project rules —
+        and when they changed, the rebuilt snapshot is appended to the log, so
+        it always records the prompt each turn actually ran with.
         ``parent`` marks the new session as a subagent's, which keeps it out of
         the session listings its parent shows up in.
 
@@ -378,6 +385,9 @@ class Agent:
         cwd = Path(cwd or Path.cwd())
         if session is not None and append_system_prompt:
             raise ValueError("append_system_prompt only applies to a new session")
+        config = config or Config.load()
+        skills, skill_diagnostics = discover_skills(
+            cwd, extra_paths=config.skills, include_defaults=config.include_default_skills)
         is_new = session is None
         if session is None:
             session = Session.create(cwd, parent)
@@ -388,7 +398,7 @@ class Agent:
         try:
             if is_new:
                 appended = append_system_prompt.strip() if append_system_prompt else None
-                system_prompt = build_system_prompt(cwd)
+                system_prompt = build_system_prompt(cwd, skills)
                 if appended:
                     system_prompt += f"\n\n{appended}"
                 session.append_system_prompt(system_prompt, appended=appended)
@@ -397,13 +407,14 @@ class Agent:
                 stored, appended = session.system_prompt_parts()
                 if stored is None:
                     raise SessionIncompleteError("Session does not contain a persisted system prompt")
-                system_prompt = build_system_prompt(cwd)
+                system_prompt = build_system_prompt(cwd, skills)
                 if appended:
                     system_prompt += f"\n\n{appended}"
                 if system_prompt != stored:
                     session.append_system_prompt(system_prompt, appended=appended)
             return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
-                       config=config, toolset=toolset, model_override=model_override)
+                       config=config, toolset=toolset, model_override=model_override,
+                       skills=skills, skill_diagnostics=skill_diagnostics)
         except BaseException:
             session.unlock()
             raise
@@ -659,6 +670,16 @@ class Agent:
         "stop_job": _run_supervised,
     }
 
+    def expand_input(self, text: str) -> str:
+        """What a typed message becomes: a /skill:name command expands to the
+        skill's content, then @path mentions are inlined."""
+        def mentions(part: str) -> str:
+            return expand_mentions(part, self.cwd)
+
+        expanded = expand_skill_command(text, self.skills, expand_args=mentions)
+        # Unchanged (the same object back) means it was not a skill command.
+        return mentions(text) if expanded is text else expanded
+
     async def run(self, user_input: str, *, expand: bool = True,
                   max_tool_calls: Optional[int] = None) -> AsyncIterator[AgentEvent]:
         """Run one user turn to completion, yielding events along the way.
@@ -674,7 +695,7 @@ class Agent:
         an explicit refusal persisted as its result, ToolBudgetExhausted is
         yielded and the turn ends.
         """
-        prompt = expand_mentions(user_input, self.cwd) if expand else user_input
+        prompt = self.expand_input(user_input) if expand else user_input
         # Agents this session started report in here, at the top of the next
         # turn, rather than by interrupting whatever the user is typing. It has
         # to be a persisted message: an event the model never sees would defeat
@@ -743,7 +764,7 @@ class Agent:
             # towards the context check and survive a history replacement.
             for queued in (self.pending() if self.pending is not None else []):
                 self._append_message(ModelRequest(
-                    parts=[UserPromptPart(content=expand_mentions(queued, self.cwd))]))
+                    parts=[UserPromptPart(content=self.expand_input(queued))]))
                 yield UserInput(queued)
 
             if not compaction_off:

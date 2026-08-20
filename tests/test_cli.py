@@ -513,3 +513,33 @@ class HeadlessRunTest(CliTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillFlagsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name, "PAIMON_CONFIG_HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _config_after(self, *argv: str) -> Config:
+        captured: dict = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        config = Config(model="test:stub", skills=["from-config"])
+        with patch("sys.argv", ["paimon", "-p", "hi", *argv]), \
+                patch("paimon.cli.Config.load", return_value=config), \
+                patch("paimon.headless.run", fake_run):
+            with self.assertRaises(SystemExit):
+                cli.main()
+        return captured["config"]
+
+    def test_skill_paths_extend_the_config_and_no_skills_drops_the_defaults(self) -> None:
+        config = self._config_after("--skill", "a", "--skill", "b/SKILL.md")
+        self.assertEqual(config.skills, ["from-config", "a", "b/SKILL.md"])
+        self.assertTrue(config.include_default_skills)
+        self.assertFalse(self._config_after("--no-skills").include_default_skills)

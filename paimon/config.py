@@ -239,6 +239,11 @@ class Config:
     compaction_keep_recent_tokens: int = 20_000
     # Overrides the built-in window table, for model names it does not know.
     compaction_context_window: Optional[int] = None
+    # Extra skill files or directories, on top of the default locations.
+    # Edited by hand (or extended by --skill for one run); never written back.
+    skills: list[str] = field(default_factory=list)
+    # Cleared by --no-skills for one run; not a config file setting.
+    include_default_skills: bool = True
 
     @classmethod
     def load(cls, profile: Optional[str] = None) -> "Config":
@@ -249,6 +254,7 @@ class Config:
         profile = validate_profile(profile)
         data = _read_file_config(config_path(profile))
         compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
+        skills = data.get("skills")
         return cls(
             profile=profile,
             model=data.get("model"),
@@ -262,6 +268,7 @@ class Config:
             compaction_reserve_tokens=compaction.get("reserve_tokens", cls.compaction_reserve_tokens),
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
             compaction_context_window=compaction.get("context_window"),
+            skills=[str(p) for p in skills] if isinstance(skills, list) else [],
         )
 
     def provider_auth(self, model: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:

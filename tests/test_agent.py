@@ -40,6 +40,8 @@ from paimon.agent import (
     replay_events,
 )
 from paimon.config import Config
+# Bound at import, before the suite-wide patch that empties it takes effect.
+from paimon.skills import default_skill_dirs as real_default_skill_dirs
 from paimon.session import (
     Session,
     SessionIncompleteError,
@@ -75,7 +77,7 @@ class AgentSystemPromptTest(unittest.TestCase):
 
             self.assertEqual(first.system_prompt, "snapshot")
             self.assertEqual(session.system_prompt(), "snapshot")
-            generate.assert_called_once_with(cwd)
+            generate.assert_called_once_with(cwd, [])
 
             def snapshots() -> list[str]:
                 return [json.loads(line)["content"]
@@ -1241,3 +1243,63 @@ class _FakeSupervisor:
     async def handle(self, name: str, args: dict, *, caller) -> str:
         self.calls.append((name, args))
         return "handled"
+
+
+class SkillAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _write_skill(directory: Path, name: str) -> Path:
+        directory.mkdir(parents=True)
+        path = directory / "SKILL.md"
+        path.write_text(f"---\nname: {name}\ndescription: Use {name}.\n---\n# {name}\n\nDo the thing.")
+        return path
+
+    def test_project_skills_are_discovered_and_listed_in_the_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / ".git").mkdir()
+            path = self._write_skill(cwd / ".agents" / "skills" / "demo", "demo")
+            with patch("paimon.skills.default_skill_dirs", wraps=real_default_skill_dirs) as dirs, \
+                    patch("paimon.skills.config_root", return_value=cwd / "no-config"), \
+                    patch("paimon.skills.Path.home", return_value=cwd / "no-home"):
+                agent = Agent.open(cwd=cwd, config=_config())
+            self.addCleanup(agent.session.unlock)
+            dirs.assert_called_once()
+            self.assertEqual([s.path for s in agent.skills], [path])
+            self.assertIn(f"<location>{path}</location>", agent.system_prompt)
+            self.assertEqual(agent.skill_diagnostics, [])
+
+    def test_no_defaults_loads_only_the_configured_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            self._write_skill(cwd / ".agents" / "skills" / "ambient", "ambient")
+            explicit = self._write_skill(cwd / "elsewhere" / "explicit", "explicit")
+            config = _config()
+            config.skills = [str(explicit.parent)]
+            config.include_default_skills = False
+            with patch("paimon.skills.default_skill_dirs") as dirs:
+                agent = Agent.open(cwd=cwd, config=config)
+            self.addCleanup(agent.session.unlock)
+            dirs.assert_not_called()
+            self.assertEqual([s.name for s in agent.skills], ["explicit"])
+
+    async def test_skill_command_is_expanded_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            path = self._write_skill(cwd / "sk" / "demo", "demo")
+            (cwd / "hello.txt").write_text("hello")
+            config = _config()
+            config.skills = [str(cwd / "sk")]
+            path.write_text(path.read_text() + "\nSee @hello.txt for context.")
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                agent = Agent.open(cwd=cwd, config=config)
+                self.addCleanup(agent.session.unlock)
+                _events = [event async for event in agent.run("/skill:demo also @hello.txt")]
+            user_texts = [part.content
+                          for message in agent.session.messages() if isinstance(message, ModelRequest)
+                          for part in message.parts if isinstance(part, UserPromptPart)]
+            self.assertEqual(len(user_texts), 1)
+            self.assertTrue(user_texts[0].startswith(f'<skill name="demo" location="{path}">'))
+            self.assertIn("Do the thing.", user_texts[0])
+            self.assertEqual(user_texts[0].count("<mentioned_file path="), 1,
+                             "the user's mention expands, the one in the skill body does not")
+            self.assertIn("See @hello.txt for context.", user_texts[0])
