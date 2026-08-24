@@ -7,6 +7,7 @@ permission gating. Adding a tool means adding one registry entry.
 
 import asyncio
 import codecs
+import fnmatch
 import inspect
 import json
 import os
@@ -778,6 +779,84 @@ def _glob(args: dict, cwd: Path, sandboxed: bool = False) -> str:
         return "(no files matched)"
     matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return "\n".join(str(p) for p in matches)
+
+
+_GREP_DEFAULT_RESULTS = 50
+_GREP_MAX_RESULTS = 200
+_GREP_MAX_LINE = 300  # chars of a matched line shown before it is clipped
+# Files larger than this are skipped: a multi-hundred-megabyte artifact would
+# stall the loop for a search that is about source code.
+_GREP_MAX_FILE_BYTES = 10_000_000
+
+
+def _grep_files(base: Path, name_filter: Optional[str], sandboxed: bool):
+    """The files under ``base`` a grep looks at, in stable path order."""
+    skip = _GLOB_IGNORE
+    for path in sorted(base.rglob("*")):
+        if not path.is_file() or skip.intersection(path.relative_to(base).parts):
+            continue
+        if name_filter and not fnmatch.fnmatch(path.name, name_filter):
+            continue
+        # sandboxed keeps symlinks under base from reaching files outside it,
+        # the same way glob's listing does.
+        if sandboxed and not _inside(path, base):
+            continue
+        yield path
+
+
+def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
+    try:
+        pattern = re.compile(str(args["pattern"]))
+    except re.error as exc:
+        return f"Error: invalid regular expression: {exc}"
+    base = _resolve(args["path"], cwd) if args.get("path") else cwd
+    try:
+        limit = int(args.get("max_results") or _GREP_DEFAULT_RESULTS)
+    except (TypeError, ValueError):
+        limit = _GREP_DEFAULT_RESULTS
+    limit = max(1, min(limit, _GREP_MAX_RESULTS))
+    if base.is_file():
+        files = iter([base])
+    elif base.is_dir():
+        files = _grep_files(base, str(args["glob"]) if args.get("glob") else None, sandboxed)
+    else:
+        return f"Error: no such file or directory: {base}"
+
+    lines: list[str] = []
+    skipped_large = 0
+    truncated = False
+    for path in files:
+        try:
+            raw = path.read_bytes() if path.stat().st_size <= _GREP_MAX_FILE_BYTES else None
+        except OSError:
+            continue
+        if raw is None:
+            skipped_large += 1
+            continue
+        if b"\0" in raw[:8192]:
+            continue  # binary
+        text, _, _ = _decode_preserving(raw)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if not pattern.search(line):
+                continue
+            shown = line.strip()
+            if len(shown) > _GREP_MAX_LINE:
+                shown = shown[:_GREP_MAX_LINE] + "…"
+            lines.append(f"{path}:{lineno}:{shown}")
+            if len(lines) >= limit:
+                truncated = True
+                break
+        if truncated:
+            break
+    if not lines:
+        note = f" ({skipped_large} large files skipped)" if skipped_large else ""
+        return f"(no matches){note}"
+    if truncated:
+        lines.append(f"[first {limit} matches shown; narrow the pattern, filter by "
+                     "glob, or raise max_results]")
+    if skipped_large:
+        lines.append(f"[{skipped_large} files over {_GREP_MAX_FILE_BYTES // 1_000_000}MB skipped]")
+    return "\n".join(lines)
 
 
 # The session log is append-only, so everything compaction dropped from the
@@ -1616,6 +1695,32 @@ REGISTRY: dict[str, Tool] = {
                         "pattern": {"type": "string", "description": "Glob pattern. Use '**' to match any number of directories."},
                         "path": {"type": "string", "description": "Base directory to search in (optional, defaults to the working directory)."},
                         "include_ignored": {"type": "boolean", "description": "Search inside noise dirs like node_modules/.venv/.git too (optional, default false)."},
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+    ),
+    "grep": Tool(
+        access="read",
+        run=lambda args, cwd, mode, ctx: _grep(args, cwd, sandboxed=mode != "yolo"),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": (
+                    "Search file contents for a regular expression and return matching "
+                    "lines as path:line:text, in file order. Directories are searched "
+                    "recursively, skipping VCS/dependency/build noise and binary files. "
+                    "Prefer this over shell grep: it needs no confirmation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Python regular expression, matched against each line."},
+                        "path": {"type": "string", "description": "File or directory to search (optional, defaults to the working directory)."},
+                        "glob": {"type": "string", "description": "Only search files whose name matches this pattern, e.g. '*.py' (optional)."},
+                        "max_results": {"type": "integer", "description": f"Maximum matching lines to return (optional, default {_GREP_DEFAULT_RESULTS}, maximum {_GREP_MAX_RESULTS})."},
                     },
                     "required": ["pattern"],
                 },

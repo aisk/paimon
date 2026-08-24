@@ -19,6 +19,7 @@ from paimon.tools import (
     ToolContext,
     _TaskOutput,
     _glob,
+    _grep,
     _inside,
     _kill_tree,
     _read_history,
@@ -508,6 +509,81 @@ class GlobSandboxTest(unittest.TestCase):
 
             free = _glob({"pattern": "*.py"}, cwd, sandboxed=False)
             self.assertIn("a.py", free)
+            self.assertIn("b.py", free)
+
+
+class GrepTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name).resolve()
+
+    def write(self, relative: str, content: str) -> Path:
+        path = self.cwd / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return path
+
+    def test_matches_come_back_as_path_line_text(self) -> None:
+        self.write("a.py", "x = 1\nneedle here\n")
+        self.write("sub/b.py", "also a needle\n")
+        result = _grep({"pattern": "needle"}, self.cwd)
+        lines = result.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn(f"{self.cwd / 'a.py'}:2:needle here", lines)
+        self.assertIn(f"{self.cwd / 'sub' / 'b.py'}:1:also a needle", lines)
+
+    def test_a_single_file_can_be_searched(self) -> None:
+        path = self.write("a.txt", "one\ntwo\n")
+        result = _grep({"pattern": "two", "path": str(path)}, self.cwd)
+        self.assertEqual(result, f"{path}:2:two")
+
+    def test_glob_filters_by_file_name(self) -> None:
+        self.write("a.py", "needle\n")
+        self.write("a.md", "needle\n")
+        result = _grep({"pattern": "needle", "glob": "*.py"}, self.cwd)
+        self.assertIn("a.py", result)
+        self.assertNotIn("a.md", result)
+
+    def test_noise_directories_and_binary_files_are_skipped(self) -> None:
+        self.write("node_modules/dep.js", "needle\n")
+        (self.cwd / "blob.bin").write_bytes(b"needle\0needle")
+        self.write("a.py", "needle\n")
+        result = _grep({"pattern": "needle"}, self.cwd)
+        self.assertEqual(len(result.splitlines()), 1)
+        self.assertIn("a.py", result)
+
+    def test_the_result_is_capped_with_a_note(self) -> None:
+        self.write("a.txt", "needle\n" * 10)
+        result = _grep({"pattern": "needle", "max_results": 3}, self.cwd)
+        lines = result.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertIn("first 3 matches shown", lines[-1])
+
+    def test_a_bad_regex_is_an_error_not_an_exception(self) -> None:
+        self.assertIn("invalid regular expression", _grep({"pattern": "("}, self.cwd))
+
+    def test_a_missing_base_is_an_error(self) -> None:
+        result = _grep({"pattern": "x", "path": "nowhere"}, self.cwd)
+        self.assertIn("no such file or directory", result)
+
+    def test_no_matches_says_so(self) -> None:
+        self.write("a.txt", "quiet\n")
+        self.assertEqual(_grep({"pattern": "needle"}, self.cwd), "(no matches)")
+
+    def test_sandboxed_grep_skips_symlink_escapes(self) -> None:
+        with tempfile.TemporaryDirectory() as outer:
+            outer = Path(outer).resolve()
+            cwd = outer / "project"
+            cwd.mkdir()
+            (cwd / "a.py").write_text("needle\n")
+            secret = outer / "secret.py"
+            secret.write_text("needle\n")
+            (cwd / "b.py").symlink_to(secret)
+
+            sandboxed = _grep({"pattern": "needle"}, cwd, sandboxed=True)
+            self.assertNotIn("b.py", sandboxed)
+            free = _grep({"pattern": "needle"}, cwd, sandboxed=False)
             self.assertIn("b.py", free)
 
 
