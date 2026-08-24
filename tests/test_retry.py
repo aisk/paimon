@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import httpx
 from helpers import make_session, stub_model
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import retry
@@ -21,6 +21,10 @@ class RetryPolicyTest(unittest.TestCase):
         self.assertTrue(retry.is_transient(httpx.ConnectError("refused")))
         self.assertTrue(retry.is_transient(httpx.ReadTimeout("slow")))
         self.assertTrue(retry.is_transient(asyncio.TimeoutError()))
+
+    def test_wrapped_connection_failures_are_transient(self) -> None:
+        """pydantic-ai wraps connect-phase httpx errors in ModelAPIError."""
+        self.assertTrue(retry.is_transient(ModelAPIError("m", "connection refused")))
 
     def test_permanent_failures_are_not_retried(self) -> None:
         for status in (400, 401, 403, 404, 422):

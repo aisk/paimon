@@ -11,7 +11,7 @@ import asyncio
 import random
 
 import httpx
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
 MAX_ATTEMPTS = 4  # the initial request plus three retries
 
@@ -28,8 +28,14 @@ def is_transient(exc: BaseException) -> bool:
     """Whether resending the identical request could plausibly succeed."""
     if isinstance(exc, ModelHTTPError):
         return exc.status_code in _TRANSIENT_STATUS or exc.status_code >= 500
-    # Connection resets, DNS failures and read timeouts: the request never
-    # reached the model, or its answer never made it back.
+    if isinstance(exc, ModelAPIError):
+        # pydantic-ai wraps connect-phase failures (DNS, refused connection)
+        # in ModelAPIError; status errors took the branch above, so what is
+        # left is a request that never reached the model.
+        return True
+    # Raw transport errors leak through pydantic-ai while the SSE body is
+    # being read: the request reached the model, but its answer never made
+    # it back.
     return isinstance(exc, (httpx.TransportError, ConnectionError, asyncio.TimeoutError))
 
 
