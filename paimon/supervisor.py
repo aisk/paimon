@@ -326,6 +326,7 @@ class Supervisor:
 
         if name == "read_job":
             mode = "all" if args.get("mode") == "all" else "new"
+            job = self._find(job_id, caller)
             view = self.read(job_id, caller=caller, mode=mode)
             if view is None:
                 return self._gone(job_id, State.UNKNOWN)
@@ -337,7 +338,21 @@ class Supervisor:
             if not view.text.strip():
                 extra = "" if view.complete else " since your last read"
                 return f"{header}: no output{extra}."
-            return f"{header}:\n{view.text}"
+            closed = ""
+            if (job is not None and job.kind == "agent"
+                    and not job.killed and not job.is_busy):
+                # The caller now holds the complete result of a finished turn,
+                # which is the moment the tab has done its job: close it here
+                # rather than trusting the model to remember stop_job. Nothing
+                # is lost — the output stays readable off the retired job, and
+                # the session resumes by id. Only a read that actually
+                # delivered text closes, so an agent that never produced any
+                # (nothing on disk to resume) is left for stop_job.
+                session_id = self._session_id(job_id)
+                self.stop(job_id, caller=caller)
+                closed = (f"\n(agent {job_id} is done and its tab was closed; start "
+                          f"spawn_agent with session '{session_id}' to follow up with it)")
+            return f"{header}:\n{view.text}{closed}"
 
         if name == "wait_for_job":
             timeout = _timeout(args.get("timeout"))

@@ -1912,9 +1912,10 @@ REGISTRY: dict[str, Tool] = {
                     "the new agent has no memory of this conversation and cannot ask you "
                     "anything. Do not wait for it: when it finishes while you are idle, a "
                     "status line wakes you — collect its output with read_job then, and read "
-                    "every finished job in that one turn. wait_for_job exists for the rare "
-                    "case you cannot proceed without the result, and stop_job for an agent "
-                    "going the wrong way. It cannot spawn agents of its own. Permission "
+                    "every finished job in that one turn; reading a finished agent also "
+                    "closes it for you. wait_for_job exists for the rare case you cannot "
+                    "proceed without the result, and stop_job for an agent going the wrong "
+                    "way. It cannot spawn agents of its own. Permission "
                     "prompts for its tools appear in its tab, so it can sit blocked until "
                     "the user answers them. Stopping an agent frees its slot but keeps its "
                     "session on disk; pass that session id here later to pick the "
@@ -2029,8 +2030,11 @@ REGISTRY: dict[str, Tool] = {
                     "'new', the default) or everything it has produced (mode 'all'), "
                     "together with its state. For an agent that is its assistant text only "
                     "\u2014 not its thinking and not its tool output \u2014 so ask it in the spawn "
-                    "prompt to end with the summary you need. For a background command it is "
-                    "the tail of its output, plus the exit code once it has stopped."
+                    "prompt to end with the summary you need. Reading a finished agent's "
+                    "output also closes it and frees its tab; the result quotes the session "
+                    "id that spawn_agent can resume should you need it again. For a "
+                    "background command it is the tail of its output, plus the exit code "
+                    "once it has stopped."
                 ),
                 "parameters": {
                     "type": "object",

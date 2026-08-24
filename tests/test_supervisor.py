@@ -299,6 +299,57 @@ class ReadTest(SupervisorTestCase):
         self.assertIn("beef", result)
         self.assertIn("Error", result)
 
+    async def test_reading_a_finished_agent_closes_it(self) -> None:
+        supervisor = self.make()
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish(answer="the report")
+
+        answer = await supervisor.handle("read_job", {"job_id": job_id}, caller=self.parent)
+        self.assertIn("the report", answer)
+        self.assertIn("tab was closed", answer)
+        self.assertIn("session", answer, "the resume handle rides the result")
+        self.assertTrue(self.jobs[0].killed)
+        self.assertEqual(self.closed, [self.jobs[0]], "the pane came down with it")
+
+        again = await supervisor.handle("read_job", {"job_id": job_id, "mode": "all"},
+                                        caller=self.parent)
+        self.assertIn("the report", again, "the output survives the closure")
+        self.assertNotIn("tab was closed", again, "a killed agent is not closed twice")
+
+    async def test_reading_a_busy_agent_does_not_close_it(self) -> None:
+        supervisor = self.make()
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish(answer="halfway")
+        supervisor.send(job_id, "keep going", caller=self.parent)
+        await settle()
+
+        answer = await supervisor.handle("read_job", {"job_id": job_id}, caller=self.parent)
+        self.assertIn("halfway", answer)
+        self.assertNotIn("tab was closed", answer)
+        self.assertFalse(self.jobs[0].killed)
+
+    async def test_an_agent_with_no_output_is_left_for_stop_job(self) -> None:
+        supervisor = self.make()
+        job_id = await supervisor.spawn("go", parent=self.parent)
+        await self.finish(answer="")
+
+        answer = await supervisor.handle("read_job", {"job_id": job_id}, caller=self.parent)
+        self.assertIn("no output", answer)
+        self.assertFalse(self.jobs[0].killed,
+                         "nothing was delivered, so nothing says the caller is done")
+
+    async def test_reading_a_finished_command_does_not_close_it(self) -> None:
+        supervisor = self.make()
+        job_id, running = await self.start_command(supervisor)
+        running.output.append(b"served\n")
+        running.exit(0)
+        await settle()
+
+        answer = await supervisor.handle("read_job", {"job_id": job_id}, caller=self.parent)
+        self.assertIn("served", answer)
+        self.assertNotIn("tab was closed", answer)
+        self.assertFalse(self.commands[0].killed)
+
     async def test_a_stopped_agents_output_is_still_readable(self) -> None:
         supervisor = self.make()
         job_id = await supervisor.spawn("go", parent=self.parent)
