@@ -131,8 +131,11 @@ def context_window(model: Optional[str], override: Optional[int] = None) -> Opti
 
 def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None,
                  system_prompt: Optional[str] = None) -> int:
-    """Approximate context tokens as serialized characters / 4.
+    """Approximate context tokens as serialized UTF-8 bytes / 4.
 
+    Bytes rather than characters: CJK text runs about one token per
+    character, and at three UTF-8 bytes each the byte count keeps the
+    estimate close where a character count would be several times too low.
     The estimate must cover everything a request actually sends, so the
     system prompt (absent from the history) is counted here too.
     """
@@ -141,7 +144,7 @@ def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]
         payload += json.dumps(tool_schemas, ensure_ascii=False, default=str)
     if system_prompt:
         payload += system_prompt
-    return max(1, (len(payload) + 3) // 4)
+    return max(1, (len(payload.encode("utf-8")) + 3) // 4)
 
 
 def should_compact(tokens: int, window: Optional[int], reserve_tokens: int) -> bool:
@@ -209,9 +212,15 @@ def _bounded(serialized: str, window: Optional[int]) -> str:
     """
     budget_tokens = (window - _SUMMARY_MAX_TOKENS - 2_000 if window
                      else _DEFAULT_SUMMARY_INPUT_TOKENS)
-    budget_chars = max(8_000, budget_tokens * 4)
-    if len(serialized) <= budget_chars:
+    budget_bytes = max(8_000, budget_tokens * 4)
+    byte_length = len(serialized.encode("utf-8"))
+    if byte_length <= budget_bytes:
         return serialized
+    # Slicing below works on characters, so scale the byte budget by the
+    # text's average character width. The budget already carries a
+    # 2000-token slack, which absorbs head and tail being wider than the
+    # average.
+    budget_chars = budget_bytes * len(serialized) // byte_length
     head = serialized[: budget_chars // 4]
     if "\n" in head:
         head = head[: head.rfind("\n")]

@@ -66,6 +66,12 @@ class CompactionHelpersTest(unittest.TestCase):
         with_prompt = compaction.count_tokens(messages, system_prompt="x" * 4_000)
         self.assertGreaterEqual(with_prompt - bare, 900)
 
+    def test_count_weighs_cjk_by_bytes(self) -> None:
+        # A CJK character is three UTF-8 bytes, so a thousand of them count
+        # as roughly 750 tokens where a character count would say 250.
+        count = compaction.count_tokens([_user("码" * 1_000)])
+        self.assertGreaterEqual(count, 750)
+
     def test_threshold_requires_known_window_and_exceeds_reserve(self) -> None:
         self.assertFalse(compaction.should_compact(90, None, 10))
         self.assertFalse(compaction.should_compact(90, 100, 10))
@@ -122,6 +128,17 @@ class BoundedSummaryInputTest(unittest.TestCase):
         self.assertLessEqual(len(bounded), budget_chars + 200)
         self.assertIn("msg-000000", bounded, "the goal at the start survives")
         self.assertIn("msg-001999", bounded, "the recent work at the end survives")
+        self.assertIn("omitted", bounded)
+
+    def test_cjk_input_is_bounded_by_bytes(self) -> None:
+        lines = [f"msg-{i:06d} " + "码" * 90 for i in range(2_000)]
+        serialized = "\n".join(lines)
+        window = 8_192
+        bounded = compaction._bounded(serialized, window)
+        budget_bytes = max(8_000, (window - 2_048 - 2_000) * 4)
+        self.assertLessEqual(len(bounded.encode("utf-8")), budget_bytes + 600)
+        self.assertIn("msg-000000", bounded)
+        self.assertIn("msg-001999", bounded)
         self.assertIn("omitted", bounded)
 
     def test_unknown_window_uses_the_default_budget(self) -> None:
