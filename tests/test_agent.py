@@ -1192,6 +1192,23 @@ class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(end.result, "handled")
 
 
+class SpawnAgentSchemaTest(unittest.TestCase):
+    """The spawn_agent a main agent offers knows its discovered types."""
+
+    def test_the_offered_schema_lists_the_types_and_the_registry_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = AgentToolsTest._agent(Path(directory))
+            offered = next(schema for schema in agent.tool_schemas
+                           if schema["function"]["name"] == "spawn_agent")["function"]
+            self.assertIn("agent", offered["parameters"]["properties"])
+            self.assertIn("- explore:", offered["description"])
+
+            registry = tools.REGISTRY["spawn_agent"].schema["function"]
+            self.assertNotIn("agent", registry["parameters"]["properties"])
+            self.assertNotIn("- explore:", registry["description"])
+            agent.close()
+
+
 class AgentStatusInjectionTest(unittest.IsolatedAsyncioTestCase):
     """What the agents this session started did reaches the model as history."""
 

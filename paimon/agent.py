@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import aside, compaction, retry, tools
+from . import agents, aside, compaction, retry, tools
 from .config import Config
 from .llm import NoModelError, build_model, user_agent
 from .mentions import expand_mentions
@@ -315,12 +315,18 @@ class Agent:
                  toolset: Optional[dict[str, tools.Tool]] = None,
                  model_override: Optional[str] = None,
                  skills: Sequence[Skill] = (),
-                 skill_diagnostics: Sequence[SkillDiagnostic] = ()):
+                 skill_diagnostics: Sequence[SkillDiagnostic] = (),
+                 agent_types: Sequence[agents.AgentType] = (),
+                 agent_type_diagnostics: Sequence[SkillDiagnostic] = ()):
         self.cwd = Path(cwd or Path.cwd())
         # The skills listed in the system prompt and expandable by /skill:name,
         # with whatever discovery had to complain about (for the UI to show).
         self.skills = list(skills)
         self.skill_diagnostics = list(skill_diagnostics)
+        # The agent types spawn_agent may name, discovered like skills; the
+        # launcher reads them off whoever called spawn_agent.
+        self.agent_types = list(agent_types)
+        self.agent_type_diagnostics = list(agent_type_diagnostics)
         self.confirm = confirm
         self.mode = mode
         self.config = config or Config.load()
@@ -346,6 +352,12 @@ class Agent:
         self.history: list[ModelMessage] = session.messages()
         # This agent's tool set; None means everything in tools.REGISTRY.
         self.toolset = dict(tools.REGISTRY if toolset is None else toolset)
+        # The registry's spawn_agent knows no types; this agent's copy lists
+        # the ones it discovered, so the schema below advertises them. A
+        # toolset without spawn_agent (subagents, headless) skips it whole.
+        if "spawn_agent" in self.toolset and self.agent_types:
+            self.toolset["spawn_agent"] = agents.spawn_tool_with_types(
+                self.toolset["spawn_agent"], self.agent_types)
         self.tool_schemas = tools.schemas(self.toolset)
         self._tool_definitions = tools.definitions(self.toolset)
         self._cached_model: Optional[tuple[tuple, Model]] = None
@@ -388,6 +400,8 @@ class Agent:
         config = config or Config.load()
         skills, skill_diagnostics = discover_skills(
             cwd, extra_paths=config.skills, include_defaults=config.include_default_skills)
+        agent_types, agent_type_diagnostics = agents.discover_agent_types(
+            cwd, extra_paths=config.agents, include_defaults=config.include_default_agents)
         is_new = session is None
         if session is None:
             session = Session.create(cwd, parent_session_id)
@@ -414,7 +428,9 @@ class Agent:
                     session.append_system_prompt(system_prompt, appended=appended)
             return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
                        config=config, toolset=toolset, model_override=model_override,
-                       skills=skills, skill_diagnostics=skill_diagnostics)
+                       skills=skills, skill_diagnostics=skill_diagnostics,
+                       agent_types=agent_types,
+                       agent_type_diagnostics=agent_type_diagnostics)
         except BaseException:
             session.unlock()
             raise

@@ -426,10 +426,10 @@ class SessionPane(Pane):
         self._refresh_mode()
         if self._resumed:
             await self._show_resumed()
-        if self.agent.skill_diagnostics:
-            first = self.agent.skill_diagnostics[0]
-            count = len(self.agent.skill_diagnostics)
-            more = f" (+{count - 1} more)" if count > 1 else ""
+        diagnostics = [*self.agent.skill_diagnostics, *self.agent.agent_type_diagnostics]
+        if diagnostics:
+            first = diagnostics[0]
+            more = f" (+{len(diagnostics) - 1} more)" if len(diagnostics) > 1 else ""
             self.notify(f"{first.path}: {first.message}{more}", title="Skill warnings",
                         severity="warning")
 

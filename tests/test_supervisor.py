@@ -34,9 +34,10 @@ class SupervisorTestCase(unittest.IsolatedAsyncioTestCase):
         self.parent = FakeCaller()
 
     def make(self, limit: int = 4, launch=None) -> Supervisor:
-        async def default_launch(job_id, parent, model):
+        async def default_launch(job_id, parent, model, agent):
             job = AgentJob(job_id, FakeAgent(), parent=parent)
             job.model = model  # only so a test can see what was asked for
+            job.agent_type = agent  # likewise
             self.jobs.append(job)
             job.start()
             return job
@@ -115,13 +116,31 @@ class SpawnTest(SupervisorTestCase):
         self.assertEqual(self.jobs, [])
 
     async def test_a_failed_launch_is_reported_not_raised(self) -> None:
-        async def launch(job_id, parent, model):
+        async def launch(job_id, parent, model, agent):
             raise RuntimeError("no pane for you")
 
         supervisor = self.make(launch=launch)
         result = await supervisor.handle("spawn_agent", {"prompt": "go"}, caller=self.parent)
         self.assertIn("could not start an agent", result)
         self.assertEqual(supervisor.states(), {}, "a launch that failed leaves no record")
+
+    async def test_the_agent_type_reaches_the_launcher(self) -> None:
+        supervisor = self.make()
+        await supervisor.handle("spawn_agent", {"prompt": "go", "agent": "explore"},
+                                caller=self.parent)
+        self.assertEqual(self.jobs[0].agent_type, "explore")
+        await supervisor.handle("spawn_agent", {"prompt": "go"}, caller=self.parent)
+        self.assertIsNone(self.jobs[1].agent_type)
+
+    async def test_an_unknown_agent_type_is_a_tool_error_with_no_residue(self) -> None:
+        async def launch(job_id, parent, model, agent):
+            raise SupervisorError(f"unknown agent type {agent!r}; available: explore")
+
+        supervisor = self.make(launch=launch)
+        result = await supervisor.handle(
+            "spawn_agent", {"prompt": "go", "agent": "nope"}, caller=self.parent)
+        self.assertIn("unknown agent type 'nope'", result)
+        self.assertEqual(supervisor.states(), {})
 
 
 class DeliveryTest(SupervisorTestCase):

@@ -55,10 +55,11 @@ class Supervisor:
     """Starts agents and background commands, and reports on both."""
 
     def __init__(self, *, launch, close, limit: int, launch_command=None) -> None:
-        # launch(job_id, parent, model) -> Job and launch_command(job_id,
-        # command, description) -> Job are awaited and must have put a pane on
-        # screen by the time they return; close(job) takes that pane down
-        # again. All three belong to the UI.
+        # launch(job_id, parent, model, agent) -> Job and launch_command(
+        # job_id, command, description) -> Job are awaited and must have put a
+        # pane on screen by the time they return; close(job) takes that pane
+        # down again. All three belong to the UI. ``agent`` is an agent type
+        # name the launcher resolves; the supervisor never interprets it.
         self._launch = launch
         self._launch_command = launch_command
         self._close = close
@@ -100,13 +101,14 @@ class Supervisor:
 
     # ---- lifecycle ----------------------------------------------------------
 
-    async def spawn(self, prompt: str, *, parent, model: Optional[str] = None) -> str:
+    async def spawn(self, prompt: str, *, parent, model: Optional[str] = None,
+                    agent: Optional[str] = None) -> str:
         """Start an agent on ``prompt`` and return its id. Raises SupervisorError."""
         if not prompt.strip():
             raise SupervisorError("a prompt is required")
         self._check_room()
         job_id = self.new_id()
-        job = await self._launch(job_id, parent, model)
+        job = await self._launch(job_id, parent, model, agent)
         self._jobs[job_id] = job
         job.submit(prompt)
         return job_id
@@ -232,9 +234,11 @@ class Supervisor:
         """Run one job tool call and render its result for the model."""
         if name == "spawn_agent":
             model = args.get("model")
+            agent = args.get("agent")
             try:
                 job_id = await self.spawn(str(args.get("prompt") or ""), parent=caller,
-                                          model=str(model) if model else None)
+                                          model=str(model) if model else None,
+                                          agent=str(agent) if agent else None)
             except SupervisorError as exc:
                 return f"Error: {exc}"
             except Exception as exc:  # noqa: BLE001 — a session or a pane that would not open

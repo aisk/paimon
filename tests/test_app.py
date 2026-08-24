@@ -22,7 +22,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import RichLog, Static
 from textual.widgets.markdown import MarkdownBlock
 from helpers import SILENT_EVENTS, agent_events, stub_model
-from paimon import aside, lockfile
+from paimon import agents, aside, lockfile, tools
 from paimon.agent import Agent, ReasoningDelta, RequestStats, ToolEnd, ToolStart
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.jobs import AgentJob, Outcome, Result
@@ -1334,6 +1334,36 @@ class SpawnAgentTest(AppTestCase):
                 self.assertNotIn(child.agent.session.id, listed)
                 self.assertIn(child.agent.session.id,
                               [s.id for s in Session.list(parent.agent.cwd, include_children=True)])
+
+    async def test_a_typed_spawn_narrows_tools_and_appends_the_prompt(self) -> None:
+        app = self.make_app(mode="yolo")
+        model = stub_model("spawn_agent", '{"prompt": "map the modules", "agent": "explore"}')
+        with patch("paimon.agent.build_model", return_value=model):
+            async with app.run_test() as pilot:
+                app.pane.agent.model_override = "test:override"
+                child = await self._spawn(app, pilot)
+
+                expected = {name for name, tool in tools.REGISTRY.items()
+                            if tool.access in ("read", "none")
+                            and name not in tools.SUBAGENT_DENIED}
+                self.assertEqual(set(child.agent.toolset), expected)
+                self.assertTrue(child.agent.system_prompt.rstrip().endswith(
+                    agents.builtin_types()[0].body),
+                    "the type's body ends the child's system prompt")
+                self.assertEqual(child.agent.model_override, "test:override",
+                                 "with no explicit model the caller's override carries over")
+
+    async def test_an_unknown_type_reports_and_opens_no_pane(self) -> None:
+        app = self.make_app(mode="yolo")
+        model = stub_model("spawn_agent", '{"prompt": "go", "agent": "nope"}')
+        with patch("paimon.agent.build_model", return_value=model):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                parent.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(
+                    pilot, lambda: "unknown agent type" in MultiPaneTest._log_text(parent))
+                self.assertIn("'nope'", MultiPaneTest._log_text(parent))
+                self.assertEqual(len(app.panes), 1)
 
     async def test_changing_the_parents_session_stops_its_agents(self) -> None:
         app = self.make_app(mode="yolo")
