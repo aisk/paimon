@@ -36,7 +36,7 @@ class CommandPane(Pane):
     def __init__(self, job: CommandJob, *, cwd, mode: str, id: str | None = None) -> None:
         super().__init__(id=id)
         self.job = job
-        job.on_change = self._on_change
+        job.on_change.append(self._on_change)
         # Where the command runs and the mode it was started under. Neither
         # means anything to the pane itself; they are what the app inherits
         # from if this is the last pane left when it closes.

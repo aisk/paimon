@@ -93,6 +93,17 @@ class AgentJobTest(unittest.IsolatedAsyncioTestCase):
         self.agent.finish()
         await settle()
 
+    async def test_every_change_listener_is_notified(self) -> None:
+        job = self.make()
+        first: list = []
+        second: list = []
+        job.on_change.append(first.append)
+        job.on_change.append(second.append)
+
+        job.submit("go")
+        self.assertEqual(first, [job])
+        self.assertEqual(second, [job], "one listener does not shadow another")
+
     async def test_one_turn_at_a_time_in_the_order_submitted(self) -> None:
         job = self.make()
         job.submit("first")

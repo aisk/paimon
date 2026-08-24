@@ -483,7 +483,7 @@ class SessionPane(Pane):
         self._renderer = _EventRenderer(self)
         self.job = AgentJob(job_id, agent, parent=self._owner)
         self.job.sink = self._on_event
-        self.job.on_change = self._on_change
+        self.job.on_change.append(self._on_change)
         if self.supervisor is not None:
             self.supervisor.register(self.job)
 

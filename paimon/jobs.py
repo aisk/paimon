@@ -140,8 +140,10 @@ class Job:
         self.killed = False
         # The state last reported to the parent; see Supervisor.status_summary.
         self.reported = State.RUNNING
-        # Called with this job whenever its state changes. The UI's hook.
-        self.on_change = None
+        # Each called with this job whenever its state changes: the pane that
+        # shows it, and whoever else needs to react (the supervisor's wake-up
+        # check). A list so no listener has to know about the others.
+        self.on_change: list = []
         self._task: Optional[asyncio.Task] = None
         # Per caller, how much of the output it has already read. Keyed by the
         # caller object itself, so the same job read twice gets only what is
@@ -252,8 +254,8 @@ class Job:
     def _notify(self) -> None:
         if self._changed is not None:
             self._changed.set()
-        if self.on_change is not None:
-            self.on_change(self)
+        for listener in list(self.on_change):
+            listener(self)
 
 
 class AgentJob(Job):
