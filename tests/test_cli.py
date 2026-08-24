@@ -543,3 +543,9 @@ class SkillFlagsTest(unittest.TestCase):
         self.assertEqual(config.skills, ["from-config", "a", "b/SKILL.md"])
         self.assertTrue(config.include_default_skills)
         self.assertFalse(self._config_after("--no-skills").include_default_skills)
+
+    def test_agent_paths_mirror_the_skill_flags(self) -> None:
+        config = self._config_after("--agent", "a", "--agent", "b/scout.md")
+        self.assertEqual(config.agents, ["a", "b/scout.md"])
+        self.assertTrue(config.include_default_agents)
+        self.assertFalse(self._config_after("--no-agents").include_default_agents)

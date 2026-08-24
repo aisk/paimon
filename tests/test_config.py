@@ -311,3 +311,18 @@ class ConfigSkillsTest(unittest.TestCase):
         config.model = "test:stub"
         config.save()
         self.assertNotIn("skills", json.loads(config_path(DEFAULT_PROFILE).read_text()))
+
+    def test_agents_list_mirrors_skills(self) -> None:
+        path = config_path(DEFAULT_PROFILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"agents": ["~/.agents/agents", "/abs/one"]}))
+        self.assertEqual(Config.load().agents, ["~/.agents/agents", "/abs/one"])
+        path.write_text(json.dumps({"agents": "not-a-list"}))
+        self.assertEqual(Config.load().agents, [])
+        self.assertTrue(Config.load().include_default_agents)
+        path.write_text("{}")  # save keeps unknown file keys, so start clean
+        config = Config.load()
+        config.agents = ["x"]
+        config.model = "test:stub"
+        config.save()
+        self.assertNotIn("agents", json.loads(config_path(DEFAULT_PROFILE).read_text()))

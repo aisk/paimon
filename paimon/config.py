@@ -244,6 +244,10 @@ class Config:
     skills: list[str] = field(default_factory=list)
     # Cleared by --no-skills for one run; not a config file setting.
     include_default_skills: bool = True
+    # Extra agent type files or directories, mirroring skills above.
+    agents: list[str] = field(default_factory=list)
+    # Cleared by --no-agents for one run; not a config file setting.
+    include_default_agents: bool = True
 
     @classmethod
     def load(cls, profile: Optional[str] = None) -> "Config":
@@ -255,6 +259,7 @@ class Config:
         data = _read_file_config(config_path(profile))
         compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
         skills = data.get("skills")
+        agents = data.get("agents")
         return cls(
             profile=profile,
             model=data.get("model"),
@@ -269,6 +274,7 @@ class Config:
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
             compaction_context_window=compaction.get("context_window"),
             skills=[str(p) for p in skills] if isinstance(skills, list) else [],
+            agents=[str(p) for p in agents] if isinstance(agents, list) else [],
         )
 
     def provider_auth(self, model: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:

@@ -17,3 +17,11 @@ def _no_default_skill_dirs():
     suite. Tests of the default locations patch default_skill_dirs themselves."""
     with patch("paimon.skills.default_skill_dirs", return_value=[]):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _no_default_agent_dirs():
+    """The same guard for ~/.agents/agents and config agent types. Built-in
+    types stay: they are part of the behavior under test."""
+    with patch("paimon.agents.default_agent_dirs", return_value=[]):
+        yield

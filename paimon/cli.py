@@ -68,6 +68,10 @@ def main() -> None:
                         help="load skills from this SKILL.md file or directory too (repeatable)")
     parser.add_argument("--no-skills", action="store_true",
                         help="skip the default skill locations (--skill paths still load)")
+    parser.add_argument("--agent", action="append", default=[], metavar="PATH", dest="agents",
+                        help="load agent types from this markdown file or directory too (repeatable)")
+    parser.add_argument("--no-agents", action="store_true",
+                        help="skip the default agent type locations (--agent paths still load)")
     parser.add_argument("--web", action="store_true",
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
@@ -92,6 +96,9 @@ def main() -> None:
         config.skills = [*config.skills, *args.skills]
         if args.no_skills:
             config.include_default_skills = False
+        config.agents = [*config.agents, *args.agents]
+        if args.no_agents:
+            config.include_default_agents = False
     except ValueError as exc:
         parser.error(str(exc))
     except PaimonError as exc:
