@@ -1248,6 +1248,46 @@ class AgentStatusInjectionTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse([event for event in events if isinstance(event, AgentsNotice)])
             self.assertFalse(any(is_agents_message(message) for message in agent.history))
 
+    async def test_a_wake_up_turn_runs_on_the_status_line_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config())
+            agent.supervisor = _FakeSupervisor(summary="a1f2 finished")
+
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                events = [event async for event in agent.run(None)]
+
+            self.assertIsInstance(events[0], AgentsNotice)
+            self.assertNotIn(UserInput, [type(event) for event in events])
+            self.assertTrue(is_agents_message(agent.history[0]))
+            self.assertFalse(any(
+                isinstance(part, UserPromptPart) and not is_agents_message(message)
+                for message in agent.history if isinstance(message, ModelRequest)
+                for part in message.parts), "no user message is fabricated")
+            replayed = replay_events(session.messages())
+            self.assertNotIn(UserInput, [type(event) for event in replayed])
+            # One turn, one terminal record.
+            outcomes = [record for record in _records(session)
+                        if record.get("type") == "turn_end"]
+            self.assertEqual(len(outcomes), 1)
+
+    async def test_an_empty_wake_up_never_happened(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config())
+            agent.supervisor = _FakeSupervisor(summary=None)
+            before = session.path.read_bytes()
+
+            events = [event async for event in agent.run(None)]
+
+            self.assertEqual(events, [], "no events, and no model request either")
+            self.assertEqual(session.path.read_bytes(), before,
+                             "nothing was persisted")
+
 
 class _FakeSupervisor:
     def __init__(self, summary=None) -> None:

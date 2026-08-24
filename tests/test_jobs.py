@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 
+from paimon.agent import UserInput
 from paimon.jobs import AgentJob, CommandJob, Outcome, State, TurnOver
 from paimon.tools import _TaskOutput
 
@@ -92,6 +93,36 @@ class AgentJobTest(unittest.IsolatedAsyncioTestCase):
         await settle()
         self.agent.finish()
         await settle()
+
+    async def test_wake_runs_a_turn_with_no_user_input(self) -> None:
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+
+        job.sink = sink
+        self.assertTrue(job.wake())
+        await self.finish(job)
+
+        self.assertEqual(self.agent.prompts, [None], "the agent runs on None")
+        self.assertNotIn(UserInput, [type(event) for event in seen],
+                         "a wake-up is not rendered as something the user typed")
+
+    async def test_wake_is_refused_while_busy_or_killed(self) -> None:
+        job = self.make()
+        job.submit("work")
+        await settle()
+        self.assertFalse(job.wake(), "busy: the agent reports at its next step")
+        self.agent.finish()
+        await settle()
+
+        self.assertTrue(job.wake(), "idle again")
+        self.assertFalse(job.wake(), "one queued wake-up is enough")
+        await self.finish(job)
+
+        job.cancel()
+        self.assertFalse(job.wake())
 
     async def test_every_change_listener_is_notified(self) -> None:
         job = self.make()

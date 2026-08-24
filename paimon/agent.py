@@ -696,9 +696,14 @@ class Agent:
         # Unchanged (the same object back) means it was not a skill command.
         return mentions(text) if expanded is text else expanded
 
-    async def run(self, user_input: str, *, expand: bool = True,
+    async def run(self, user_input: Optional[str], *, expand: bool = True,
                   max_tool_calls: Optional[int] = None) -> AsyncIterator[AgentEvent]:
         """Run one user turn to completion, yielding events along the way.
+
+        ``user_input`` may be None: a wake-up turn, run so the model reacts to
+        agents that finished — the status line injected below is its only new
+        input. When there is nothing to report either, the turn never happened:
+        no events, nothing persisted, no model request.
 
         ``expand=False`` skips @path expansion, for callers that assembled the
         prompt themselves and must not have unrelated text rewritten (piped
@@ -711,16 +716,19 @@ class Agent:
         an explicit refusal persisted as its result, ToolBudgetExhausted is
         yielded and the turn ends.
         """
-        prompt = self.expand_input(user_input) if expand else user_input
         # Agents this session started report in here, at the top of the next
         # turn, rather than by interrupting whatever the user is typing. It has
         # to be a persisted message: an event the model never sees would defeat
         # the point, which is to get it to call read_job.
         summary = self.supervisor.status_summary(self) if self.supervisor is not None else None
+        if user_input is None and not summary:
+            return
         if summary:
             self._append_message(agents_message(summary))
             yield AgentsNotice(summary)
-        self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
+        if user_input is not None:
+            prompt = self.expand_input(user_input) if expand else user_input
+            self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
 
         # Every turn leaves exactly one terminal ``turn_end`` record in the
         # session: success, error (with the exception), max_tool_calls or

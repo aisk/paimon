@@ -891,6 +891,11 @@ class SessionPane(Pane):
             return
         if isinstance(ev, UserInput):
             self._begin_turn(ev.text)
+        elif isinstance(ev, AgentsNotice):
+            # A wake-up turn opens with the status line instead of a user
+            # message; in a normal turn the UserInput already ran this and the
+            # timer marker makes it a no-op. Empty text keeps the tab title.
+            self._begin_turn("")
         await self._renderer.handle(ev)
         if isinstance(ev, TurnEnd):
             self._set_state(None)

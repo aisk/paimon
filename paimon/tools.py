@@ -1902,18 +1902,21 @@ REGISTRY: dict[str, Tool] = {
             "function": {
                 "name": "spawn_agent",
                 "description": (
-                    "Start another agent working in parallel in its own tab, with the same "
-                    "tools and working directory, and return its agent id. Use it for work "
-                    "that is independent of what you are doing right now — exploring a second "
-                    "part of the codebase, a long test run, a self-contained refactor — and "
-                    "keep the number of them small. The prompt must be self-contained: state "
-                    "the goal, the key file paths, the decisions already made and what to "
-                    "report back, because the new agent has no memory of this conversation "
-                    "and cannot ask you anything. Nothing it produces reaches you on its own: "
-                    "call read_job to collect it, wait_for_job to wait for it, and stop_job "
-                    "if it is going the wrong way. It cannot spawn agents of its own. "
-                    "Permission prompts for its tools appear in its tab, so it can sit "
-                    "blocked until the user answers them."
+                    "Start another agent working in parallel in its own tab, in the same "
+                    "working directory and (unless an agent type narrows them) with the same "
+                    "tools, and return its agent id. Use it for work that is independent of "
+                    "what you are doing right now — exploring a second part of the codebase, "
+                    "a long test run, a self-contained refactor — and keep the number of "
+                    "them small. The prompt must be self-contained: state the goal, the key "
+                    "file paths, the decisions already made and what to report back, because "
+                    "the new agent has no memory of this conversation and cannot ask you "
+                    "anything. Do not wait for it: when it finishes while you are idle, a "
+                    "status line wakes you — collect its output with read_job then, and read "
+                    "every finished job in that one turn. wait_for_job exists for the rare "
+                    "case you cannot proceed without the result, and stop_job for an agent "
+                    "going the wrong way. It cannot spawn agents of its own. Permission "
+                    "prompts for its tools appear in its tab, so it can sit blocked until "
+                    "the user answers them."
                 ),
                 "parameters": {
                     "type": "object",

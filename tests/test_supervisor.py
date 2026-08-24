@@ -143,6 +143,74 @@ class SpawnTest(SupervisorTestCase):
         self.assertEqual(supervisor.states(), {})
 
 
+class WakeUpTest(SupervisorTestCase):
+    """A finished child queues a wake-up turn on its idle parent."""
+
+    def register_parent(self, supervisor) -> AgentJob:
+        parent_job = AgentJob(supervisor.new_id(), FakeAgent())
+        supervisor.register(parent_job)
+        parent_job.start()
+        return parent_job
+
+    async def test_a_finished_child_wakes_an_idle_parent(self) -> None:
+        supervisor = self.make()
+        parent_job = self.register_parent(supervisor)
+        job_id = await supervisor.spawn("go", parent=parent_job.agent)
+        await self.finish()
+        await settle()
+
+        self.assertEqual(parent_job.agent.prompts, [None],
+                         "the parent runs a turn with no user input")
+        # What the real agent does at the top of that turn; here the fake
+        # consumes the news by hand so the chain can be shown to stop.
+        self.assertEqual(supervisor.status_summary(parent_job.agent), f"{job_id} finished")
+        parent_job.agent.finish()
+        await settle()
+        self.assertEqual(parent_job.agent.prompts, [None], "no second wake-up")
+
+    async def test_a_busy_parent_is_woken_once_it_goes_idle(self) -> None:
+        supervisor = self.make()
+        parent_job = self.register_parent(supervisor)
+        parent_job.submit("my own work")
+        await settle()
+        await supervisor.spawn("go", parent=parent_job.agent)
+        await self.finish()
+        await settle()
+        self.assertEqual(parent_job.agent.prompts, ["my own work"],
+                         "a busy parent reports at its next step instead")
+
+        parent_job.agent.finish()
+        await settle()
+        self.assertEqual(parent_job.agent.prompts, ["my own work", None],
+                         "the missed news arrives when the parent goes idle")
+
+    async def test_a_stop_the_caller_ordered_is_not_news(self) -> None:
+        supervisor = self.make()
+        parent_job = self.register_parent(supervisor)
+        job_id = await supervisor.spawn("go", parent=parent_job.agent)
+        await settle()
+        supervisor.stop(job_id, caller=parent_job.agent)
+        await settle()
+
+        self.assertEqual(parent_job.agent.prompts, [],
+                         "the stop's own result already said so")
+        self.assertIsNone(supervisor.status_summary(parent_job.agent))
+
+    async def test_kill_children_leaves_no_wake_behind(self) -> None:
+        supervisor = self.make()
+        parent_job = self.register_parent(supervisor)
+        await supervisor.spawn("go", parent=parent_job.agent)
+        await settle()
+        supervisor.kill_children(parent_job.agent)
+        await settle()
+
+        self.assertEqual(supervisor.children(parent_job.agent), [])
+        self.assertFalse(parent_job.killed)
+        # A wake-up queued in the middle of the teardown is at worst an empty
+        # turn: the children are forgotten, so there is no news to run on.
+        self.assertIsNone(supervisor.status_summary(parent_job.agent))
+
+
 class DeliveryTest(SupervisorTestCase):
     async def test_a_busy_agent_queues_and_gets_one_prompt_per_turn(self) -> None:
         supervisor = self.make()

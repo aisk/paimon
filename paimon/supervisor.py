@@ -69,13 +69,19 @@ class Supervisor:
     # ---- the table ----------------------------------------------------------
 
     def register(self, job: Job) -> None:
-        """Take a job the UI made on its own into the table.
+        """Take a job into the table and start watching it.
 
-        A pane the user opened is one of these: it has no owner, so no tool can
-        reach it, but it is a live agent holding a pane and has to count
-        against the budget like any other.
+        Every job passes through here: the ones the UI made on its own (a pane
+        the user opened has no owner, so no tool can reach it, but it holds a
+        pane and counts against the budget like any other) and the ones spawn
+        and start_command made. Idempotent, because a spawned agent's pane
+        registers its job before spawn stores it — the wake-up listener must
+        not be attached twice.
         """
+        if self._jobs.get(job.job_id) is job:
+            return
         self._jobs[job.job_id] = job
+        job.on_change.append(self._job_changed)
 
     def new_id(self) -> str:
         """An id no live job is using.
@@ -109,7 +115,7 @@ class Supervisor:
         self._check_room()
         job_id = self.new_id()
         job = await self._launch(job_id, parent, model, agent)
-        self._jobs[job_id] = job
+        self.register(job)
         job.submit(prompt)
         return job_id
 
@@ -129,7 +135,7 @@ class Supervisor:
             # and it is in its own process group, so it would outlive the app.
             running.kill()
             raise
-        self._jobs[job_id] = job
+        self.register(job)
         return job_id
 
     def stop(self, job_id: str, *, caller=None) -> bool:
@@ -140,6 +146,10 @@ class Supervisor:
         job = self._jobs.get(job_id) if caller is None else self._find(job_id, caller)
         if job is None or job.killed:
             return False
+        # Marked before cancel(), whose notification would otherwise wake the
+        # caller over a kill it ordered itself; the stop's own result already
+        # says so, so the next status line must not repeat it either.
+        job.reported = State.KILLED
         job.cancel()
         self._close(job)
         return True
@@ -206,6 +216,39 @@ class Supervisor:
         if job is None:
             return State.UNKNOWN
         return await job.wait(timeout)
+
+    # ---- waking the parent --------------------------------------------------
+
+    def _job_changed(self, job: Job) -> None:
+        """A job moved: see whether somebody idle should hear about it.
+
+        Runs synchronously inside Job._notify, from any state change, so it
+        must not await and must not raise — wake() only queues.
+        """
+        if job.parent is not None:
+            # A child has news; its parent may be sitting idle.
+            self._maybe_wake(job.parent)
+        if job.kind == "agent" and not job.killed and not job.is_busy:
+            # An agent just went idle; children may have finished while it was
+            # busy, when the first branch found it mid-turn and backed off.
+            self._maybe_wake(job.agent)
+
+    def _maybe_wake(self, agent) -> None:
+        """Queue a wake-up turn for ``agent`` when it has unreported news."""
+        target = next((job for job in self._jobs.values()
+                       if job.kind == "agent" and getattr(job, "agent", None) is agent),
+                      None)
+        if target is None or target.killed or target.is_busy:
+            return
+        if self._has_news(agent):
+            target.wake()
+
+    def _has_news(self, parent) -> bool:
+        """Whether status_summary would say anything, without advancing the
+        per-job cursors — the wake-up turn itself is what reports."""
+        return any(job.parent is parent and job.state is not job.reported
+                   and job.state in _NEWS
+                   for job in self._jobs.values())
 
     def status_summary(self, parent) -> Optional[str]:
         """One line about what ``parent`` started and what became of it.

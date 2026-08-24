@@ -1353,6 +1353,25 @@ class SpawnAgentTest(AppTestCase):
                 self.assertEqual(child.agent.model_override, "test:override",
                                  "with no explicit model the caller's override carries over")
 
+    async def test_a_finished_child_wakes_the_parent(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model", return_value=self._spawning_model()):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                child = await self._spawn(app, pilot)
+
+                # The child's stub turn ends on its own; the parent is then
+                # woken without anybody typing, reports the news and reacts.
+                await self._wait_for(
+                    pilot, lambda: f"Agents: {child.job.job_id} finished"
+                    in MultiPaneTest._log_text(parent))
+                await self._wait_for(pilot, lambda: not parent.is_busy)
+                self.assertTrue(any(is_agents_message(message)
+                                    for message in parent.agent.history))
+                self.assertNotIn(f"{child.job.job_id} finished",
+                                 parent.agent.session.first_user_text() or "",
+                                 "the wake-up never becomes the session title")
+
     async def test_an_unknown_type_reports_and_opens_no_pane(self) -> None:
         app = self.make_app(mode="yolo")
         model = stub_model("spawn_agent", '{"prompt": "go", "agent": "nope"}')

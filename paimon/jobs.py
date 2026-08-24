@@ -27,6 +27,10 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from .agent import UserInput
 from .tools import tail_text
 
+# Inbox sentinel for a turn with no user input: the agent runs just to react
+# to what its jobs did. Distinct from None, which tells the driver to stop.
+WAKE = object()
+
 
 class State(str, Enum):
     """What a job is doing, as reported back to the model that asked."""
@@ -308,12 +312,16 @@ class AgentJob(Job):
         if self.sink is not None:
             await self.sink(event)
 
-    async def _run_turn(self, prompt: str) -> None:
+    async def _run_turn(self, prompt) -> None:
         try:
-            # The prompt is an event like any other, so a turn the supervisor
-            # started renders in its pane the same way one the user typed does.
-            await self._emit(UserInput(prompt))
-            async for event in self.agent.run(prompt):
+            user_input = None if prompt is WAKE else prompt
+            if user_input is not None:
+                # The prompt is an event like any other, so a turn the
+                # supervisor started renders in its pane the same way one the
+                # user typed does. A wake-up has no prompt to show: its first
+                # event is the agent's own status line, or nothing at all.
+                await self._emit(UserInput(user_input))
+            async for event in self.agent.run(user_input):
                 await self._emit(event)
             self.result = Result(Outcome.SUCCESS)
         except asyncio.CancelledError:
@@ -324,6 +332,18 @@ class AgentJob(Job):
 
     def submit(self, text: str) -> bool:
         self._inbox.put_nowait(text)
+        self._notify()
+        return True
+
+    def wake(self) -> bool:
+        """Queue a turn with no user input, so the agent reacts to what its
+        jobs did (the status line is the only new input). Refused while busy
+        or killed: a busy agent already reports at its next step, and one
+        wake-up in the inbox is enough — is_busy covers a queued one too.
+        """
+        if self.killed or self.is_busy:
+            return False
+        self._inbox.put_nowait(WAKE)
         self._notify()
         return True
 
