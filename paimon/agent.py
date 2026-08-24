@@ -375,7 +375,8 @@ class Agent:
              append_system_prompt: Optional[str] = None,
              toolset: Optional[dict[str, tools.Tool]] = None,
              model_override: Optional[str] = None,
-             parent_session_id: Optional[str] = None) -> "Agent":
+             parent_session_id: Optional[str] = None,
+             agent_type: Optional[str] = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
 
         ``append_system_prompt`` is added to the end of a new session's system
@@ -387,7 +388,10 @@ class Agent:
         and when they changed, the rebuilt snapshot is appended to the log, so
         it always records the prompt each turn actually ran with.
         ``parent_session_id`` marks the new session as a subagent's, which
-        keeps it out of the session listings its parent shows up in.
+        keeps it out of the session listings its parent shows up in;
+        ``agent_type`` records what type it was spawned as, so resuming the
+        session can restore the type's narrowing. Both apply to new sessions
+        only and are ignored on resume, where the header already says.
 
         Raises ``SessionBusyError`` when the session is already open (here or
         in another process) and ``SessionIncompleteError`` when a resumed log
@@ -404,7 +408,7 @@ class Agent:
             cwd, extra_paths=config.agents, include_defaults=config.include_default_agents)
         is_new = session is None
         if session is None:
-            session = Session.create(cwd, parent_session_id)
+            session = Session.create(cwd, parent_session_id, agent_type)
         session.lock()
         # Everything after the lock can fail — a full disk while writing the
         # prompt, a message the current pydantic-ai cannot parse — and no

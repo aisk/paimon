@@ -349,6 +349,16 @@ class ChildSessionTest(SessionScanTestCase):
         self.assertEqual(sorted(session.id for session in listed), sorted([mine.id, child.id]))
         self.assertEqual(next(s for s in listed if s.id == child.id).parent_id, mine.id)
 
+    def test_the_agent_type_survives_listing_and_forking(self) -> None:
+        parent = Session.create(self.cwd)
+        child = Session.create(self.cwd, parent_id=parent.id, agent_type="explore")
+        child.append_message(ModelRequest(parts=[UserPromptPart(content="theirs")]))
+
+        listed = Session.list(self.cwd, include_children=True)
+        self.assertEqual(next(s for s in listed if s.id == child.id).agent_type, "explore")
+        self.assertEqual(child.fork().agent_type, "explore")
+        self.assertIsNone(parent.agent_type)
+
     def test_a_fork_of_a_child_is_still_a_child(self) -> None:
         parent = Session.create(self.cwd)
         child = Session.create(self.cwd, parent_id=parent.id)

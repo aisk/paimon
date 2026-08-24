@@ -1372,6 +1372,42 @@ class SpawnAgentTest(AppTestCase):
                                  parent.agent.session.first_user_text() or "",
                                  "the wake-up never becomes the session title")
 
+    async def test_a_stopped_agent_can_be_resumed_by_session_id(self) -> None:
+        app = self.make_app(mode="yolo")
+        model = stub_model("spawn_agent", '{"prompt": "map the modules", "agent": "explore"}')
+        with patch("paimon.agent.build_model", return_value=model):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                child = await self._spawn(app, pilot)
+                session_id = child.agent.session.id
+                await self._wait_for(pilot, lambda: not child.is_busy)
+                kept = len(child.agent.history)
+                self.assertGreater(kept, 0)
+
+                answer = await app._supervisor.handle(
+                    "stop_job", {"job_id": child.job.job_id}, caller=parent.agent)
+                self.assertIn(session_id[:8], answer,
+                              "the durable name rides the stop result")
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
+
+                refused = await app._supervisor.handle(
+                    "spawn_agent", {"prompt": "go", "session": parent.agent.session.id},
+                    caller=parent.agent)
+                self.assertIn("Error", refused, "only this conversation's children qualify")
+
+                answer = await app._supervisor.handle(
+                    "spawn_agent", {"prompt": "look further", "session": session_id[:8]},
+                    caller=parent.agent)
+                self.assertIn("Started agent", answer)
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+                revived = app.panes[1]
+                self.assertEqual(revived.agent.session.id, session_id)
+                self.assertGreaterEqual(len(revived.agent.history), kept,
+                                        "the conversation picks up where it ended")
+                self.assertNotIn("write_file", revived.agent.toolset,
+                                 "the recorded explore type narrows the tools again")
+                self.assertIn("grep", revived.agent.toolset)
+
     async def test_an_unknown_type_reports_and_opens_no_pane(self) -> None:
         app = self.make_app(mode="yolo")
         model = stub_model("spawn_agent", '{"prompt": "go", "agent": "nope"}')

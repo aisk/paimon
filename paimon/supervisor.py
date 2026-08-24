@@ -55,11 +55,12 @@ class Supervisor:
     """Starts agents and background commands, and reports on both."""
 
     def __init__(self, *, launch, close, limit: int, launch_command=None) -> None:
-        # launch(job_id, parent, model, agent) -> Job and launch_command(
-        # job_id, command, description) -> Job are awaited and must have put a
-        # pane on screen by the time they return; close(job) takes that pane
-        # down again. All three belong to the UI. ``agent`` is an agent type
-        # name the launcher resolves; the supervisor never interprets it.
+        # launch(job_id, parent, model, agent, session) -> Job and
+        # launch_command(job_id, command, description) -> Job are awaited and
+        # must have put a pane on screen by the time they return; close(job)
+        # takes that pane down again. All three belong to the UI. ``agent`` is
+        # an agent type name and ``session`` a session id to resume; the
+        # launcher resolves both, the supervisor never interprets them.
         self._launch = launch
         self._launch_command = launch_command
         self._close = close
@@ -108,13 +109,13 @@ class Supervisor:
     # ---- lifecycle ----------------------------------------------------------
 
     async def spawn(self, prompt: str, *, parent, model: Optional[str] = None,
-                    agent: Optional[str] = None) -> str:
+                    agent: Optional[str] = None, session: Optional[str] = None) -> str:
         """Start an agent on ``prompt`` and return its id. Raises SupervisorError."""
         if not prompt.strip():
             raise SupervisorError("a prompt is required")
         self._check_room()
         job_id = self.new_id()
-        job = await self._launch(job_id, parent, model, agent)
+        job = await self._launch(job_id, parent, model, agent, session)
         self.register(job)
         job.submit(prompt)
         return job_id
@@ -278,16 +279,19 @@ class Supervisor:
         if name == "spawn_agent":
             model = args.get("model")
             agent = args.get("agent")
+            session = args.get("session")
             try:
                 job_id = await self.spawn(str(args.get("prompt") or ""), parent=caller,
                                           model=str(model) if model else None,
-                                          agent=str(agent) if agent else None)
+                                          agent=str(agent) if agent else None,
+                                          session=str(session) if session else None)
             except SupervisorError as exc:
                 return f"Error: {exc}"
             except Exception as exc:  # noqa: BLE001 — a session or a pane that would not open
                 return f"Error: could not start an agent: {exc}"
-            return (f"Started agent {job_id}; it is running now. Use read_job to collect "
-                    "its output and wait_for_job to wait for it.")
+            return (f"Started agent {job_id} (session {self._session_id(job_id)}); it is "
+                    "running now. Use read_job to collect its output and wait_for_job to "
+                    "wait for it.")
 
         if name == "run_background":
             command = str(args.get("command") or "").strip()
@@ -349,12 +353,24 @@ class Supervisor:
             return f"{job_id} is {state.value}. Read what it produced with read_job."
 
         if name == "stop_job":
+            job = self._find(job_id, caller)
             if not self.stop(job_id, caller=caller):
                 return (f"Error: nothing to stop under {job_id}; it may already have "
                         "been stopped.")
+            if job is not None and job.kind == "agent":
+                # The session outlives the job, so hand back the durable name.
+                return (f"Stopped {job_id}. What it produced is still readable, and "
+                        f"spawn_agent with session '{self._session_id(job_id)}' resumes "
+                        "its conversation later if needed.")
             return f"Stopped {job_id}. What it produced is still readable."
 
         return f"Error: unknown tool {name!r}"
+
+    def _session_id(self, job_id: str) -> str:
+        """The short session id behind an agent job, for the tool results that
+        quote the durable name alongside the ephemeral one."""
+        session = getattr(getattr(self._jobs.get(job_id), "agent", None), "session", None)
+        return session.id[:8] if session is not None else "unknown"
 
     @staticmethod
     def _gone(job_id: str, state: State) -> str:

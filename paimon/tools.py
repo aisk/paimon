@@ -1916,7 +1916,9 @@ REGISTRY: dict[str, Tool] = {
                     "case you cannot proceed without the result, and stop_job for an agent "
                     "going the wrong way. It cannot spawn agents of its own. Permission "
                     "prompts for its tools appear in its tab, so it can sit blocked until "
-                    "the user answers them."
+                    "the user answers them. Stopping an agent frees its slot but keeps its "
+                    "session on disk; pass that session id here later to pick the "
+                    "conversation back up where it ended."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1928,6 +1930,16 @@ REGISTRY: dict[str, Tool] = {
                         "model": {
                             "type": "string",
                             "description": "Model for this agent only (optional; defaults to the current one).",
+                        },
+                        "session": {
+                            "type": "string",
+                            "description": (
+                                "Session id of an agent you started earlier (quoted when it "
+                                "was started and when it was stopped): resume that "
+                                "conversation with its history and role intact, the prompt "
+                                "becoming its next turn. Only your own agents' sessions "
+                                "qualify. Optional; not combinable with 'agent'."
+                            ),
                         },
                     },
                     "required": ["prompt"],

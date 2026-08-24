@@ -34,10 +34,11 @@ class SupervisorTestCase(unittest.IsolatedAsyncioTestCase):
         self.parent = FakeCaller()
 
     def make(self, limit: int = 4, launch=None) -> Supervisor:
-        async def default_launch(job_id, parent, model, agent):
+        async def default_launch(job_id, parent, model, agent, session):
             job = AgentJob(job_id, FakeAgent(), parent=parent)
             job.model = model  # only so a test can see what was asked for
             job.agent_type = agent  # likewise
+            job.resumed_session = session  # likewise
             self.jobs.append(job)
             job.start()
             return job
@@ -116,7 +117,7 @@ class SpawnTest(SupervisorTestCase):
         self.assertEqual(self.jobs, [])
 
     async def test_a_failed_launch_is_reported_not_raised(self) -> None:
-        async def launch(job_id, parent, model, agent):
+        async def launch(job_id, parent, model, agent, session):
             raise RuntimeError("no pane for you")
 
         supervisor = self.make(launch=launch)
@@ -132,8 +133,14 @@ class SpawnTest(SupervisorTestCase):
         await supervisor.handle("spawn_agent", {"prompt": "go"}, caller=self.parent)
         self.assertIsNone(self.jobs[1].agent_type)
 
+    async def test_the_session_to_resume_reaches_the_launcher(self) -> None:
+        supervisor = self.make()
+        await supervisor.handle("spawn_agent", {"prompt": "go", "session": "3f2a1b8c"},
+                                caller=self.parent)
+        self.assertEqual(self.jobs[0].resumed_session, "3f2a1b8c")
+
     async def test_an_unknown_agent_type_is_a_tool_error_with_no_residue(self) -> None:
-        async def launch(job_id, parent, model, agent):
+        async def launch(job_id, parent, model, agent, session):
             raise SupervisorError(f"unknown agent type {agent!r}; available: explore")
 
         supervisor = self.make(launch=launch)

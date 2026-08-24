@@ -20,7 +20,7 @@ from .config import DEFAULT_PROFILE, Config, list_profiles
 from .errors import PaimonError
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .pane import Pane, SessionPane
-from .session import SessionError
+from .session import Session, SessionError
 from .jobs import CommandJob, Job
 from .supervisor import Supervisor, SupervisorError
 from .tabs import PaneTabs
@@ -260,13 +260,15 @@ class PaimonApp(App):
     # ---- agents -------------------------------------------------------------
 
     async def _launch_agent(self, job_id: str, parent, model: str | None,
-                            agent: str | None) -> Job:
+                            agent: str | None, session: str | None) -> Job:
         """Open a background pane for an agent another pane asked for.
 
         It is mounted hidden and never focused: a pane the user did not open
         must not take the keyboard, or their next keystroke answers a
         confirmation they never saw. ``agent`` names one of the caller's agent
-        types; unknown names come back as a tool error via SupervisorError.
+        types; ``session`` resumes an earlier subagent's session instead of
+        starting fresh. Bad values of either come back as a tool error via
+        SupervisorError.
         """
         if len(self._panes) >= MAX_PANES:
             raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
@@ -275,28 +277,50 @@ class PaimonApp(App):
         owner = next((pane for pane in self.sessions if pane.agent is parent), None)
         if owner is None and (owner := self._session()) is None:
             raise SupervisorError("there is no conversation to start an agent from")
-        # Resolved against the caller's discovery, not a fresh scan: the types
-        # the model was offered are exactly the ones it may name.
         known = getattr(parent, "agent_types", None) or ()
-        agent_type = agents.find_type(agent, known) if agent else None
-        if agent and agent_type is None:
-            names = ", ".join(sorted(t.name for t in known)) or "none"
-            raise SupervisorError(f"unknown agent type {agent!r}; available: {names}")
+        stored = None
+        if session:
+            if agent:
+                raise SupervisorError(
+                    "pass either agent or session, not both: a resumed session "
+                    "already carries its type")
+            stored = next((s for s in Session.list(owner.cwd, include_children=True)
+                           if s.id.startswith(session)), None)
+            # The check that keeps this from resuming just any session in the
+            # directory: only this conversation's own children come back.
+            if stored is None or stored.parent_id != owner.agent.session.id:
+                raise SupervisorError(
+                    f"no agent session of this conversation starts with {session!r}")
+            # The type it was spawned as, when that type still exists, so the
+            # resumed agent keeps its tool narrowing; the persisted system
+            # prompt (the type's body included) is rebuilt by Agent.open.
+            agent_type = agents.find_type(stored.agent_type, known) if stored.agent_type else None
+        else:
+            # Resolved against the caller's discovery, not a fresh scan: the
+            # types the model was offered are exactly the ones it may name.
+            agent_type = agents.find_type(agent, known) if agent else None
+            if agent and agent_type is None:
+                names = ", ".join(sorted(t.name for t in known)) or "none"
+                raise SupervisorError(f"unknown agent type {agent!r}; available: {names}")
         base = tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED)
         toolset = base if agent_type is None or agent_type.tools is None else {
             name: tool for name, tool in base.items() if name in set(agent_type.tools)}
         child = Agent.open(
-            cwd=owner.cwd, mode=owner.mode, config=self.config,
+            cwd=owner.cwd, mode=owner.mode, config=self.config, session=stored,
             # Explicit choice first, then the type's, then whatever the caller
             # itself runs on — not config.model, which a caller override beats.
             model_override=model or (agent_type.model if agent_type else None)
             or getattr(parent, "model_override", None),
             # Marked as this session's child so it stays out of the session
-            # lists and out of `paimon -c`.
+            # lists and out of `paimon -c`; the type name is recorded so a
+            # resume can restore the narrowing above. Both are header fields
+            # of a new session and ignored when resuming one.
             parent_session_id=owner.agent.session.id,
+            agent_type=agent_type.name if agent_type else None,
             # The type's body rides the same channel as --append-system-prompt,
-            # so it is persisted with the session and survives a resume.
-            append_system_prompt=(agent_type.body or None) if agent_type else None,
+            # so it is persisted with the session and survives a resume — on
+            # which passing it again is forbidden, hence the guard.
+            append_system_prompt=(agent_type.body or None) if agent_type and stored is None else None,
             toolset=toolset,
         )
         pane = self._make_pane(child, owner=parent, job_id=job_id)
