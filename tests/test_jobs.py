@@ -211,7 +211,7 @@ class AgentJobTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(seen[0], "text", None), "go",
                          "a turn the supervisor started still renders its prompt")
         self.assertIsInstance(seen[-1], TurnOver)
-        self.assertIs(seen[-1].result.outcome, Outcome.OK)
+        self.assertIs(seen[-1].result.outcome, Outcome.SUCCESS)
 
     async def test_an_interrupted_turn_still_reaches_the_sink(self) -> None:
         """The renderer has to be told, and a cancelled turn cannot tell it."""
@@ -284,7 +284,7 @@ class CommandJobTest(unittest.IsolatedAsyncioTestCase):
         command.exit(0)
         await settle()
         self.assertIs(job.state, State.DONE)
-        self.assertIs(job.result.outcome, Outcome.OK)
+        self.assertIs(job.result.outcome, Outcome.SUCCESS)
 
         other, failing = self.make()
         failing.exit(2)

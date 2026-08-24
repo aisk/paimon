@@ -1059,6 +1059,7 @@ wheels = [
 name = "paimon"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "openai"] },
     { name = "pyyaml" },
     { name = "textual" },
@@ -1073,6 +1074,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "openai"], specifier = ">=2.31.0" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "textual", specifier = ">=8.2.7" },

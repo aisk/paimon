@@ -54,13 +54,13 @@ _NEWS = {
 class Supervisor:
     """Starts agents and background commands, and reports on both."""
 
-    def __init__(self, *, launch, close, limit: int, launch_task=None) -> None:
-        # launch(job_id, parent, model) -> Job and launch_task(job_id, command,
-        # description) -> Job are awaited and must have put a pane on screen by
-        # the time they return; close(job) takes that pane down again. All
-        # three belong to the UI.
+    def __init__(self, *, launch, close, limit: int, launch_command=None) -> None:
+        # launch(job_id, parent, model) -> Job and launch_command(job_id,
+        # command, description) -> Job are awaited and must have put a pane on
+        # screen by the time they return; close(job) takes that pane down
+        # again. All three belong to the UI.
         self._launch = launch
-        self._launch_task = launch_task
+        self._launch_command = launch_command
         self._close = close
         self._limit = limit
         self._jobs: dict[str, Job] = {}
@@ -111,17 +111,17 @@ class Supervisor:
         job.submit(prompt)
         return job_id
 
-    async def start_task(self, command: str, description: str, *, parent, cwd) -> str:
+    async def start_command(self, command: str, description: str, *, parent, cwd) -> str:
         """Start a background command and open a pane for it. Returns its id."""
         if not command.strip():
             raise SupervisorError("a command is required")
-        if self._launch_task is None:
+        if self._launch_command is None:
             raise SupervisorError("background commands are not available here")
         self._check_room()
         job_id = self.new_id()
         running = await start_background(command, cwd)
         try:
-            job = await self._launch_task(job_id, running, description)
+            job = await self._launch_command(job_id, running, description)
         except BaseException:
             # Nothing would ever kill it: no pane holds it and no job names it,
             # and it is in its own process group, so it would outlive the app.
@@ -247,7 +247,7 @@ class Supervisor:
             if not command:
                 return "Error: command is required."
             try:
-                job_id = await self.start_task(
+                job_id = await self.start_command(
                     command, str(args.get("description") or "").strip(),
                     parent=caller, cwd=caller.cwd)
             except SupervisorError as exc:

@@ -3,7 +3,7 @@
 The app is a container for panes: it owns the config, the theme, the command
 palette, the global bindings and the status bar. Everything belonging to one
 conversation lives in ``SessionPane``, and everything belonging to one
-background command in ``TaskPane``.
+background command in ``CommandPane``.
 """
 
 from functools import partial
@@ -24,7 +24,7 @@ from .session import SessionError
 from .jobs import CommandJob, Job
 from .supervisor import Supervisor, SupervisorError
 from .tabs import PaneTabs
-from .taskpane import TaskPane
+from .commandpane import CommandPane
 from .ui import PromptInput
 
 # Every pane holds a live agent and its context, or a live process, so panes
@@ -121,7 +121,7 @@ class PaimonApp(App):
         # Agents live in panes, so the supervisor borrows the app to open and
         # close them; everything else about them it owns itself.
         self._supervisor = Supervisor(launch=self._launch_agent, close=self._close_job,
-                                      launch_task=self._launch_task, limit=MAX_PANES)
+                                      launch_command=self._launch_command, limit=MAX_PANES)
         pane = SessionPane(agent, job_id=self._supervisor.new_id(), resumed=resumed,
                            id="pane-1", supervisor=self._supervisor)
         self._panes = [pane]
@@ -154,7 +154,7 @@ class PaimonApp(App):
         """The conversation a global action applies to.
 
         The current pane when it is one, and otherwise the first conversation
-        there is: the palette and the key bindings stay usable while a task's
+        there is: the palette and the key bindings stay usable while a command's
         output is on screen, rather than silently doing nothing. None only in
         the moment between the last conversation closing and its replacement
         being mounted.
@@ -213,9 +213,9 @@ class PaimonApp(App):
         await self._switcher.add_content(pane, set_current=True)
         self._sync_panes()
 
-    def _make_pane(self, agent: Agent, *, parent=None) -> SessionPane:
+    def _make_pane(self, agent: Agent, *, owner=None, job_id=None) -> SessionPane:
         """Register a pane for an agent. The caller mounts it."""
-        pane = SessionPane(agent, job_id=self._supervisor.new_id(), parent=parent,
+        pane = SessionPane(agent, job_id=job_id or self._supervisor.new_id(), owner=owner,
                            id=f"pane-{self._next_pane}", supervisor=self._supervisor)
         self._next_pane += 1
         self._panes.append(pane)
@@ -268,7 +268,7 @@ class PaimonApp(App):
         """
         if len(self._panes) >= MAX_PANES:
             raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
-        # Only conversations have an agent, so a task's pane is never asked
+        # Only conversations have an agent, so a command's pane is never asked
         # about one; the fallback is for an agent whose own pane has gone.
         owner = next((pane for pane in self.sessions if pane.agent is parent), None)
         if owner is None and (owner := self._session()) is None:
@@ -277,13 +277,10 @@ class PaimonApp(App):
             cwd=owner.cwd, mode=owner.mode, config=self.config, model_override=model,
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
-            parent=owner.agent.session.id,
+            parent_session_id=owner.agent.session.id,
             toolset=tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED),
         )
-        pane = SessionPane(agent, job_id=job_id, parent=parent,
-                           id=f"pane-{self._next_pane}", supervisor=self._supervisor)
-        self._next_pane += 1
-        self._panes.append(pane)
+        pane = self._make_pane(agent, owner=parent, job_id=job_id)
         try:
             await self._switcher.add_content(pane)
         except BaseException:
@@ -296,7 +293,7 @@ class PaimonApp(App):
         self._sync_panes()
         return pane.job
 
-    async def _launch_task(self, job_id: str, command, description: str) -> Job:
+    async def _launch_command(self, job_id: str, command, description: str) -> Job:
         """Open a background pane for a command a session asked to run.
 
         Hidden and unfocused for the same reason a spawned agent's pane is: the
@@ -308,7 +305,7 @@ class PaimonApp(App):
         if owner is None:
             raise SupervisorError("there is no conversation to attach a command to")
         job = CommandJob(job_id, command, description, parent=owner.agent)
-        pane = TaskPane(job, cwd=owner.cwd, mode=owner.mode, id=f"pane-{self._next_pane}")
+        pane = CommandPane(job, cwd=owner.cwd, mode=owner.mode, id=f"pane-{self._next_pane}")
         self._next_pane += 1
         self._panes.append(pane)
         try:
@@ -412,8 +409,8 @@ class PaimonApp(App):
     # The palette and the key bindings live on the app, but every one of these
     # acts on a single conversation, so they only route to the current pane.
 
-    # A task's pane has no session, no mode and no turn, so each of these is
-    # routed to a conversation rather than to whatever is on screen.
+    # A command's pane has no session, no mode and no turn, so each of these
+    # is routed to a conversation rather than to whatever is on screen.
 
     def action_new_session(self) -> None:
         if (pane := self._session()) is not None:
@@ -557,7 +554,7 @@ class PaimonApp(App):
         if isinstance(pane, SessionPane):
             parts = self._session_status(pane, tokens)
         else:
-            parts = [f"task {pane.job.job_id}", pane.status_text, pane.command.command]
+            parts = [f"command {pane.job.job_id}", pane.status_text, pane.command.command]
         # A pane blocked on a confirmation the user cannot see blocks whatever
         # is waiting on it, so the count follows them to every other pane.
         waiting = sum(1 for other in self._panes if other is not pane and other.needs_confirm)

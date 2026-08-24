@@ -32,7 +32,7 @@ from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
 from paimon.session import Session, is_agents_message
 from paimon.tabs import PaneTab
-from paimon.taskpane import TaskPane
+from paimon.commandpane import CommandPane
 from paimon.ui import (
     AssistantMessage,
     ConfirmPanel,
@@ -189,7 +189,7 @@ def hold_turn(pane) -> None:
     pane.job._turn = _HeldTurn()
 
 
-async def end_turn(pane, outcome: Outcome = Outcome.OK, error: str = "") -> None:
+async def end_turn(pane, outcome: Outcome = Outcome.SUCCESS, error: str = "") -> None:
     """Finish the held turn the way the driver would."""
     pane.job._turn = None
     await pane._end_turn(Result(outcome, error=error))
@@ -1329,7 +1329,7 @@ class SpawnAgentTest(AppTestCase):
                 parent = app.pane
                 child = await self._spawn(app, pilot)
 
-                self.assertEqual(child.agent.session.parent, parent.agent.session.id)
+                self.assertEqual(child.agent.session.parent_id, parent.agent.session.id)
                 listed = [session.id for session in Session.list(parent.agent.cwd)]
                 self.assertNotIn(child.agent.session.id, listed)
                 self.assertIn(child.agent.session.id,
@@ -1432,7 +1432,7 @@ class BackgroundTaskTest(AppTestCase):
         raise AssertionError("condition not reached")
 
     @staticmethod
-    def _pid(pane: TaskPane) -> int:
+    def _pid(pane: CommandPane) -> int:
         match = re.search(r"pid (\d+)", pane.command.output.since(0)[0].decode())
         assert match, "the command never printed its pid"
         return int(match.group(1))
@@ -1445,7 +1445,7 @@ class BackgroundTaskTest(AppTestCase):
             return False
         return True
 
-    async def _start(self, app: PaimonApp, pilot) -> TaskPane:
+    async def _start(self, app: PaimonApp, pilot) -> CommandPane:
         app.pane.handle_submit(PromptInput.Submitted("run the dev server"))
         await self._wait_for(pilot, lambda: len(app.panes) == 2)
         pane = app.panes[1]
@@ -1460,7 +1460,7 @@ class BackgroundTaskTest(AppTestCase):
                 parent = app.pane
                 task = await self._start(app, pilot)
 
-                self.assertIsInstance(task, TaskPane)
+                self.assertIsInstance(task, CommandPane)
                 self.assertIs(app.pane, parent, "starting a task does not switch panes")
                 self.assertFalse(task.display)
                 self.assertIs(app.focused, parent.query_one(PromptInput),
@@ -1491,7 +1491,7 @@ class BackgroundTaskTest(AppTestCase):
                               "the tab opens with the command it is running")
 
     @staticmethod
-    def _log_text(pane: TaskPane) -> str:
+    def _log_text(pane: CommandPane) -> str:
         return "\n".join(strip.text for strip in pane.query_one("#log", RichLog).lines)
 
     async def test_the_status_bar_follows_the_task(self) -> None:
@@ -1503,7 +1503,7 @@ class BackgroundTaskTest(AppTestCase):
                 await pilot.pause()
 
                 bar = str(app.query_one("#statusbar", Static).render())
-                self.assertIn(f"task {task.job.job_id}", bar)
+                self.assertIn(f"command {task.job.job_id}", bar)
                 self.assertIn("running", bar)
 
     async def test_closing_the_tab_stops_the_command(self) -> None:

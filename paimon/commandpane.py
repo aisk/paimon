@@ -30,7 +30,7 @@ _POLL_INTERVAL = 0.1
 _MAX_LINES = 5_000
 
 
-class TaskPane(Pane):
+class CommandPane(Pane):
     """A running command, streamed into a tab of its own."""
 
     def __init__(self, job: CommandJob, *, cwd, mode: str, id: str | None = None) -> None:
@@ -69,7 +69,7 @@ class TaskPane(Pane):
 
     @property
     def tab_title(self) -> str:
-        label = " ".join((self.job.description or self.command.command).split()) or "task"
+        label = " ".join((self.job.description or self.command.command).split()) or "command"
         return f"{self.job.job_id} {label}"
 
     @property
@@ -80,7 +80,7 @@ class TaskPane(Pane):
     def compose(self) -> ComposeResult:
         yield RichLog(id="log", wrap=True, markup=False, max_lines=_MAX_LINES,
                       auto_scroll=True)
-        yield Static(id="task-status")
+        yield Static(id="command-status")
 
     def on_mount(self) -> None:
         self.query_one("#log", RichLog).write(
@@ -173,7 +173,7 @@ class TaskPane(Pane):
             self._pending = b""
 
     def _refresh_status(self) -> None:
-        self.query_one("#task-status", Static).update(
-            Content(f"task {self.job.job_id}  ·  {self.status_text}"))
+        self.query_one("#command-status", Static).update(
+            Content(f"command {self.job.job_id}  ·  {self.status_text}"))
         if self.is_current:
             self.app.refresh_statusbar()

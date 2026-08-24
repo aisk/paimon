@@ -50,7 +50,7 @@ class State(str, Enum):
 class Outcome(str, Enum):
     """How one unit of work ended: one turn, or the command's whole run."""
 
-    OK = "ok"
+    SUCCESS = "success"
     # Cancelled on purpose. Not a failure, but not a finished turn either: the
     # caller must not treat what follows as an answer.
     INTERRUPTED = "interrupted"
@@ -68,7 +68,7 @@ class Result:
     @property
     def finished(self) -> bool:
         """Whether work ran to its own end, rather than being stopped."""
-        return self.outcome is Outcome.OK
+        return self.outcome is Outcome.SUCCESS
 
 
 @dataclass(frozen=True)
@@ -313,7 +313,7 @@ class AgentJob(Job):
             await self._emit(UserInput(prompt))
             async for event in self.agent.run(prompt):
                 await self._emit(event)
-            self.result = Result(Outcome.OK)
+            self.result = Result(Outcome.SUCCESS)
         except asyncio.CancelledError:
             self.result = Result(Outcome.INTERRUPTED)
             raise
@@ -385,7 +385,7 @@ class CommandJob(Job):
 
     async def _drive(self) -> None:
         code = await self.command.wait()
-        self.result = Result(Outcome.OK if code == 0 else Outcome.FAILED, exit_code=code)
+        self.result = Result(Outcome.SUCCESS if code == 0 else Outcome.FAILED, exit_code=code)
 
     def _retire(self) -> None:
         # The buffer belongs to the command object, which this job keeps

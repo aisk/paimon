@@ -341,22 +341,22 @@ class ChildSessionTest(SessionScanTestCase):
 
     def test_children_are_hidden_unless_asked_for(self) -> None:
         mine = self._session_with_message("mine", mtime=1_000)
-        child = Session.create(self.cwd, parent=mine.id)
+        child = Session.create(self.cwd, parent_id=mine.id)
         child.append_message(ModelRequest(parts=[UserPromptPart(content="theirs")]))
 
         self.assertEqual([session.id for session in Session.list(self.cwd)], [mine.id])
         listed = Session.list(self.cwd, include_children=True)
         self.assertEqual(sorted(session.id for session in listed), sorted([mine.id, child.id]))
-        self.assertEqual(next(s for s in listed if s.id == child.id).parent, mine.id)
+        self.assertEqual(next(s for s in listed if s.id == child.id).parent_id, mine.id)
 
     def test_a_fork_of_a_child_is_still_a_child(self) -> None:
         parent = Session.create(self.cwd)
-        child = Session.create(self.cwd, parent=parent.id)
+        child = Session.create(self.cwd, parent_id=parent.id)
         child.append_message(ModelRequest(parts=[UserPromptPart(content="theirs")]))
 
         forked = child.fork()
 
-        self.assertEqual(forked.parent, parent.id)
+        self.assertEqual(forked.parent_id, parent.id)
         self.assertNotIn(forked.id, [session.id for session in Session.list(self.cwd)])
 
 

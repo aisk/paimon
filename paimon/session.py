@@ -201,14 +201,14 @@ def resume_hint(session_id: str) -> str:
 class Session:
     """A session backed by an append-only JSONL event log."""
 
-    def __init__(self, path: Path, session_id: str, cwd: Path, parent: Optional[str] = None):
+    def __init__(self, path: Path, session_id: str, cwd: Path, parent_id: Optional[str] = None):
         self.path = path
         self.id = session_id
         self.cwd = cwd.resolve()
-        # The session that spawned this one, when it belongs to a subagent.
-        # Children share the project directory with the session that started
-        # them, so they are hidden from listings unless asked for.
-        self.parent = parent
+        # The id of the session that spawned this one, when it belongs to a
+        # subagent. Children share the project directory with the session that
+        # started them, so they are hidden from listings unless asked for.
+        self.parent_id = parent_id
         # Whether this session holds the process claim on its file. Claims are
         # refcounted per process, so unlocking twice would drop one somebody
         # else has since taken; this is what makes unlock() idempotent.
@@ -239,16 +239,16 @@ class Session:
         lockfile.release(self.path)
 
     @classmethod
-    def create(cls, cwd: Path, parent: Optional[str] = None) -> "Session":
+    def create(cls, cwd: Path, parent_id: Optional[str] = None) -> "Session":
         session_id = str(uuid4())
         directory = _project_dir(cwd)
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        session = cls(directory / f"{timestamp}-{session_id[:8]}.jsonl", session_id, cwd, parent)
+        session = cls(directory / f"{timestamp}-{session_id[:8]}.jsonl", session_id, cwd, parent_id)
         header = {"type": "session", "version": SESSION_FORMAT_VERSION, "id": session_id,
                   "cwd": str(session.cwd), "created_at": _now()}
-        if parent:
-            header["parent"] = parent
+        if parent_id:
+            header["parent_id"] = parent_id
         session.append(header)
         return session
 
@@ -265,8 +265,8 @@ class Session:
                   "cwd": str(self.cwd), "created_at": _now()}
         # A fork of a subagent's transcript is still subagent material, so it
         # inherits the parent and stays out of the listings for the same reason.
-        if self.parent:
-            header["parent"] = self.parent
+        if self.parent_id:
+            header["parent_id"] = self.parent_id
         lines = [json.dumps(header, ensure_ascii=False, separators=(",", ":"))]
         with self.path.open(encoding="utf-8") as file:
             for line in file:
@@ -283,7 +283,7 @@ class Session:
             os.fsync(fd)
         finally:
             os.close(fd)
-        return Session(path, session_id, self.cwd, self.parent)
+        return Session(path, session_id, self.cwd, self.parent_id)
 
     @classmethod
     def list(cls, cwd: Path, include_children: bool = False) -> list["Session"]:
@@ -309,12 +309,12 @@ class Session:
             if (header is None or header.get("type") != "session"
                     or not isinstance(header.get("id"), str)):
                 continue
-            parent = header.get("parent")
-            parent = parent if isinstance(parent, str) else None
-            if parent and not include_children:
+            parent_id = header.get("parent_id")
+            parent_id = parent_id if isinstance(parent_id, str) else None
+            if parent_id and not include_children:
                 continue
             if any(record.get("type") == "message" for record in records):
-                sessions.append(cls(path, header["id"], cwd, parent))
+                sessions.append(cls(path, header["id"], cwd, parent_id))
         return sessions
 
     @staticmethod

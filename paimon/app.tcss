@@ -80,9 +80,9 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 #response-status LoadingIndicator { width: 3; height: 1; color: $primary; }
 #response-status .status-label { width: auto; }
 #queued { height: auto; padding: 0 1; color: $text-muted; }
-/* A background task's tab: its output fills the pane, with one line under it
-   saying whether the command is still running. */
-#task-status { height: 1; padding: 0 1; color: $text-muted; }
+/* A background command's tab: its output fills the pane, with one line under
+   it saying whether the command is still running. */
+#command-status { height: 1; padding: 0 1; color: $text-muted; }
 #prompt {
     height: auto;
     min-height: 4;

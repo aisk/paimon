@@ -282,7 +282,7 @@ class SessionsTest(CommandTestCase):
         """`paimon -c` goes through latest_session, so an unfiltered list would
         silently resume some agent's session after an afternoon of them."""
         mine = self._make_session("my work")
-        child = Session.create(Path.cwd(), parent=mine.id)
+        child = Session.create(Path.cwd(), parent_id=mine.id)
         child.append_message(ModelRequest(parts=[UserPromptPart(content="their work")]))
 
         code, out, err = self._run("sessions", "--json")

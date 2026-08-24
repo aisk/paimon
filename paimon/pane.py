@@ -219,7 +219,7 @@ class Pane(Vertical):
     """What the app and the tab strip may assume about any pane.
 
     Two kinds share the strip: a conversation (``SessionPane``) and a
-    background command (``TaskPane``). Everything app-wide — switching,
+    background command (``CommandPane``). Everything app-wide — switching,
     closing, the tab label, the status bar — goes through this class, and only
     the session-specific actions look at the concrete type.
 
@@ -280,17 +280,17 @@ class Pane(Vertical):
 class SessionPane(Pane):
     """A single conversation: an agent, its rendered log and its prompt."""
 
-    def __init__(self, agent: Agent, *, job_id: str, parent=None, resumed: bool = False,
+    def __init__(self, agent: Agent, *, job_id: str, owner=None, resumed: bool = False,
                  id: str | None = None, supervisor=None) -> None:
         super().__init__(id=id)
         # The pool this pane's agent can start and talk to other agents through.
         self.supervisor = supervisor
-        # Whose subagent this conversation is, or None when the user opened
-        # it. It is what decides who may read and stop this pane's work, so it
-        # lives on the job; the pane keeps it to build the next one. Not named
-        # _parent: MessagePump owns that one, and assigning it takes the whole
-        # pane out of the DOM.
-        self._owner = parent
+        # The Agent whose subagent this conversation is, or None when the user
+        # opened it. It is what decides who may read and stop this pane's
+        # work, so it lives on the job; the pane keeps it to build the next
+        # one. (Not _parent: MessagePump owns that name, and assigning it
+        # takes the whole pane out of the DOM.)
+        self._owner = owner
         # Set before _adopt, which cancels whatever recap the pane had armed.
         self._recap_timer = None
         # Whether the turn now running has called a tool. A turn that only
@@ -546,7 +546,7 @@ class SessionPane(Pane):
         # handing off, even though the new conversation is nobody's subagent.
         agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
                            config=self.config, toolset=self.agent.toolset,
-                           parent=self.agent.session.parent)
+                           parent_session_id=self.agent.session.parent_id)
         killed = self._retire_agent()
         self._swap_agent(agent)
         self._title = ""
