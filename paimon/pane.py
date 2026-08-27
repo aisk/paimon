@@ -119,6 +119,11 @@ class _EventRenderer:
         self._reasoning_buf = ""
         self._first_text_block = True
         self._call_labels: dict[str, str] = {}
+        # The reasoning-and-tool-call that make up the step in progress, held
+        # in one box so the log reads in units instead of a flat stack of
+        # same-looking blocks. Open from ToolStart to its matching ToolEnd —
+        # tools run serially, so at most one is ever open.
+        self._step: Vertical | None = None
 
     async def handle(self, ev: object) -> None:
         if isinstance(ev, UserInput):
@@ -159,12 +164,15 @@ class _EventRenderer:
             await self._stream.write(ev.text)
 
         elif isinstance(ev, ToolStart):
-            # start fresh assistant/reasoning blocks after a tool runs
+            # The reasoning that led here (if any) moves into the step box
+            # with it; close() below would otherwise fold it loose in the log.
+            reasoning = self._reasoning
             await self.close()
+            step = await self._enter_step(reasoning)
             self._call_labels[ev.id] = (
                 f"{ev.name} {tools.summarize_call(ev.name, ev.args, limit=40)}"
             )
-            self._pane._add_tool_start(ev.name, ev.args)
+            self._pane._add_tool_start(ev.name, ev.args, container=step)
 
         elif isinstance(ev, TodosUpdate):
             await self.close()
@@ -172,7 +180,9 @@ class _EventRenderer:
 
         elif isinstance(ev, ToolEnd):
             label = self._call_labels.pop(ev.id, ev.name)
-            self._pane._add_tool_result(ev.result, label=label, denied=ev.denied)
+            self._pane._add_tool_result(ev.result, label=label, denied=ev.denied,
+                                         container=self._step)
+            self._step = None
 
         elif isinstance(ev, ContextCompacted):
             self._pane._add(
@@ -201,6 +211,21 @@ class _EventRenderer:
                     total=str(ev.max_attempts - 1),
                 )
             )
+
+    async def _enter_step(self, reasoning: FoldedText | None) -> Vertical:
+        """The box the tool call about to start belongs in.
+
+        Reused across a burst of calls with nothing in between (ToolEnd
+        clears ``_step`` first), so only a call preceded by its own reasoning
+        gets one to itself.
+        """
+        step = Vertical(classes="tool-step")
+        await self._pane.query_one("#log", VerticalScroll).mount(step)
+        if reasoning is not None:
+            await reasoning.remove()
+            await step.mount(reasoning)
+        self._step = step
+        return step
 
     async def close(self) -> None:
         """End the current text/reasoning blocks so the next output starts fresh."""
@@ -687,8 +712,8 @@ class SessionPane(Pane):
         if visible and label:
             status.query_one(".status-label", Static).update(label)
 
-    def _add_tool_start(self, name: str, args: dict) -> Widget:
-        log = self.query_one("#log", VerticalScroll)
+    def _add_tool_start(self, name: str, args: dict, *, container: Widget | None = None) -> Widget:
+        log = container if container is not None else self.query_one("#log", VerticalScroll)
         if name == "edit_file":
             path = str(args.get("path") or "")
             old = str(args.get("old_string") or "")
@@ -703,9 +728,10 @@ class SessionPane(Pane):
         return widget
 
     def _add_tool_result(
-        self, result: str, *, label: str = "", denied: bool = False
+        self, result: str, *, label: str = "", denied: bool = False,
+        container: Widget | None = None,
     ) -> ToolResult:
-        log = self.query_one("#log", VerticalScroll)
+        log = container if container is not None else self.query_one("#log", VerticalScroll)
         widget = ToolResult(result, label=label, denied=denied)
         log.mount(widget)
         return widget

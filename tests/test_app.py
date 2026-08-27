@@ -319,7 +319,8 @@ class ResumeSessionTest(AppTestCase):
         return session
 
     def _log_text(self, app: PaimonApp) -> str:
-        return " ".join(str(widget.render()) for widget in app.query_one("#log").children)
+        return " ".join(str(widget.render())
+                         for widget in app.query_one("#log").walk_children())
 
     async def test_palette_resume_swaps_agent_and_renders_history(self) -> None:
         old = self._old_session()
@@ -852,7 +853,8 @@ class HandoffTest(AppTestCase):
 
     @staticmethod
     def _log_text(app: PaimonApp) -> str:
-        return " ".join(str(widget.render()) for widget in app.query_one("#log").children)
+        return " ".join(str(widget.render())
+                         for widget in app.query_one("#log").walk_children())
 
     @staticmethod
     async def _wait_for(pilot, condition) -> None:
@@ -1013,7 +1015,11 @@ class MultiPaneTest(AppTestCase):
 
     @staticmethod
     def _log_text(pane: SessionPane) -> str:
-        return " ".join(str(widget.render()) for widget in pane.query_one("#log").children)
+        # Not just direct children: a tool call and its result now nest one
+        # level deeper, inside the step box that groups them with the
+        # reasoning that led to the call.
+        return " ".join(str(widget.render())
+                         for widget in pane.query_one("#log").walk_children())
 
     @staticmethod
     def _tab_text(app, pane: SessionPane) -> str:

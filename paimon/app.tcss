@@ -49,6 +49,9 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .assistant { padding: 0 1; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-disabled; }
+/* One step: the reasoning that led to a tool call, the call and its result,
+   held in one box instead of reading as separate same-looking paragraphs. */
+.tool-step { height: auto; padding: 0 1; border-left: solid $surface-lighten-2; }
 .edit-call { height: auto; }
 .edit-call-diff { margin-top: 1; }
 .todos { padding: 0 1; border-left: solid $primary 45%; }
