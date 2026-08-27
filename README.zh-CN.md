@@ -103,6 +103,102 @@ paimon --profile work               # 单独配置的另一个账号
 
 read 和 edit 模式会不经询问执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉。**这是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
+## 架构
+
+`Agent.run` 产出一串与 UI 无关的事件流，TUI、`--web` 和无头模式都是这条事件流的渲染器。`Supervisor` 位于 agent 和它启动的子 agent、后台命令之间，是两者共同的权限边界。
+
+```mermaid
+flowchart TD
+    subgraph entry["入口"]
+        CLI["cli.py"]
+        Commands["commands.py<br/>status / login / sessions"]
+        Headless["headless.py<br/>-p，单次运行"]
+        App["app.py<br/>Textual TUI / --web"]
+    end
+
+    subgraph tui["TUI 组件"]
+        Pane["pane.py<br/>SessionPane"]
+        CommandPane["commandpane.py<br/>后台命令 pane"]
+        Tabs["tabs.py<br/>pane 标签栏"]
+        Login["login.py<br/>provider / 模型 / key"]
+        UIWidgets["ui.py<br/>输入框、确认面板"]
+        Diff["diff.py<br/>并排 diff 渲染"]
+    end
+
+    subgraph core["Agent 主循环"]
+        AgentLoop["agent.py<br/>Agent.run()"]
+        LLM["llm.py<br/>build_model()"]
+        PromptMod["prompt.py<br/>system prompt"]
+        ToolsMod["tools.py<br/>工具注册表"]
+        SessionMod["session.py<br/>JSONL 持久化"]
+        Compaction["compaction.py"]
+        ModelWindows["model_windows.py<br/>各模型上下文窗口大小"]
+        Retry["retry.py"]
+        Mentions["mentions.py<br/>@path 展开"]
+        Aside["aside.py<br/>回合外提问，不落盘"]
+    end
+
+    subgraph concurrency["任务与子 agent"]
+        Supervisor["supervisor.py<br/>任务池、权限"]
+        Jobs["jobs.py<br/>AgentJob / CommandJob"]
+        AgentTypes["agents.py<br/>子 agent 类型"]
+    end
+
+    subgraph support["配置与 skills"]
+        Config["config.py<br/>profile、凭证"]
+        Skills["skills.py<br/>Agent Skills 发现"]
+    end
+
+    CLI --> Commands
+    CLI --> Headless
+    CLI --> App
+    CLI --> Config
+
+    Headless --> AgentLoop
+    Headless --> Mentions
+
+    App --> Pane
+    App --> CommandPane
+    App --> Tabs
+    App --> Login
+    App --> Supervisor
+    App --> Config
+
+    Pane --> AgentLoop
+    Pane --> Aside
+    Pane --> Diff
+    Pane --> UIWidgets
+    Pane --> LLM
+    CommandPane --> Pane
+    UIWidgets --> Diff
+
+    AgentLoop --> LLM
+    AgentLoop --> PromptMod
+    AgentLoop --> ToolsMod
+    AgentLoop --> SessionMod
+    AgentLoop --> Compaction
+    AgentLoop --> Retry
+    AgentLoop --> Mentions
+    AgentLoop -. "spawn_agent / run_background" .-> Supervisor
+
+    Aside --> Retry
+    Aside --> SessionMod
+
+    PromptMod --> Skills
+    Compaction --> ModelWindows
+
+    Supervisor --> Jobs
+    Supervisor --> AgentTypes
+    Supervisor --> ToolsMod
+    Supervisor -. "启动回调" .-> App
+    Jobs --> AgentLoop
+
+    AgentTypes --> ToolsMod
+    AgentTypes --> Config
+    Skills --> Config
+    Config --> LLM
+```
+
 ## 遥测
 
 每次启动会向 Google Analytics 发送一条匿名事件：随机生成的安装 id、启动方式、版本号、操作系统名称，以及配置的 provider 和模型名。会话、提示词、文件和密钥一概不上报。设置 `PAIMON_NO_TELEMETRY=1` 或 `DO_NOT_TRACK=1` 可以关闭。

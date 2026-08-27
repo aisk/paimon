@@ -103,6 +103,102 @@ Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, 
 
 Read and edit modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns that off. **This is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
 
+## Architecture
+
+`Agent.run` is a UI-agnostic stream of events; the TUI, `--web` and headless mode are three renderers over that one stream. `Supervisor` sits between an agent and the subagents or background commands it starts, and is the permission boundary for both.
+
+```mermaid
+flowchart TD
+    subgraph entry["Entry points"]
+        CLI["cli.py"]
+        Commands["commands.py<br/>status / login / sessions"]
+        Headless["headless.py<br/>-p, one-shot"]
+        App["app.py<br/>Textual TUI / --web"]
+    end
+
+    subgraph tui["TUI widgets"]
+        Pane["pane.py<br/>SessionPane"]
+        CommandPane["commandpane.py<br/>background command pane"]
+        Tabs["tabs.py<br/>pane strip"]
+        Login["login.py<br/>provider / model / key"]
+        UIWidgets["ui.py<br/>prompt input, confirmations"]
+        Diff["diff.py<br/>side-by-side diff rendering"]
+    end
+
+    subgraph core["Agent loop"]
+        AgentLoop["agent.py<br/>Agent.run()"]
+        LLM["llm.py<br/>build_model()"]
+        PromptMod["prompt.py<br/>system prompt"]
+        ToolsMod["tools.py<br/>tool REGISTRY"]
+        SessionMod["session.py<br/>JSONL persistence"]
+        Compaction["compaction.py"]
+        ModelWindows["model_windows.py<br/>context window sizes"]
+        Retry["retry.py"]
+        Mentions["mentions.py<br/>@path expansion"]
+        Aside["aside.py<br/>off-turn question, unrecorded"]
+    end
+
+    subgraph concurrency["Jobs & subagents"]
+        Supervisor["supervisor.py<br/>job pool, permissions"]
+        Jobs["jobs.py<br/>AgentJob / CommandJob"]
+        AgentTypes["agents.py<br/>subagent types"]
+    end
+
+    subgraph support["Config & skills"]
+        Config["config.py<br/>profiles, credentials"]
+        Skills["skills.py<br/>Agent Skills discovery"]
+    end
+
+    CLI --> Commands
+    CLI --> Headless
+    CLI --> App
+    CLI --> Config
+
+    Headless --> AgentLoop
+    Headless --> Mentions
+
+    App --> Pane
+    App --> CommandPane
+    App --> Tabs
+    App --> Login
+    App --> Supervisor
+    App --> Config
+
+    Pane --> AgentLoop
+    Pane --> Aside
+    Pane --> Diff
+    Pane --> UIWidgets
+    Pane --> LLM
+    CommandPane --> Pane
+    UIWidgets --> Diff
+
+    AgentLoop --> LLM
+    AgentLoop --> PromptMod
+    AgentLoop --> ToolsMod
+    AgentLoop --> SessionMod
+    AgentLoop --> Compaction
+    AgentLoop --> Retry
+    AgentLoop --> Mentions
+    AgentLoop -. "spawn_agent / run_background" .-> Supervisor
+
+    Aside --> Retry
+    Aside --> SessionMod
+
+    PromptMod --> Skills
+    Compaction --> ModelWindows
+
+    Supervisor --> Jobs
+    Supervisor --> AgentTypes
+    Supervisor --> ToolsMod
+    Supervisor -. "launch callback" .-> App
+    Jobs --> AgentLoop
+
+    AgentTypes --> ToolsMod
+    AgentTypes --> Config
+    Skills --> Config
+    Config --> LLM
+```
+
 ## Telemetry
 
 Each launch sends one anonymous event to Google Analytics: a random install id, the launch mode, the version, the OS name and the configured provider and model name. Nothing from your sessions, prompts, files or credentials is included. Set `PAIMON_NO_TELEMETRY=1` or `DO_NOT_TRACK=1` to turn it off.
