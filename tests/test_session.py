@@ -20,6 +20,10 @@ from paimon.session import (
     SessionBusyError,
     SessionError,
     _project_dir,
+    is_shell_message,
+    is_synthetic_user_text,
+    shell_message,
+    shell_text,
 )
 
 
@@ -83,6 +87,31 @@ class PreviewTest(SessionScanTestCase):
 
     def test_first_user_text_none_for_empty_session(self) -> None:
         self.assertIsNone(Session.create(self.cwd).first_user_text())
+
+    def test_first_user_text_skips_a_shell_run(self) -> None:
+        """A "!" command is paimon's message, not the user's, so it can be
+        neither the session's title nor its preview."""
+        session = Session.create(self.cwd)
+        session.append_message(shell_message("ls", "a.txt"))
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="fix the bug")]))
+
+        self.assertEqual(session.first_user_text(), "fix the bug")
+
+
+class ShellMessageTest(unittest.TestCase):
+    def test_command_and_output_survive_the_round_trip(self) -> None:
+        message = shell_message("git log --oneline -n 2", "1e34a91 x\n1a3bbc1 y")
+        self.assertTrue(is_shell_message(message))
+        self.assertEqual(shell_text(message),
+                         ("git log --oneline -n 2", "1e34a91 x\n1a3bbc1 y"))
+
+    def test_a_command_with_no_output_round_trips_too(self) -> None:
+        self.assertEqual(shell_text(shell_message("true", "")), ("true", ""))
+
+    def test_an_ordinary_user_message_is_not_one(self) -> None:
+        message = ModelRequest(parts=[UserPromptPart(content="$ ls")])
+        self.assertFalse(is_shell_message(message))
+        self.assertFalse(is_synthetic_user_text("$ ls"))
 
 
 class EntriesTest(SessionScanTestCase):

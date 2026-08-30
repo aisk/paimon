@@ -27,6 +27,7 @@ EVENT_SAMPLES = {
     "UserInput": ("hi",),
     "CompactionNotice": (),
     "AgentsNotice": ("a1f2 finished",),
+    "ShellRun": ("ls", "a.txt"),
 }
 
 # Events a renderer may legitimately draw nothing for.

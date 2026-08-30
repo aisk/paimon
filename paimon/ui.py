@@ -221,7 +221,8 @@ class PromptInput(TextArea):
 
     Up on the first line / Down on the last line walk previously submitted
     prompts, bash-style; walking past the newest entry restores the draft.
-    "/" in an empty editor opens the command palette.
+    "/" in an empty editor opens the command palette, and a leading "!" turns
+    the line into a shell command the pane runs on submit.
     """
 
     class Submitted(Message):
@@ -299,6 +300,13 @@ class PromptInput(TextArea):
         else:
             self._history_index = None
             self._recall(self._draft)
+
+    def on_text_area_changed(self) -> None:
+        """Mark the editor while it holds a shell command, so the border says
+        what Enter is about to do. The "!" stays in the text rather than being
+        held as a mode: history, paste and the cursor all keep working on the
+        line as typed."""
+        self.set_class(self.text.startswith("!"), "bash")
 
 
 class ConfirmPanel(Vertical, can_focus=True):

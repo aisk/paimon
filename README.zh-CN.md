@@ -26,7 +26,7 @@ uvx paimon
 
 首次启动会询问 provider、模型、API base 和 key。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
-运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 写文件或执行命令前先询问，**edit** 放行工作目录内的编辑，**yolo** 从不询问，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。
+运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 写文件或执行命令前先询问，**edit** 放行工作目录内的编辑，**yolo** 从不询问，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
 `Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 自己也能开 pane：让它同时做两件互不相干的事，它会在新 tab 里起第二个 agent。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
 

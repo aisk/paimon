@@ -1429,6 +1429,17 @@ async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> st
     return f"{out}\n{status}" if out.strip() else status
 
 
+async def user_shell(command: str, cwd: Path, ctx: Optional[ToolContext] = None) -> str:
+    """Run a command the user typed themselves, with no permission gate.
+
+    The TUI's "!" prefix. Same execution as the shell tool — same timeout, the
+    same process group killed on interrupt, the same tail kept with the rest
+    spilled to a file — so a command the user runs and one the model runs
+    behave alike and read alike in the log.
+    """
+    return await _shell({"command": command}, cwd, ctx)
+
+
 # ---- background commands ---------------------------------------------------
 #
 # A command that outlives the turn that started it: no timeout, no result, just

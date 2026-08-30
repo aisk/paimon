@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from uuid import uuid4
 
+from pydantic_ai.messages import ModelRequest
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -32,6 +33,7 @@ from .agent import (
     ReasoningDelta,
     RequestStats,
     SessionHandoff,
+    ShellRun,
     TextDelta,
     TodosUpdate,
     ToolEnd,
@@ -43,7 +45,7 @@ from .agent import (
 from .diff import locate_line
 from .jobs import AgentJob, Outcome, Result, State, TurnOver
 from .login import PickerScreen
-from .session import Session, SessionError, resume_hint
+from .session import Session, SessionError, resume_hint, shell_message
 from .skills import parse_skill_block
 from .ui import (
     AssistantMessage,
@@ -140,6 +142,15 @@ class _EventRenderer:
             await self.close()
             self._first_text_block = True
             self._pane._add(Content.from_markup("[$text-muted]Agents: $text[/]", text=ev.text))
+
+        elif isinstance(ev, ShellRun):
+            # Replay only: a command run live is logged as it happens, by the
+            # worker that runs it, so its output is on screen before the model
+            # ever hears about it.
+            await self.close()
+            self._first_text_block = True
+            step = await self._pane._add_shell_call(ev.command)
+            self._pane._add_tool_result(ev.output, label=ev.command, container=step)
 
         elif isinstance(ev, ReasoningDelta):
             self._reasoning_buf += ev.text
@@ -342,6 +353,12 @@ class SessionPane(Pane):
         self._status_timer = None
         self._todo_panel: Static | None = None
         self._queue: list[str] = []
+        # Finished "!" runs waiting for a gap in the running turn to be
+        # appended to the history. Kept apart from ``_queue``: these already
+        # happened and are on screen, so they are not pending work the user
+        # can take back.
+        self._pending_shell: list[tuple[str, str]] = []
+        self._shell_worker = None
         self._pending_handoff: str | None = None
         self._tps: float | None = None
         # Cumulative over the session: single-request rates swing with each
@@ -535,6 +552,12 @@ class SessionPane(Pane):
         again. Returns the ids, for the caller to report.
         """
         killed = self.supervisor.kill_children(self.agent) if self.supervisor is not None else []
+        # A "!" command outlives neither the session it was run in nor the
+        # pane: it holds a process tree, and nothing left would read its
+        # output.
+        worker, self._shell_worker = self._shell_worker, None
+        if worker is not None:
+            worker.cancel()
         self.job.cancel()
         if self.supervisor is not None:
             self.supervisor.released(self.job)
@@ -579,6 +602,7 @@ class SessionPane(Pane):
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
+        self._pending_shell.clear()
         self._refresh_queued()
         self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._report_killed(killed)
@@ -637,6 +661,7 @@ class SessionPane(Pane):
         self.query_one("#log", VerticalScroll).remove_children()
         self._todo_panel = None
         self._queue.clear()
+        self._pending_shell.clear()
         self._refresh_queued()
         await self._show_resumed()
         self._report_killed(killed)
@@ -809,11 +834,71 @@ class SessionPane(Pane):
         text = event.text
         self._cancel_recap()
         self.query_one(PromptInput).clear()
+        # "!" runs the rest of the line in a shell instead of sending it, and
+        # "!!" does the same without telling the model. Handled before the
+        # busy check: a command is the user's own, so it runs while a turn is
+        # in flight rather than queueing behind it.
+        if text.startswith("!"):
+            quiet = text.startswith("!!")
+            command = text[2:].strip() if quiet else text[1:].strip()
+            if command:
+                self.run_user_command(command, record=not quiet)
+            return
         if self.is_busy:
             self._queue.append(text)
             self._refresh_queued()
             return
         self.job.submit(text)
+
+    def run_user_command(self, command: str, *, record: bool = True) -> None:
+        """Run a "!" command, log it, and let the model in on it unless quiet."""
+        if self._shell_worker is not None:
+            self._add(Content.from_markup(
+                "[$text-muted]A command is already running — Esc cancels it[/]"))
+            return
+        self._shell_worker = self._user_command(command, record)
+
+    @work(group="user-command")
+    async def _user_command(self, command: str, record: bool) -> None:
+        """One "!" run: the command line goes up first, the output when it ends.
+
+        Not a turn, so it neither waits for one nor blocks one. Where the
+        result lands does depend on a turn: between turns it is appended to
+        the history at once, and during one it waits for the gap between
+        steps, since a message inserted between a tool call and its result is
+        the one shape providers reject.
+        """
+        step = await self._add_shell_call(command)
+        try:
+            output = await self.agent.run_shell(command)
+        except asyncio.CancelledError:
+            # The process tree is already dead (the tool kills it on the way
+            # out); what it managed to print went with it, so there is nothing
+            # worth telling the model about.
+            if not self._pane_closing:
+                self._add_tool_result("(interrupted)", label=command, container=step)
+            raise
+        finally:
+            self._shell_worker = None
+        if self._pane_closing:
+            return
+        self._add_tool_result(output, label=command, container=step)
+        if record:
+            if self.is_busy:
+                self._pending_shell.append((command, output))
+            else:
+                self.agent.record_shell(command, output)
+
+    async def _add_shell_call(self, command: str) -> Vertical:
+        """The box a "!" run is logged in, with its command line already in it.
+
+        Awaited, since the result mounts into the box the moment the command
+        exits and a container has to be mounted before anything goes in it.
+        """
+        step = Vertical(classes="shell-step")
+        await self.query_one("#log", VerticalScroll).mount(step)
+        await step.mount(ToolCall("!", command))
+        return step
 
     def _refresh_queued(self) -> None:
         widget = self.query_one("#queued", Static)
@@ -825,21 +910,43 @@ class SessionPane(Pane):
         lines = "\n".join(f"[$text-muted]⏸ ${key}[/]" for key in kwargs)
         widget.update(Content.from_markup(lines, **kwargs))
 
-    def _take_queued(self) -> list[str]:
+    def _take_queued(self) -> list[str | ModelRequest]:
         """Hand the queued messages to the running turn, which injects them.
 
         Called from the agent loop, which runs on this app's event loop, so
-        touching the panel from here is safe.
+        touching the panel from here is safe. Finished "!" runs go first: they
+        happened before anything still sitting in the queue was typed.
         """
-        if self._pane_closing or not self._queue:
+        if self._pane_closing or not (self._queue or self._pending_shell):
             return []
+        runs, self._pending_shell = self._pending_shell, []
         texts, self._queue = self._queue, []
         self._refresh_queued()
-        return texts
+        return [shell_message(*run) for run in runs] + texts
+
+    def _flush_pending_shell(self) -> None:
+        """Append "!" runs the turn ended before it came back for.
+
+        The loop drains the queue between steps, so a command that finished
+        during the last step of a turn is still waiting when it ends.
+        """
+        if self._pane_closing or not self._pending_shell:
+            return
+        runs, self._pending_shell = self._pending_shell, []
+        for command, output in runs:
+            self.agent.record_shell(command, output)
 
     def interrupt(self) -> None:
         # Esc stops whatever this pane is doing on its own, a recap included.
         self._cancel_recap()
+        # A "!" command runs beside the turn rather than inside it, so Esc has
+        # two things to stop. The command goes first and alone: it is the more
+        # immediate one, a second Esc still reaches the turn, and a process
+        # tree nobody is waiting on cannot be reached any other way.
+        worker, self._shell_worker = self._shell_worker, None
+        if worker is not None:
+            worker.cancel()
+            return
         self.job.interrupt()
 
     # ---- idle recap ---------------------------------------------------------
@@ -976,6 +1083,9 @@ class SessionPane(Pane):
         """
         await self._renderer.close()
         self._set_state(None)
+        # Before the queue below, which may start the next turn: a "!" run
+        # from during this one belongs to the history it happened in.
+        self._flush_pending_shell()
         if self._status_timer is not None:
             self._status_timer.stop()
             self._status_timer = None

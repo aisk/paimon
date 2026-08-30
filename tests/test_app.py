@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import RichLog, Static
 from textual.widgets.markdown import MarkdownBlock
+from textual.worker import WorkerCancelled
 from helpers import SILENT_EVENTS, agent_events, stub_model
 from paimon import agents, aside, lockfile, tools
 from paimon.agent import Agent, ReasoningDelta, RequestStats, ToolEnd, ToolStart
@@ -30,7 +32,14 @@ from paimon.pane import SessionPane, _EventRenderer, _session_label
 from paimon import skills
 from paimon.config import Config
 from paimon.login import LoginScreen, PickerScreen
-from paimon.session import Session, is_agents_message
+from paimon.agent import replay_events
+from paimon.session import (
+    Session,
+    is_agents_message,
+    is_shell_message,
+    shell_message,
+    shell_text,
+)
 from paimon.tabs import PaneTab
 from paimon.commandpane import CommandPane
 from paimon.ui import (
@@ -543,6 +552,131 @@ class EventCoverageTest(AppTestCase):
                     continue
                 self.assertGreater(len(log.children), before, f"{name} rendered nothing")
             await renderer.close()
+
+
+class UserCommandTest(AppTestCase):
+    """The "!" prefix: a command the user runs themselves, beside the turn."""
+
+    @staticmethod
+    async def _run(app, pilot, text: str) -> None:
+        prompt = app.query_one(PromptInput)
+        prompt.focus()
+        prompt.load_text(text)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    async def test_command_is_logged_and_recorded(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._run(app, pilot, "!echo hi")
+
+            self.assertEqual(app.query_one(PromptInput).text, "")
+            call = app.query(ToolCall).first()
+            self.assertIn("echo hi", str(call.render()))
+            self.assertIn("hi", str(app.query(ToolResult).first().render()))
+
+            message = app.pane.agent.history[-1]
+            self.assertTrue(is_shell_message(message))
+            command, output = shell_text(message)
+            self.assertEqual(command, "echo hi")
+            self.assertIn("hi", output)
+            # Not the session's title: paimon wrote it, not the user.
+            self.assertIsNone(app.pane.agent.session.first_user_text())
+
+    async def test_double_bang_runs_without_telling_the_model(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._run(app, pilot, "!!echo hi")
+            self.assertIn("hi", str(app.query(ToolResult).first().render()))
+            self.assertEqual(app.pane.agent.history, [])
+
+    async def test_a_bare_bang_runs_nothing(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._run(app, pilot, "!   ")
+            self.assertEqual(len(app.query(ToolCall)), 0)
+            self.assertEqual(app.pane.agent.history, [])
+
+    async def test_running_during_a_turn_waits_for_the_gap_between_steps(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            hold_turn(app.pane)
+            await self._run(app, pilot, "!echo hi")
+
+            # The turn owns the history until it comes back for the queue.
+            self.assertEqual(app.pane.agent.history, [])
+            self.assertIn("hi", str(app.query(ToolResult).first().render()))
+
+            queued = app.pane._take_queued()
+            self.assertTrue(is_shell_message(queued[0]))
+
+    async def test_a_run_the_turn_never_came_back_for_is_flushed(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            hold_turn(app.pane)
+            await self._run(app, pilot, "!echo hi")
+            await end_turn(app.pane)
+            self.assertTrue(is_shell_message(app.pane.agent.history[-1]))
+
+    async def test_queued_runs_come_before_queued_prompts(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            hold_turn(app.pane)
+            await self._run(app, pilot, "!echo hi")
+            await self._run(app, pilot, "and now this")
+
+            queued = app.pane._take_queued()
+            self.assertTrue(is_shell_message(queued[0]))
+            self.assertEqual(queued[1], "and now this")
+
+    async def test_a_second_command_is_refused_while_one_runs(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.pane._shell_worker = object()
+            app.pane.run_user_command("echo hi")
+            await pilot.pause()
+            self.assertEqual(len(app.query(ToolCall)), 0)
+
+    async def test_escape_stops_the_command_before_the_turn(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            hold_turn(app.pane)
+            interrupted = []
+            app.pane.job.interrupt = lambda: interrupted.append(True)
+
+            app.pane.run_user_command("sleep 30")
+            await pilot.pause()
+            app.pane.interrupt()
+            with contextlib.suppress(WorkerCancelled):
+                await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            self.assertEqual(interrupted, [])  # the turn is still running
+            self.assertIn("interrupted", str(app.query(ToolResult).first().render()))
+            self.assertEqual(app.pane._pending_shell, [])
+            # A second Esc, with no command left to stop, reaches the turn.
+            app.pane.interrupt()
+            self.assertEqual(interrupted, [True])
+
+    async def test_replayed_history_shows_the_run_again(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app.pane)
+            for event in replay_events([shell_message("echo hi", "hi")]):
+                await renderer.handle(event)
+            await pilot.pause()
+            self.assertIn("echo hi", str(app.query(ToolCall).first().render()))
+            self.assertIn("hi", str(app.query(ToolResult).first().render()))
+
+    async def test_the_border_marks_a_line_that_will_run(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptInput)
+            await pilot.press("!")
+            self.assertIn("bash", prompt.classes)
+            await pilot.press("backspace")
+            self.assertNotIn("bash", prompt.classes)
 
 
 class ToolRenderingTest(AppTestCase):

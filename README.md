@@ -26,7 +26,7 @@ uvx paimon
 
 The first launch asks for a provider, model, API base and key. Then just type what you want done. Write `@path/to/file` in a prompt to hand a file to the agent.
 
-While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** asks before writing files or running commands, **edit** lets edits inside the working directory through, **yolo** never asks and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits.
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** asks before writing files or running commands, **edit** lets edits inside the working directory through, **yolo** never asks and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
 
 `Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can open panes itself: ask for two independent things and it starts a second agent in its own tab. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
 

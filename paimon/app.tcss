@@ -52,6 +52,9 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 /* One step: the reasoning that led to a tool call, the call and its result,
    held in one box instead of reading as separate same-looking paragraphs. */
 .tool-step { height: auto; padding: 0 1; border-left: solid $surface-lighten-2; }
+/* A "!" command the user ran themselves: the same box as a step, told apart
+   by its rule, since nothing the model did led to it. */
+.shell-step { height: auto; padding: 0 1; border-left: solid $accent; }
 .edit-call { height: auto; }
 .edit-call-diff { margin-top: 1; }
 .todos { padding: 0 1; border-left: solid $primary 45%; }
@@ -95,6 +98,8 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     background: transparent;
 }
 #prompt:focus { border: round $primary; background: transparent; }
+/* A line starting with "!" runs as a shell command instead of being sent. */
+#prompt.bash, #prompt.bash:focus { border: round $accent; }
 #statusbar { height: 1; margin: 0 2 1 2; padding: 0 1; color: $text-muted; }
 
 /* ---- permission confirmation ---- */

@@ -246,7 +246,8 @@ class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
         renderer = headless.JsonRenderer(out, _config())
         renderer.begin("sid")
         for event in agent_events():
-            if type(event).__name__ in SILENT_EVENTS | {"UserInput", "CompactionNotice"}:
+            if type(event).__name__ in SILENT_EVENTS | {"UserInput", "CompactionNotice",
+                                                         "ShellRun"}:
                 continue  # replay-only: never reaches a headless run
             before = out.getvalue()
             await renderer.handle(event)

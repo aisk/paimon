@@ -38,6 +38,10 @@ SUMMARY_PREFIX = ("The conversation before this point was compacted into this ch
 # finished without anything having to interrupt the user.
 AGENTS_PREFIX = "[agents] "
 
+# The third: a shell command the user ran themselves with the "!" prefix,
+# recorded so the model sees what they just did without a turn having to run.
+SHELL_PREFIX = "[shell] "
+
 # The session log format this build writes and the highest it reads. Bump it
 # when a change would make older Paimons misread the log; headers without a
 # version are format 1, from before the field existed. A log from a NEWER
@@ -102,12 +106,38 @@ def agents_text(message: ModelMessage) -> str:
     return ""
 
 
+def shell_message(command: str, output: str) -> ModelRequest:
+    """The synthetic user message carrying a command the user ran themselves.
+
+    The command and its output are one user message rather than a tool call
+    and its result: no model asked for this, and a tool result with no call to
+    match is exactly the shape providers reject.
+    """
+    return ModelRequest(parts=[UserPromptPart(
+        content=f"{SHELL_PREFIX}$ {command}\n{output}")])
+
+
+def is_shell_message(message: ModelMessage) -> bool:
+    return _has_prefixed_user_text(message, SHELL_PREFIX)
+
+
+def shell_text(message: ModelMessage) -> tuple[str, str]:
+    """The (command, output) a shell message carries, without its marker."""
+    for part in getattr(message, "parts", []):
+        if (isinstance(part, UserPromptPart) and isinstance(part.content, str)
+                and part.content.startswith(SHELL_PREFIX)):
+            command, _, output = part.content[len(SHELL_PREFIX):].partition("\n")
+            return command.removeprefix("$ "), output
+    return "", ""
+
+
 def is_synthetic_user_text(content: str) -> bool:
     """Whether a user-prompt string is one paimon wrote rather than the user.
 
     Previews, titles and "where does a turn start" all have to skip these.
     """
-    return content.startswith(SUMMARY_PREFIX) or content.startswith(AGENTS_PREFIX)
+    return (content.startswith(SUMMARY_PREFIX) or content.startswith(AGENTS_PREFIX)
+            or content.startswith(SHELL_PREFIX))
 
 
 def dump_message(message: ModelMessage) -> dict:

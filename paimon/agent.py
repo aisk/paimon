@@ -42,7 +42,10 @@ from .session import (
     agents_message,
     agents_text,
     is_agents_message,
+    is_shell_message,
     is_summary_message,
+    shell_message,
+    shell_text,
 )
 
 # Transient compaction failures tolerated in one turn before it is left off.
@@ -167,13 +170,26 @@ class AgentsNotice:
     text: str
 
 
+@dataclass
+class ShellRun:
+    """A command the user ran themselves with the "!" prefix.
+
+    Like AgentsNotice this is not replay-only: the run is persisted as a
+    synthetic user message, so it is both yielded when it happens and rebuilt
+    when the session is resumed.
+    """
+
+    command: str
+    output: str
+
+
 # Everything ``Agent.run`` and ``replay_events`` can yield. Renderers dispatch
 # on isinstance; the alias exists so a type checker can flag an unhandled one.
 AgentEvent = (
     TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
     | SessionHandoff | RequestStats | ToolBudgetExhausted | TurnEnd
     | ContextCompacted | ContextCompactionFailed | ModelRetry | UserInput
-    | CompactionNotice | AgentsNotice
+    | CompactionNotice | AgentsNotice | ShellRun
 )
 
 
@@ -207,6 +223,9 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
             continue
         if is_agents_message(message):
             events.append(AgentsNotice(agents_text(message)))
+            continue
+        if is_shell_message(message):
+            events.append(ShellRun(*shell_text(message)))
             continue
         if isinstance(message, ModelRequest):
             for part in message.parts:
@@ -288,10 +307,13 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
 # Re-exported so UI code can keep importing it from here.
 ConfirmFn = tools.ConfirmFn
 
-# Takes the messages a user queued while a turn was already running, clearing
-# the queue as it goes. The loop calls it before every model request, so what
-# it returns reaches the model at the next step rather than the next turn.
-PendingFn = Callable[[], list[str]]
+# Takes what the user queued while a turn was already running, clearing the
+# queue as it goes. The loop calls it before every model request, so what it
+# returns reaches the model at the next step rather than the next turn. A
+# plain string is a typed prompt and goes through the usual expansion; a
+# ready-made request is one paimon assembled (a "!" shell run) and is appended
+# verbatim, since @path in a command's output is output, not a mention.
+PendingFn = Callable[[], list[str | ModelRequest]]
 
 
 class Agent:
@@ -585,6 +607,27 @@ class Agent:
                                         max_tokens=max_tokens):
             yield delta
 
+    # ---- Commands the user runs themselves ---------------------------------
+
+    async def run_shell(self, command: str) -> str:
+        """Run a shell command on the user's behalf and return what it printed.
+
+        The TUI's "!" prefix. No permission gate: the gate exists so the model
+        cannot run something the user did not ask for, and here the user *is*
+        the one asking. Nothing is recorded — the caller decides whether the
+        run reaches the model now or at the running turn's next step.
+        """
+        return await tools.user_shell(command, self.cwd, self.tool_context)
+
+    def record_shell(self, command: str, output: str) -> None:
+        """Persist a "!" run so the model sees what the user just did.
+
+        Only between turns. While one is running the message belongs in the
+        pending queue instead, which the loop drains between steps — appended
+        here it would land between a tool call and its result.
+        """
+        self._append_message(shell_message(command, output))
+
     # ---- Tools the agent loop runs itself ----------------------------------
     # These mutate agent-held state or end the turn, so they cannot go through
     # the stateless tools.run_tool. Each handler fills ``slot`` with the tool
@@ -791,6 +834,14 @@ class Agent:
             # results already recorded. Before compaction, so they count
             # towards the context check and survive a history replacement.
             for queued in (self.pending() if self.pending is not None else []):
+                # A ready-made request is one the caller already showed the
+                # user (a "!" run, whose output was on screen the moment the
+                # command exited), so it is appended without an event of its
+                # own — and without expansion, since @path in a command's
+                # output is output rather than a mention.
+                if isinstance(queued, ModelRequest):
+                    self._append_message(queued)
+                    continue
                 self._append_message(ModelRequest(
                     parts=[UserPromptPart(content=self.expand_input(queued))]))
                 yield UserInput(queued)

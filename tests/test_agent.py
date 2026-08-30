@@ -46,7 +46,10 @@ from paimon.session import (
     Session,
     SessionIncompleteError,
     is_agents_message,
+    is_shell_message,
     is_summary_message,
+    shell_message,
+    shell_text,
     summary_message,
 )
 
@@ -594,6 +597,31 @@ class PendingMessagesTest(unittest.IsolatedAsyncioTestCase):
                                 for part in requests_only[-2].parts))
             self.assertEqual([part.content for part in requests_only[-1].parts],
                              ["stop, wrong file"])
+
+    async def test_a_queued_shell_run_is_injected_verbatim(self) -> None:
+        """A "!" run comes through as a ready-made request: appended as it is,
+        with no @path expansion and no event, since the pane already showed
+        it."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / "notes.md").write_text("secret")
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=_config(), mode="yolo")
+
+            queue = [shell_message("cat list", "@notes.md")]
+            agent.pending = lambda: [queue.pop(0)] if queue else []
+
+            with patch("paimon.agent.build_model", return_value=stub_model()):
+                events = [event async for event in agent.run("go")
+                          if not isinstance(event, RequestStats)]
+
+            # No event of its own, unlike a queued prompt, which yields
+            # UserInput: the pane logged the run when the command exited.
+            self.assertEqual([type(event) for event in events], [TextDelta, TurnEnd])
+            self.assertTrue(is_shell_message(agent.history[1]))
+            # The mention is output, not a mention: the file is not inlined.
+            self.assertEqual(shell_text(agent.history[1]), ("cat list", "@notes.md"))
 
     async def test_without_the_hook_nothing_is_injected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
