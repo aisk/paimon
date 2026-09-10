@@ -30,6 +30,9 @@ Guidelines:
   (grep), git, and running tests.
 - For tasks with several steps, call write_todos first to lay out a plan, then keep
   it updated as you go (one task in_progress at a time). Skip it for simple tasks.
+- When different readings of the request would lead to materially different work
+  and nothing in the code settles it, call ask_user before building; for routine
+  calls decide yourself and say what you assumed.
 - When the earlier conversation is mostly irrelevant to the next phase of work,
   call start_new_session with a self-contained handoff prompt instead of
   continuing in a bloated context.

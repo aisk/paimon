@@ -49,7 +49,9 @@ from .session import Session, SessionError, resume_hint, shell_message
 from .skills import parse_skill_block
 from .ui import (
     AssistantMessage,
+    BlockingPanel,
     ConfirmPanel,
+    QuestionPanel,
     EditCall,
     FoldedText,
     PromptInput,
@@ -483,7 +485,7 @@ class SessionPane(Pane):
         bubbles up unclaimed refocuses the prompt and lands in it. Modal
         screens and this pane's confirm panel keep the keyboard to themselves.
         """
-        if not event.is_printable or len(self.app.screen_stack) > 1 or self.query(ConfirmPanel):
+        if not event.is_printable or len(self.app.screen_stack) > 1 or self.query(BlockingPanel):
             return
         prompt = self.query_one(PromptInput)
         if self.app.focused is not prompt:
@@ -496,9 +498,9 @@ class SessionPane(Pane):
     def _focus_input(self) -> None:
         """Focus what this pane is waiting on, unless another pane is on screen.
 
-        A pending confirmation wins over the prompt: the prompt is hidden
-        underneath it, and switching to a pane to answer it has to land on the
-        panel or the keys go nowhere.
+        A pending confirmation or question wins over the prompt: the prompt is
+        hidden underneath it, and switching to a pane to answer it has to land
+        on the panel or the keys go nowhere.
 
         Widget.focusable only looks at ``visible``, which is unrelated to
         ``display``, so a hidden pane focusing anything really does take the
@@ -506,16 +508,17 @@ class SessionPane(Pane):
         """
         if not self.is_current:
             return
-        panels = self.query(ConfirmPanel)
+        panels = self.query(BlockingPanel)
         (panels.last() if panels else self.query_one(PromptInput)).focus()
 
     # ---- session switching --------------------------------------------------
 
     def _adopt(self, agent: Agent, job_id: str) -> None:
-        """Take over an agent: this pane confirms for it and renders its job."""
+        """Take over an agent: this pane confirms and answers for it and renders its job."""
         self._cancel_recap()
         self.agent = agent
         agent.confirm = self._confirm
+        agent.ask = self._ask
         agent.supervisor = self.supervisor
         agent.pending = self._take_queued
         # One renderer per conversation rather than one per turn: a turn now
@@ -798,21 +801,29 @@ class SessionPane(Pane):
         else:
             self.app.refresh_statusbar()
 
-    # ---- confirmation hook (called from the agent loop) --------------------
+    # ---- confirmation and question hooks (called from the agent loop) ------
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         panel = ConfirmPanel(tool_name, args, future, cwd=self.agent.cwd)
+        return await self._block_on(panel, future) == "allow"
+
+    async def _ask(self, question: str, options: list[str]) -> str | None:
+        future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        return await self._block_on(QuestionPanel(question, options, future), future)
+
+    async def _block_on(self, panel: BlockingPanel, future: asyncio.Future):
+        """Show ``panel`` in place of the prompt until ``future`` is answered."""
         prompt = self.query_one(PromptInput)
         # Removal below is asynchronous, so a panel from the previous confirm
         # (or an interrupted turn) may still be mounted; sweep it first. The
-        # query is pane-scoped: another pane's pending confirmation is not ours
-        # to remove.
-        await self.query(ConfirmPanel).remove()
+        # query is pane-scoped: another pane's pending panel is not ours to
+        # remove.
+        await self.query(BlockingPanel).remove()
         await self.mount(panel, before=prompt)
         prompt.display = False
         # A panel in a background pane must not grab the keyboard: the user's
-        # next keystroke would answer a confirmation they never saw.
+        # next keystroke would answer a question they never saw.
         if self.is_current:
             panel.focus()
         # Counted on the job rather than here: removing the panel is
@@ -820,12 +831,11 @@ class SessionPane(Pane):
         # in, not whenever the widget finally goes.
         self.job.mark_blocked(True)
         try:
-            verdict = await future
+            return await future
         finally:
             self.job.mark_blocked(False)
             prompt.display = True
             panel.remove()
-        return verdict == "allow"
 
     # ---- input → turn -------------------------------------------------------
 

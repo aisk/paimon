@@ -29,6 +29,10 @@ from .session import Session, data_dir
 # A confirm callback returns True to allow a dangerous tool, False to deny.
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
+# An ask callback puts a question (and optional choices) to the user and
+# returns their answer, or None when they dismissed it without answering.
+AskFn = Callable[[str, list[str]], Awaitable[Optional[str]]]
+
 # Permission modes: read (confirm writes, shell and reads outside cwd),
 # edit (auto-approve writes inside cwd), yolo (no confirmation at all).
 # In read and edit modes, shell commands recognized by safe_command() run
@@ -175,7 +179,8 @@ def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
     With a limit the detail is collapsed onto a single line and truncated,
     for outputs that cannot reflow (a terminal stream) unlike a TUI widget.
     """
-    detail = str(args.get("command") or args.get("path") or json.dumps(args, ensure_ascii=False))
+    detail = str(args.get("command") or args.get("path") or args.get("question")
+                 or json.dumps(args, ensure_ascii=False))
     if limit is None:
         return detail
     detail = " ".join(detail.split())
@@ -1863,6 +1868,36 @@ REGISTRY: dict[str, Tool] = {
             },
         },
     ),
+    # Needs the user at the keyboard, so the agent loop puts it to the UI itself.
+    "ask_user": Tool(
+        run=None,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": (
+                    "Ask the user one question and wait for the answer. Use it only when "
+                    "different answers would lead to materially different work and neither "
+                    "the request nor the code settles it; otherwise make the routine call "
+                    "yourself and say what you assumed. Pass options when the answer is a "
+                    "choice; the user can always type something else instead. Ask one "
+                    "question per call."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "The question, self-contained and specific."},
+                        "options": {
+                            "type": "array",
+                            "description": "Choices to pick from, most likely first (optional, at most 9).",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["question"],
+                },
+            },
+        },
+    ),
     # Stateful: ends the session, so the agent loop handles it.
     "start_new_session": Tool(
         run=None,
@@ -2136,6 +2171,10 @@ REGISTRY: dict[str, Tool] = {
 SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "run_background",
                     "read_job", "wait_for_job", "stop_job")
 
+# Tools that need a user at the keyboard. Headless has nobody to answer, so it
+# leaves them out rather than offering the model a question it cannot ask.
+INTERACTIVE_TOOLS = ("ask_user",)
+
 # What a spawned agent must not be given: every job tool, and the handoff.
 #
 # Every job tool, because depth stays 1 — only the conversation the user is
@@ -2148,7 +2187,11 @@ SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "run_background",
 # the subagent's own tab, where the user is likely to approve it: approving it
 # swaps the session out from under the id the parent holds, and the parent is
 # never told.
-SUBAGENT_DENIED = ("start_new_session", *SUPERVISED_TOOLS)
+#
+# The question, because a subagent works for the agent that started it, not
+# for the user: what it cannot settle belongs in its report, where the parent
+# can decide or ask on its behalf.
+SUBAGENT_DENIED = ("start_new_session", *INTERACTIVE_TOOLS, *SUPERVISED_TOOLS)
 
 
 def without(registry: dict[str, Tool], names) -> dict[str, Tool]:

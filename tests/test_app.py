@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import RichLog, Static
+from textual.widgets import Input, RichLog, Static
 from textual.widgets.markdown import MarkdownBlock
 from textual.worker import WorkerCancelled
 from helpers import SILENT_EVENTS, agent_events, stub_model
@@ -47,6 +47,7 @@ from paimon.ui import (
     ConfirmPanel,
     EditCall,
     PromptInput,
+    QuestionPanel,
     RecapMessage,
     ToolCall,
     ToolResult,
@@ -982,6 +983,90 @@ class AgentCwdTest(AppTestCase):
                 self.assertEqual(app.pane.agent.cwd, elsewhere)
 
 
+class QuestionPanelTest(AppTestCase):
+    """ask_user in the TUI: the panel replaces the prompt until answered."""
+
+    @staticmethod
+    async def _open(app: PaimonApp, pilot, question: str = "Which db?",
+                    options: list[str] | None = None) -> asyncio.Future:
+        task = asyncio.ensure_future(app.pane._ask(question, options or []))
+        await pilot.pause()
+        return task
+
+    async def test_digit_picks_an_option_and_restores_prompt(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptInput)
+            task = await self._open(app, pilot, options=["Postgres", "SQLite"])
+            panel = app.query_one(QuestionPanel)
+            self.assertFalse(prompt.display, "prompt hidden while asking")
+            self.assertIs(app.focused, panel)
+            self.assertTrue(app.pane.needs_confirm, "the tab shows the pane is blocked")
+            await pilot.press("2")
+            self.assertEqual(await task, "SQLite")
+            await pilot.pause()
+            self.assertFalse(app.query(QuestionPanel))
+            self.assertTrue(prompt.display)
+            self.assertFalse(app.pane.needs_confirm)
+
+    async def test_enter_picks_the_highlighted_option(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot, options=["Postgres", "SQLite"])
+            await pilot.press("down", "enter")
+            self.assertEqual(await task, "SQLite")
+
+    async def test_last_entry_takes_a_typed_answer(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot, options=["Postgres", "SQLite"])
+            await pilot.press("3")
+            self.assertIsInstance(app.focused, Input, "the answer box has the keyboard")
+            await pilot.press("m", "y", "s", "q", "l", "enter")
+            self.assertEqual(await task, "mysql")
+
+    async def test_without_options_typing_starts_at_once(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot)
+            self.assertIsInstance(app.focused, Input)
+            await pilot.press("4", "2", "enter")
+            self.assertEqual(await task, "42", "digits are typed, not treated as choices")
+
+    async def test_empty_typed_answer_is_ignored(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertFalse(task.done(), "still waiting for an answer")
+            await pilot.press("escape")
+            self.assertIsNone(await task)
+
+    async def test_escape_dismisses(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            task = await self._open(app, pilot, options=["Postgres"])
+            await pilot.press("escape")
+            self.assertIsNone(await task)
+            await pilot.pause()
+            self.assertTrue(app.query_one(PromptInput).display)
+
+    async def test_a_turn_asking_gets_the_answer_back(self) -> None:
+        app = self.make_app(mode="yolo")
+        arguments = '{"question": "Which db?", "options": ["Postgres", "SQLite"]}'
+        with patch("paimon.agent.build_model", return_value=stub_model("ask_user", arguments)):
+            async with app.run_test() as pilot:
+                app.pane.handle_submit(PromptInput.Submitted("go"))
+                await HandoffTest._wait_for(pilot, lambda: app.query(QuestionPanel))
+                await pilot.press("1")
+                await HandoffTest._wait_for(pilot, lambda: not app.pane.is_busy)
+
+                results = " ".join(str(w.render()) for w in app.query(ToolResult))
+                self.assertIn("User answered: Postgres", results)
+                self.assertTrue(app.query(AssistantMessage), "turn continued after the answer")
+
+
 class HandoffTest(AppTestCase):
     """start_new_session in the TUI: confirm (even in yolo), switch, resume hint."""
 
@@ -1266,7 +1351,7 @@ class MultiPaneTest(AppTestCase):
                 await pilot.pause()
                 self.assertEqual(len(app.panes), 1)
                 self.assertFalse(lockfile.held(pane.agent.session.path))
-                self.assertNotIn("awaiting confirmation",
+                self.assertNotIn("waiting on you",
                                  str(app.query_one("#statusbar", Static).render()))
 
     async def test_the_last_pane_stays_open(self) -> None:
@@ -1300,7 +1385,7 @@ class PaneAttentionTest(AppTestCase):
             task = asyncio.ensure_future(first._confirm("shell", {"command": "rm x"}))
             await pilot.pause()
             self.assertTrue(first.needs_confirm)
-            self.assertIn("1 awaiting confirmation",
+            self.assertIn("1 waiting on you",
                           str(app.query_one("#statusbar", Static).render()))
             tab = app.query_one(f"#tab-{first.id}", PaneTab)
             self.assertTrue(tab.has_class("-attention"))
@@ -1316,7 +1401,7 @@ class PaneAttentionTest(AppTestCase):
 
             await pilot.pause()
             self.assertFalse(first.needs_confirm)
-            self.assertNotIn("awaiting confirmation",
+            self.assertNotIn("waiting on you",
                              str(app.query_one("#statusbar", Static).render()))
 
     async def test_goto_attention_does_nothing_when_nothing_waits(self) -> None:
@@ -1456,6 +1541,8 @@ class SpawnAgentTest(AppTestCase):
                 self.assertNotIn("spawn_agent", child.agent.toolset, "depth stays 1")
                 self.assertNotIn("start_new_session", child.agent.toolset,
                                  "a handoff would swap the session out from under its id")
+                self.assertNotIn("ask_user", child.agent.toolset,
+                                 "a subagent reports to its parent, not to the user")
                 self.assertNotIn("run_background", child.agent.toolset,
                                  "only the conversation the user is in leaves processes behind")
                 for name in ("read_job", "wait_for_job", "stop_job", "send_to_agent"):

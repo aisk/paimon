@@ -306,6 +306,7 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
 
 # Re-exported so UI code can keep importing it from here.
 ConfirmFn = tools.ConfirmFn
+AskFn = tools.AskFn
 
 # Takes what the user queued while a turn was already running, clearing the
 # queue as it goes. The loop calls it before every model request, so what it
@@ -332,8 +333,8 @@ class Agent:
     """
 
     def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
-                 confirm: Optional[ConfirmFn] = None, mode: str = "yolo",
-                 config: Optional[Config] = None,
+                 confirm: Optional[ConfirmFn] = None, ask: Optional[AskFn] = None,
+                 mode: str = "yolo", config: Optional[Config] = None,
                  toolset: Optional[dict[str, tools.Tool]] = None,
                  model_override: Optional[str] = None,
                  skills: Sequence[Skill] = (),
@@ -350,6 +351,9 @@ class Agent:
         self.agent_types = list(agent_types)
         self.agent_type_diagnostics = list(agent_type_diagnostics)
         self.confirm = confirm
+        # How ask_user reaches the user. None where nobody is at the keyboard
+        # (headless, tests): the tool then fails with a readable error.
+        self.ask = ask
         self.mode = mode
         self.config = config or Config.load()
         # Per-agent model choice. One Config instance is shared by every agent
@@ -392,8 +396,8 @@ class Agent:
 
     @classmethod
     def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
-             confirm: Optional[ConfirmFn] = None, mode: str = "yolo",
-             config: Optional[Config] = None,
+             confirm: Optional[ConfirmFn] = None, ask: Optional[AskFn] = None,
+             mode: str = "yolo", config: Optional[Config] = None,
              append_system_prompt: Optional[str] = None,
              toolset: Optional[dict[str, tools.Tool]] = None,
              model_override: Optional[str] = None,
@@ -452,7 +456,7 @@ class Agent:
                     system_prompt += f"\n\n{appended}"
                 if system_prompt != stored:
                     session.append_system_prompt(system_prompt, appended=appended)
-            return cls(session, system_prompt, cwd=cwd, confirm=confirm, mode=mode,
+            return cls(session, system_prompt, cwd=cwd, confirm=confirm, ask=ask, mode=mode,
                        config=config, toolset=toolset, model_override=model_override,
                        skills=skills, skill_diagnostics=skill_diagnostics,
                        agent_types=agent_types,
@@ -682,6 +686,36 @@ class Agent:
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
         yield SessionHandoff(prompt_text)
 
+    async def _run_ask_user(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
+                            persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+        # The one tool whose result comes from the user. No ask hook means no
+        # user to answer (headless leaves the tool out of its toolset, so this
+        # is a narrowed-toolset edge, not the normal path); the error tells the
+        # model to carry on rather than wait for an answer that cannot come.
+        yield ToolStart(call.tool_call_id, call.tool_name, args)
+        question = str(args.get("question") or "").strip()
+        options = [str(o).strip() for o in (args.get("options") or []) if str(o).strip()]
+        if not question:
+            slot.content = "Error: question is required."
+            slot.outcome = "failed"
+        elif len(options) > 9:
+            slot.content = "Error: at most 9 options."
+            slot.outcome = "failed"
+        elif self.ask is None:
+            slot.content = ("Error: nobody is here to answer in this run. State your "
+                            "assumption and continue.")
+            slot.outcome = "failed"
+        else:
+            answer = await self.ask(question, options)
+            if answer is None:
+                slot.content = ("The user dismissed the question without answering. "
+                                "Proceed on your best judgment and say what you assumed.")
+            else:
+                slot.content = f"User answered: {answer}"
+            slot.outcome = "success"
+        persist()
+        yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+
     async def _permitted(self, name: str, args: dict) -> bool:
         """Gate a tool the loop runs itself, the way run_tool gates the rest.
 
@@ -724,6 +758,7 @@ class Agent:
 
     _AGENT_HANDLED = {
         "write_todos": _run_write_todos,
+        "ask_user": _run_ask_user,
         "start_new_session": _run_start_new_session,
         "spawn_agent": _run_supervised,
         "send_to_agent": _run_supervised,

@@ -637,6 +637,74 @@ class PendingMessagesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([type(event) for event in events], [TextDelta, TurnEnd])
 
 
+class AskUserTest(unittest.IsolatedAsyncioTestCase):
+    """ask_user hands the question to the ask hook and feeds the answer back
+    as the tool result; without a hook it fails with a readable error."""
+
+    @staticmethod
+    def _agent(cwd: Path, **kwargs) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        return Agent.open(cwd=cwd, session=session, config=_config(), **kwargs)
+
+    @staticmethod
+    async def _run(agent: Agent, arguments: str) -> list:
+        with patch("paimon.agent.build_model", return_value=stub_model("ask_user", arguments)):
+            return [event async for event in agent.run("go")]
+
+    async def test_answer_becomes_the_tool_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            ask = AsyncMock(return_value="Postgres")
+            agent = self._agent(cwd, ask=ask, mode="read")
+
+            events = await self._run(agent, '{"question": "Which db?", "options": ["Postgres", "SQLite"]}')
+
+            ask.assert_awaited_once_with("Which db?", ["Postgres", "SQLite"])
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertFalse(end.denied)
+            self.assertEqual(end.result, "User answered: Postgres")
+            self.assertIsInstance(events[-1], TurnEnd)
+            returns = [part for message in agent.session.messages()
+                       if isinstance(message, ModelRequest)
+                       for part in message.parts if isinstance(part, ToolReturnPart)]
+            self.assertEqual(returns[-1].content, "User answered: Postgres")
+
+    async def test_dismissal_tells_the_model_to_carry_on(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            agent = self._agent(cwd, ask=AsyncMock(return_value=None), mode="read")
+
+            events = await self._run(agent, '{"question": "Which db?"}')
+
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertIn("dismissed", end.result)
+            self.assertTrue([e for e in events if isinstance(e, TextDelta)], "the turn continued")
+
+    async def test_without_ask_hook_the_call_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            agent = self._agent(cwd, mode="yolo")
+
+            events = await self._run(agent, '{"question": "Which db?"}')
+
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertTrue(end.result.startswith("Error:"))
+            self.assertIn("continue", end.result)
+
+    async def test_blank_question_is_rejected_before_asking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            ask = AsyncMock(return_value="x")
+            agent = self._agent(cwd, ask=ask, mode="read")
+
+            events = await self._run(agent, '{"question": "  "}')
+
+            ask.assert_not_awaited()
+            end = next(e for e in events if isinstance(e, ToolEnd))
+            self.assertEqual(end.result, "Error: question is required.")
+
+
 class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
     """start_new_session ends the turn on approval without another model
     request; without a confirm hook it is denied even in yolo mode."""

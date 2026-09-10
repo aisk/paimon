@@ -102,18 +102,21 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 #prompt.bash, #prompt.bash:focus { border: round $accent; }
 #statusbar { height: 1; margin: 0 2 1 2; padding: 0 1; color: $text-muted; }
 
-/* ---- permission confirmation ---- */
+/* ---- permission confirmation and questions ---- */
 
-.confirm-panel {
+.blocking-panel {
     height: auto;
     margin-top: 1;
     padding: 1 2;
     border: round $warning;
     background: transparent;
 }
-.confirm-panel:focus { border: round $warning; }
-#confirm-detail { height: auto; max-height: 12; margin-top: 1; color: $text-muted; }
-#confirm-options { height: auto; margin-top: 1; }
+.blocking-panel:focus { border: round $warning; }
+.question-panel, .question-panel:focus, .question-panel:focus-within { border: round $accent; }
+#confirm-detail, #question-detail { height: auto; max-height: 12; margin-top: 1; color: $text-muted; }
+#question-detail { color: $text; }
+#confirm-options, #question-options { height: auto; margin-top: 1; }
+#question-input { margin-top: 1; }
 
 /* ---- modal screens (login, pickers) ---- */
 

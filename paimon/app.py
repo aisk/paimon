@@ -49,7 +49,7 @@ class PaimonApp(App):
         Binding("ctrl+w", "close_pane", "Close pane", priority=True),
         Binding("ctrl+pageup", "prev_pane", "Previous pane", priority=True),
         Binding("ctrl+pagedown", "next_pane", "Next pane", priority=True),
-        Binding("ctrl+g", "goto_attention", "Go to a pane awaiting confirmation", priority=True),
+        Binding("ctrl+g", "goto_attention", "Go to a pane waiting on you", priority=True),
     ]
 
     def get_system_commands(self, screen) -> list[SystemCommand]:
@@ -380,7 +380,7 @@ class PaimonApp(App):
         self._step_pane(-1)
 
     def action_goto_attention(self) -> None:
-        """Jump to the next pane blocked on a confirmation.
+        """Jump to the next pane blocked on a confirmation or a question.
 
         A background pane waiting for permission blocks whoever is waiting on
         it, so there has to be one key that always lands on it.
@@ -606,7 +606,7 @@ class PaimonApp(App):
         line = Content("  ·  ".join(parts))
         if waiting:
             line = line.append_text("  ·  ").append_text(
-                f"{waiting} awaiting confirmation (ctrl+g)", "$text-warning")
+                f"{waiting} waiting on you (ctrl+g)", "$text-warning")
         bars.first(Static).update(line)
 
     def _session_status(self, pane: SessionPane, tokens: int | None) -> list[str]:

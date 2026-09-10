@@ -469,7 +469,8 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         # tool that cannot be finished is worse than not having it.
         agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
                            append_system_prompt=append_system_prompt,
-                           toolset=tools.without(tools.REGISTRY, tools.SUPERVISED_TOOLS))
+                           toolset=tools.without(tools.REGISTRY, (*tools.SUPERVISED_TOOLS,
+                                                                  *tools.INTERACTIVE_TOOLS)))
         text = build_prompt(prompt, piped, cwd, agent.skills)
     except SessionError as exc:  # busy in another process, or no persisted system prompt
         renderer.begin(session.id if session else None)

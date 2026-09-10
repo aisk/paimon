@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
-from textual.widgets import Markdown, Static, TextArea
+from textual.widgets import Input, Markdown, Static, TextArea
 
 from .diff import locate_line, render_diff
 from .tools import resolve_path
@@ -309,7 +309,16 @@ class PromptInput(TextArea):
         self.set_class(self.text.startswith("!"), "bash")
 
 
-class ConfirmPanel(Vertical, can_focus=True):
+class BlockingPanel(Vertical, can_focus=True):
+    """A panel the turn is waiting on, shown in place of the prompt.
+
+    What the confirm and question panels have in common for the pane: while
+    one is mounted the prompt is hidden, focus lands on the panel, and stray
+    typing is not routed back to the prompt.
+    """
+
+
+class ConfirmPanel(BlockingPanel):
     """Inline confirmation for a dangerous tool call, shown in place of the prompt.
 
     Resolves its future with "allow" or "deny". Shows what would actually
@@ -329,7 +338,7 @@ class ConfirmPanel(Vertical, can_focus=True):
                  cwd: Path | None = None) -> None:
         # No ID: several panes can have a panel up at once, and a shared ID
         # would make an app-wide query resolve to whichever one is first.
-        super().__init__(classes="confirm-panel")
+        super().__init__(classes="blocking-panel confirm-panel")
         self.tool_name = tool_name
         self.args = args
         # The agent's cwd: previews resolve paths against it, exactly like the
@@ -455,3 +464,95 @@ class ConfirmPanel(Vertical, can_focus=True):
                 prompt=self._clip(str(args.get("prompt") or ""), 5_000),
             )
         return Content(self._clip(json.dumps(args, ensure_ascii=False)))
+
+
+class QuestionPanel(BlockingPanel):
+    """Inline question from the model (ask_user), shown in place of the prompt.
+
+    Resolves its future with the chosen option or the typed answer, or None
+    when dismissed. The choices are numbered; the last entry always lets the
+    user type something else, and with no choices that is the only entry, so
+    the answer box has the keyboard from the start.
+    Navigate with Up/Down or 1-9, Enter to pick, Esc to dismiss.
+    """
+
+    def __init__(self, question: str, options: list[str],
+                 future: "asyncio.Future[str | None]") -> None:
+        super().__init__(classes="blocking-panel question-panel")
+        self.question = question
+        self.options = list(options)
+        self._future = future
+        self._selected = 0
+
+    @property
+    def _other(self) -> int:
+        """Index of the free-text entry, one past the last option."""
+        return len(self.options)
+
+    def compose(self) -> ComposeResult:
+        yield Static(Content.from_markup("[b]Paimon has a question[/]"))
+        with VerticalScroll(id="question-detail"):
+            yield Static(Content(self.question))
+        yield Static(id="question-options")
+        yield Input(placeholder="Type your answer", id="question-input")
+
+    def on_mount(self) -> None:
+        # Focusing is the caller's job, as for ConfirmPanel.
+        self._render_options()
+
+    def on_focus(self) -> None:
+        # With the free-text entry selected the panel hands the keyboard on to
+        # the answer box, so a question without options is ready to type into.
+        if self._selected == self._other:
+            self.query_one(Input).focus()
+
+    def _render_options(self) -> None:
+        labels = [*self.options, "Something else (type below)" if self.options else "Type your answer"]
+        lines = []
+        for i, label in enumerate(labels):
+            if i == self._selected:
+                lines.append(Content.from_markup("[$text-accent b]❯ $n. $label[/]", n=str(i + 1), label=label))
+            else:
+                lines.append(Content.from_markup("[$text-muted]  $n. $label[/]", n=str(i + 1), label=label))
+        self.query_one("#question-options", Static).update(Content("\n").join(lines))
+
+    def _select(self, index: int) -> None:
+        self._selected = index % (self._other + 1)
+        self._render_options()
+        if self._selected == self._other:
+            self.query_one(Input).focus()
+        else:
+            self.focus()
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key
+        typing = isinstance(self.app.focused, Input)
+        if key == "up" or (key == "k" and not typing):
+            self._select(self._selected - 1)
+        elif key in ("down", "tab") or (key == "j" and not typing):
+            self._select(self._selected + 1)
+        elif key == "enter" and not typing:
+            if self._selected == self._other:
+                self.query_one(Input).focus()
+            else:
+                self._resolve(self.options[self._selected])
+        elif key.isdigit() and not typing and 1 <= int(key) <= self._other + 1:
+            self._select(int(key) - 1)
+            if self._selected != self._other:
+                self._resolve(self.options[self._selected])
+        elif key == "escape":
+            self._resolve(None)
+        else:
+            return
+        event.prevent_default()
+        event.stop()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        answer = event.value.strip()
+        if answer:
+            self._resolve(answer)
+
+    def _resolve(self, answer: str | None) -> None:
+        if not self._future.done():
+            self._future.set_result(answer)

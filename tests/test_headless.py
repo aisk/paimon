@@ -412,6 +412,7 @@ class HeadlessToolsetTest(unittest.TestCase):
 
             for name in tools.SUPERVISED_TOOLS:
                 self.assertNotIn(name, agent.toolset)
+            self.assertNotIn("ask_user", agent.toolset, "nobody is there to answer")
             names = [schema["function"]["name"] for schema in agent.tool_schemas]
             self.assertNotIn("spawn_agent", names)
             self.assertIn("shell", names, "the ordinary tools are all still there")
