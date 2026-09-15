@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from helpers import make_session
 from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
@@ -20,6 +20,7 @@ from paimon.tools import (
     _TaskOutput,
     _glob,
     _grep,
+    _grep_async,
     _inside,
     _kill_tree,
     _read_history,
@@ -585,6 +586,118 @@ class GrepTest(unittest.TestCase):
             self.assertNotIn("b.py", sandboxed)
             free = _grep({"pattern": "needle"}, cwd, sandboxed=False)
             self.assertIn("b.py", free)
+
+
+    def test_exact_limit_is_not_truncated(self) -> None:
+        path = self.write("a.txt", "needle\n" * 3)
+        result = _grep({"pattern": "needle", "max_results": 3}, self.cwd)
+        self.assertEqual(result.splitlines(), [f"{path}:{i}:needle" for i in range(1, 4)])
+
+    def test_truncation_detects_match_in_next_file(self) -> None:
+        self.write("a.txt", "needle\n")
+        self.write("b.txt", "needle\n")
+        result = _grep({"pattern": "needle", "max_results": 1}, self.cwd)
+        self.assertIn("first 1 matches shown", result)
+        self.assertNotIn("b.txt", result)
+
+    def test_only_lf_and_crlf_change_line_numbers(self) -> None:
+        path = self.cwd / "a.txt"
+        path.write_bytes(b"\xef\xbb\xbfhead\xe2\x80\xa8needle\r\nnext\vneedle\nlast needle")
+        result = _grep({"pattern": "needle"}, self.cwd)
+        self.assertEqual(result, f"{path}:1:head\u2028needle\n{path}:2:next\vneedle\n{path}:3:last needle")
+        self.assertEqual(_grep({"pattern": "^head"}, self.cwd), f"{path}:1:head\u2028needle")
+
+    def test_ignored_directories_are_not_entered(self) -> None:
+        self.write("node_modules/nested/a.txt", "needle\n")
+        self.write("sub/.git/a.txt", "needle\n")
+        self.write("sub/b.txt", "needle\n")
+        visited = []
+        scandir = os.scandir
+
+        def track(path):
+            visited.append(Path(path))
+            return scandir(path)
+
+        with patch("os.scandir", side_effect=track):
+            result = _grep({"pattern": "needle"}, self.cwd)
+        self.assertIn("b.txt", result)
+        self.assertEqual(visited, [self.cwd, self.cwd / "sub"])
+
+    def test_stops_reading_after_one_extra_match(self) -> None:
+        path = self.write("a.txt", "needle\n" * 10000)
+        with path.open("rb") as source:
+            tracked = MagicMock(wraps=source)
+            tracked.__enter__.return_value = tracked
+            with patch.object(Path, "open", return_value=tracked):
+                result = _grep({"pattern": "needle", "max_results": 1}, self.cwd)
+            self.assertEqual(tracked.readline.call_count, 2)
+            tracked.read.assert_called_once_with(8192)
+        self.assertIn("first 1 matches shown", result)
+
+    def test_large_files_are_reported(self) -> None:
+        self.write("a.txt", "needle\n" * 10)
+        with patch("paimon.tools._GREP_MAX_FILE_BYTES", 20):
+            self.assertEqual(_grep({"pattern": "needle"}, self.cwd), "(no matches) (1 large files skipped)")
+
+    def test_directory_symlink_cycles_are_not_followed(self) -> None:
+        self.write("sub/a.txt", "needle\n")
+        (self.cwd / "sub/back").symlink_to(self.cwd, target_is_directory=True)
+        self.assertEqual(len(_grep({"pattern": "needle"}, self.cwd).splitlines()), 1)
+
+
+class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_registered_tool_searches_in_requested_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            path = cwd / "a.txt"
+            path.write_text("needle\n")
+            result, denied = await run_tool("grep", {"pattern": "needle"}, cwd, mode="read")
+            self.assertFalse(denied)
+            self.assertEqual(result, f"{path}:1:needle")
+
+    async def test_pathological_regex_times_out_without_blocking_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / "a.txt").write_text("a" * 100 + "!\n")
+            processes = []
+            spawn = asyncio.create_subprocess_exec
+
+            async def track(*args, **kwargs):
+                proc = await spawn(*args, **kwargs)
+                processes.append(proc)
+                return proc
+
+            with patch("paimon.tools._GREP_TIMEOUT", 1.0), patch(
+                "paimon.tools.asyncio.create_subprocess_exec", side_effect=track,
+            ):
+                task = asyncio.create_task(_grep_async({"pattern": "(a+)+$"}, cwd))
+                await asyncio.sleep(0.1)
+                self.assertFalse(task.done())
+                result = await asyncio.wait_for(task, 5)
+            self.assertIn("timed out", result)
+            self.assertIsNotNone(processes[0].returncode)
+
+    async def test_cancellation_reaps_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / "a.txt").write_text("a" * 100 + "!\n")
+            processes = []
+            started = asyncio.Event()
+            spawn = asyncio.create_subprocess_exec
+
+            async def track(*args, **kwargs):
+                proc = await spawn(*args, **kwargs)
+                processes.append(proc)
+                started.set()
+                return proc
+
+            with patch("paimon.tools.asyncio.create_subprocess_exec", side_effect=track):
+                task = asyncio.create_task(_grep_async({"pattern": "(a+)+$"}, cwd))
+                await asyncio.wait_for(started.wait(), 5)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertIsNotNone(processes[0].returncode)
 
 
 class BackgroundCommandTest(unittest.IsolatedAsyncioTestCase):

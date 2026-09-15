@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from functools import cache
@@ -795,21 +796,23 @@ _GREP_MAX_FILE_BYTES = 10_000_000
 
 
 def _grep_files(base: Path, name_filter: Optional[str], sandboxed: bool):
-    """The files under ``base`` a grep looks at, in stable path order."""
-    skip = _GLOB_IGNORE
-    for path in sorted(base.rglob("*")):
-        if not path.is_file() or skip.intersection(path.relative_to(base).parts):
-            continue
-        if name_filter and not fnmatch.fnmatch(path.name, name_filter):
-            continue
-        # sandboxed keeps symlinks under base from reaching files outside it,
-        # the same way glob's listing does.
-        if sandboxed and not _inside(path, base):
-            continue
-        yield path
+    """Files under ``base``, in stable directory and filename order."""
+    # Prune before descent; sort only one directory at a time. Directory
+    # symlinks are not followed, including cycles.
+    for root, dirs, names in os.walk(base, followlinks=False):
+        dirs[:] = sorted(name for name in dirs if name not in _GLOB_IGNORE)
+        for name in sorted(names):
+            if name in _GLOB_IGNORE or (name_filter and not fnmatch.fnmatch(name, name_filter)):
+                continue
+            path = Path(root) / name
+            if sandboxed and not _inside(path, base):
+                continue
+            if path.is_file():
+                yield path
 
 
 def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
+    """Synchronous worker implementation; tool calls use _grep_async."""
     try:
         pattern = re.compile(str(args["pattern"]))
     except re.error as exc:
@@ -832,25 +835,42 @@ def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     truncated = False
     for path in files:
         try:
-            raw = path.read_bytes() if path.stat().st_size <= _GREP_MAX_FILE_BYTES else None
+            with path.open("rb") as source:
+                if os.fstat(source.fileno()).st_size > _GREP_MAX_FILE_BYTES:
+                    skipped_large += 1
+                    continue
+                if b"\0" in source.read(8192):
+                    continue  # binary
+                source.seek(0)
+                consumed = 0
+                lineno = 0
+                while True:
+                    # Bound reads even when the file grows after the size check.
+                    raw = source.readline(_GREP_MAX_FILE_BYTES - consumed + 1)
+                    if not raw:
+                        break
+                    consumed += len(raw)
+                    if consumed > _GREP_MAX_FILE_BYTES:
+                        skipped_large += 1
+                        break
+                    lineno += 1
+                    if lineno == 1:
+                        raw = raw.removeprefix(codecs.BOM_UTF8)
+                    # Only LF/CRLF delimit lines, not Unicode separators.
+                    line = raw.decode("utf-8", errors="replace")
+                    if line.endswith("\n"):
+                        line = line[:-1].removesuffix("\r")
+                    if not pattern.search(line):
+                        continue
+                    if len(lines) == limit:
+                        truncated = True
+                        break
+                    shown = line.strip()
+                    if len(shown) > _GREP_MAX_LINE:
+                        shown = shown[:_GREP_MAX_LINE] + "…"
+                    lines.append(f"{path}:{lineno}:{shown}")
         except OSError:
             continue
-        if raw is None:
-            skipped_large += 1
-            continue
-        if b"\0" in raw[:8192]:
-            continue  # binary
-        text, _, _ = _decode_preserving(raw)
-        for lineno, line in enumerate(text.splitlines(), 1):
-            if not pattern.search(line):
-                continue
-            shown = line.strip()
-            if len(shown) > _GREP_MAX_LINE:
-                shown = shown[:_GREP_MAX_LINE] + "…"
-            lines.append(f"{path}:{lineno}:{shown}")
-            if len(lines) >= limit:
-                truncated = True
-                break
         if truncated:
             break
     if not lines:
@@ -862,6 +882,35 @@ def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     if skipped_large:
         lines.append(f"[{skipped_large} files over {_GREP_MAX_FILE_BYTES // 1_000_000}MB skipped]")
     return "\n".join(lines)
+
+
+_GREP_TIMEOUT = 10.0
+
+
+async def _grep_async(args: dict, cwd: Path, sandboxed: bool = False) -> str:
+    """Use a killable process: a regex can hold the GIL indefinitely."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "paimon._grep_worker",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        payload = json.dumps([args, str(cwd), sandboxed]).encode("utf-8")
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), _GREP_TIMEOUT)
+        except asyncio.TimeoutError:
+            return "Error: search timed out; simplify the regular expression or narrow the path/glob."
+        if proc.returncode:
+            return f"Error: search worker failed: {stderr.decode('utf-8', errors='replace')[:1000]}"
+        return json.loads(stdout)
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
 
 
 # The session log is append-only, so everything compaction dropped from the
@@ -1719,7 +1768,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "grep": Tool(
         access="read",
-        run=lambda args, cwd, mode, ctx: _grep(args, cwd, sandboxed=mode != "yolo"),
+        run=lambda args, cwd, mode, ctx: _grep_async(args, cwd, sandboxed=mode != "yolo"),
         schema={
             "type": "function",
             "function": {
@@ -1727,13 +1776,14 @@ REGISTRY: dict[str, Tool] = {
                 "description": (
                     "Search file contents for a regular expression and return matching "
                     "lines as path:line:text, in file order. Directories are searched "
-                    "recursively, skipping VCS/dependency/build noise and binary files. "
+                    "recursively in deterministic directory order, skipping VCS/dependency/build noise "
+                    "and binary files. Searches time out after 10 seconds. "
                     "Prefer this over shell grep: it needs no confirmation."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string", "description": "Python regular expression, matched against each line."},
+                        "pattern": {"type": "string", "description": "Python regular expression, matched against each LF/CRLF-delimited line."},
                         "path": {"type": "string", "description": "File or directory to search (optional, defaults to the working directory)."},
                         "glob": {"type": "string", "description": "Only search files whose name matches this pattern, e.g. '*.py' (optional)."},
                         "max_results": {"type": "integer", "description": f"Maximum matching lines to return (optional, default {_GREP_DEFAULT_RESULTS}, maximum {_GREP_MAX_RESULTS})."},
