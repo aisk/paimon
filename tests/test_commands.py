@@ -524,8 +524,13 @@ class InstallSkillTest(CommandTestCase):
 
 
 class VersionTest(unittest.TestCase):
-    def test_version_is_a_string(self) -> None:
-        self.assertIsInstance(commands.version(), str)
+    def test_version_comes_from_package_metadata(self) -> None:
+        with patch("paimon.commands.metadata.version", return_value="1.2.3"):
+            self.assertEqual(commands.version(), "1.2.3")
+
+    def test_missing_package_metadata_has_a_fallback(self) -> None:
+        with patch("paimon.commands.metadata.version", side_effect=commands.metadata.PackageNotFoundError):
+            self.assertEqual(commands.version(), "unknown")
 
 
 if __name__ == "__main__":

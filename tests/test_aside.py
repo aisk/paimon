@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from helpers import make_session
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelRequest,
@@ -21,6 +20,7 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from paimon import aside, retry
 from paimon.agent import Agent
 from paimon.config import Config
+from tests.support.agent import make_session
 
 
 def _config() -> Config:

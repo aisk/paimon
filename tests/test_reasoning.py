@@ -13,14 +13,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-from helpers import make_session
 from openai import AsyncOpenAI
 from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from pydantic_ai.models import override_allow_model_requests
 from pydantic_ai.models.zai import ZaiModel
 from pydantic_ai.providers.zai import ZaiProvider
 
 from paimon.agent import Agent, ReasoningDelta, _strip_foreign_thinking
 from paimon.config import Config
+from tests.support.agent import make_session
 
 
 def _sse(chunks: list[dict]) -> bytes:
@@ -66,7 +67,9 @@ class ReasoningRoundTripTest(unittest.IsolatedAsyncioTestCase):
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
 
-            with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
+            # The real provider pipeline runs only through the MockTransport above.
+            with override_allow_model_requests(True), \
+                    patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 events = [event async for event in agent.run("plan it")]
 
             reasoning = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
@@ -102,7 +105,9 @@ class ReasoningRoundTripTest(unittest.IsolatedAsyncioTestCase):
             # A session may only be open once at a time, here as in a pane.
             first.session.unlock()
             resumed = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
-            with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
+            # The real provider pipeline runs only through the MockTransport above.
+            with override_allow_model_requests(True), \
+                    patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 _ = [event async for event in resumed.run("continue")]
 
             assistants = [m for m in requests[0]["messages"] if m["role"] == "assistant"]
@@ -130,7 +135,9 @@ class StripForeignThinkingTest(unittest.IsolatedAsyncioTestCase):
                 model_name="deepseek-reasoner", provider_name="deepseek",
             ))
 
-            with patch("paimon.agent.build_model", return_value=_zai_model(handler)):
+            # The real provider pipeline runs only through the MockTransport above.
+            with override_allow_model_requests(True), \
+                    patch("paimon.agent.build_model", return_value=_zai_model(handler)):
                 _ = [event async for event in agent.run("hi")]
 
             # AGENT-1: the readable rationale survives the model switch as

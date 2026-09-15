@@ -1,6 +1,7 @@
-"""Shared fixtures for the test suite."""
+"""Model stubs, event samples and persisted sessions for agent tests."""
 
 import dataclasses
+import json
 from pathlib import Path
 
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
@@ -77,3 +78,23 @@ def stub_model(tool_name: str | None = None, arguments: str = "{}") -> FunctionM
             yield "done"
 
     return FunctionModel(stream_function=stream)
+
+
+def session_records(session: Session) -> list[dict]:
+    """Every raw record in the session log, in order."""
+    return [json.loads(line) for line in
+            session.path.read_text(encoding="utf-8").splitlines()]
+
+
+
+class FakeSupervisor:
+    def __init__(self, summary=None) -> None:
+        self.summary = summary
+        self.calls: list = []
+
+    def status_summary(self, caller) -> object:
+        return self.summary
+
+    async def handle(self, name: str, args: dict, *, caller) -> str:
+        self.calls.append((name, args))
+        return "handled"

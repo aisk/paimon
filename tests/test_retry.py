@@ -5,13 +5,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-from helpers import make_session, stub_model
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import retry
 from paimon.agent import Agent, ModelRetry, TextDelta
 from paimon.config import Config
+from tests.support.agent import make_session
 
 
 class RetryPolicyTest(unittest.TestCase):
@@ -32,14 +32,16 @@ class RetryPolicyTest(unittest.TestCase):
         self.assertFalse(retry.is_transient(ValueError("bad model string")))
 
     def test_backoff_grows_and_is_capped(self) -> None:
-        for attempt, base in enumerate([1.0, 2.0, 4.0, 8.0, 16.0, 16.0, 16.0], start=1):
-            delay = retry.backoff(attempt)
-            self.assertGreaterEqual(delay, base / 2, attempt)
-            self.assertLessEqual(delay, base, attempt)
-
-    def test_backoff_is_jittered(self) -> None:
-        """Concurrent agents sharing a key must not retry in lockstep."""
-        self.assertGreater(len({retry.backoff(4) for _ in range(20)}), 1)
+        # Lower edge, midpoint, upper edge; later attempts keep the same cap.
+        expected = [(0.5, 0.75, 1.0), (1.0, 1.5, 2.0), (2.0, 3.0, 4.0),
+                    (4.0, 6.0, 8.0), (8.0, 12.0, 16.0), (8.0, 12.0, 16.0),
+                    (8.0, 12.0, 16.0)]
+        for attempt, delays in enumerate(expected, start=1):
+            for random_value, expected_delay in zip((0.0, 0.5, 1.0), delays):
+                with self.subTest(attempt=attempt, random_value=random_value):
+                    with patch("paimon.retry.random.random", return_value=random_value):
+                        delay = retry.backoff(attempt)
+                    self.assertEqual(delay, expected_delay)
 
 
 class ContextOverflowTest(unittest.TestCase):
@@ -73,9 +75,7 @@ def _failing_model(failures: int, exc: Exception) -> FunctionModel:
             raise exc
         yield "done"
 
-    model = FunctionModel(stream_function=stream)
-    model.attempts = lambda: attempts  # type: ignore[attr-defined]
-    return model
+    return FunctionModel(stream_function=stream)
 
 
 class AgentRetryTest(unittest.IsolatedAsyncioTestCase):
@@ -110,6 +110,13 @@ class AgentRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retries[0].error, "HTTP 429")
         self.assertEqual(self.sleeps, [r.delay for r in retries])
         self.assertEqual("".join(e.text for e in events if isinstance(e, TextDelta)), "done")
+
+    async def test_success_needs_no_retry(self) -> None:
+        events = await self._run(_failing_model(0, ModelHTTPError(429, "stub")))
+
+        self.assertEqual("".join(e.text for e in events if isinstance(e, TextDelta)), "done")
+        self.assertFalse(any(isinstance(e, ModelRetry) for e in events))
+        self.assertEqual(self.sleeps, [])
 
     async def test_retries_stop_at_the_attempt_limit(self) -> None:
         model = _failing_model(retry.MAX_ATTEMPTS, ModelHTTPError(503, "stub"))
@@ -164,15 +171,3 @@ class RetryPersistenceTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(session.messages()), 2)  # the prompt and one response
             self.assertEqual(agent.history, session.messages())
-
-
-class StubModelSanityTest(unittest.IsolatedAsyncioTestCase):
-    async def test_the_shared_stub_still_runs_without_retries(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
-            session = make_session(cwd)
-            session.append_system_prompt("snapshot")
-            with patch("paimon.agent.build_model", return_value=stub_model()):
-                agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-                events = [event async for event in agent.run("go")]
-        self.assertFalse([e for e in events if isinstance(e, ModelRetry)])

@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from helpers import SILENT_EVENTS, agent_events, make_session, stub_model
 from pydantic_ai.messages import ModelRequest
 
 from paimon import headless, tools
@@ -23,6 +22,7 @@ from paimon.agent import (
 )
 from paimon.config import Config
 from paimon.skills import Skill
+from tests.support.agent import SILENT_EVENTS, agent_events, make_session, stub_model
 
 
 def _config(**kwargs) -> Config:

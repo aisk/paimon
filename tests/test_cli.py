@@ -8,13 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from helpers import stub_model
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import cli
 from paimon.config import Config
 from paimon.session import Session, _project_dir
+from tests.support.agent import stub_model
 
 
 class CliTestCase(unittest.TestCase):

@@ -1,14 +1,28 @@
 """Suite-wide guards."""
 
-import os
 from unittest.mock import patch
 
 import pytest
+from pydantic_ai.models import override_allow_model_requests
 
-# The suite exercises cli.main() freely; without this every such test would
-# send a real event to Google Analytics and write telemetry state into the
-# developer's home directory. Telemetry tests opt back in explicitly.
-os.environ["PAIMON_NO_TELEMETRY"] = "1"
+
+@pytest.fixture(autouse=True)
+def _isolated_environment(monkeypatch, tmp_path):
+    """CLI tests must not read or write the developer's config and sessions.
+
+    Tests can override these defaults in setUp or a local patch. In particular,
+    telemetry tests opt back in while replacing the sender.
+    """
+    monkeypatch.setenv("PAIMON_NO_TELEMETRY", "1")
+    monkeypatch.setenv("PAIMON_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("PAIMON_DATA_HOME", str(tmp_path / "data"))
+
+
+@pytest.fixture(autouse=True)
+def _no_model_requests():
+    """FunctionModel stubs work; accidentally using a real provider fails fast."""
+    with override_allow_model_requests(False):
+        yield
 
 
 @pytest.fixture(autouse=True)

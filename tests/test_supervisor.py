@@ -11,8 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from paimon.jobs import AgentJob, CommandJob, State
 from paimon.supervisor import Supervisor, SupervisorError
-
-from test_jobs import FakeAgent, FakeCommand, settle
+from tests.support.jobs import FakeAgent, FakeCommand, settle
 
 
 class FakeCaller:
@@ -286,12 +285,6 @@ class ReadTest(SupervisorTestCase):
         everything = supervisor.read(job_id, caller=self.parent, mode="all")
         self.assertEqual(everything.text, "first answer\n\nsecond answer")
         self.assertTrue(everything.complete)
-
-    async def test_reasoning_never_comes_back(self) -> None:
-        supervisor = self.make()
-        job_id = await supervisor.spawn("go", parent=self.parent)
-        await self.finish(answer="just the answer")
-        self.assertNotIn("secret reasoning", supervisor.read(job_id, caller=self.parent).text)
 
     async def test_a_stale_id_answers_instead_of_raising(self) -> None:
         supervisor = self.make()

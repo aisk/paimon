@@ -61,9 +61,11 @@ class BuildModelTest(unittest.TestCase):
         self.assertEqual(model.client.api_key, "unset")
 
     def test_missing_sdk_reports_the_provider_by_name(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            build_model("bedrock:anthropic.claude-opus-4", api_key="k")
+        with patch("paimon.llm.infer_provider_class", side_effect=ImportError("missing SDK")):
+            with self.assertRaises(ValueError) as caught:
+                build_model("bedrock:anthropic.claude-opus-4", api_key="k")
         self.assertIn("bedrock", str(caught.exception))
+        self.assertIn("missing SDK", str(caught.exception))
 
 
 class ProviderAvailabilityTest(unittest.TestCase):
@@ -71,17 +73,19 @@ class ProviderAvailabilityTest(unittest.TestCase):
         self.assertTrue(is_provider_available("openai"))
         self.assertTrue(is_provider_available("anthropic"))
 
-    def test_unshipped_and_unknown_providers_are_not(self) -> None:
-        self.assertFalse(is_provider_available("bedrock"))
+    def test_missing_sdk_and_unknown_providers_are_unavailable(self) -> None:
+        # Extra SDKs in a developer's environment must not change this case.
+        with patch("paimon.llm.infer_provider_class", side_effect=ImportError("missing SDK")):
+            self.assertFalse(is_provider_available("bedrock"))
         self.assertFalse(is_provider_available("no-such-provider"))
 
     def test_login_only_offers_available_providers(self) -> None:
         from paimon.login import _providers
 
-        providers = _providers()
-        self.assertIn("anthropic", providers)
-        self.assertNotIn("bedrock", providers)
-        self.assertTrue(all(is_provider_available(name) for name in providers))
+        with patch("paimon.login._known_models", return_value=[
+            "zai:model", "anthropic:one", "bedrock:model", "anthropic:two", "unqualified",
+        ]), patch("paimon.login.is_provider_available", side_effect=lambda name: name != "bedrock"):
+            self.assertEqual(_providers(), ["anthropic", "zai"])
 
 
 if __name__ == "__main__":
