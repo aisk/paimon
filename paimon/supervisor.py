@@ -56,11 +56,14 @@ class Supervisor:
 
     def __init__(self, *, launch, close, limit: int, launch_command=None) -> None:
         # launch(job_id, parent, model, agent, session) -> Job and
-        # launch_command(job_id, command, description) -> Job are awaited and
-        # must have put a pane on screen by the time they return; close(job)
-        # takes that pane down again. All three belong to the UI. ``agent`` is
-        # an agent type name and ``session`` a session id to resume; the
-        # launcher resolves both, the supervisor never interprets them.
+        # launch_command(job_id, command, description, parent) -> Job are
+        # awaited and must have put a pane on screen by the time they return;
+        # close(job) takes that pane down again. All three belong to the UI.
+        # ``parent`` is the agent that asked, and becomes the job's owner: the
+        # launcher must not substitute whichever pane happens to be on screen.
+        # ``agent`` is an agent type name and ``session`` a session id to
+        # resume; the launcher resolves both, the supervisor never interprets
+        # them.
         self._launch = launch
         self._launch_command = launch_command
         self._close = close
@@ -130,7 +133,7 @@ class Supervisor:
         job_id = self.new_id()
         running = await start_background(command, cwd)
         try:
-            job = await self._launch_command(job_id, running, description)
+            job = await self._launch_command(job_id, running, description, parent)
         except BaseException:
             # Nothing would ever kill it: no pane holds it and no job names it,
             # and it is in its own process group, so it would outlive the app.

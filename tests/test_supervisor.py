@@ -42,8 +42,8 @@ class SupervisorTestCase(unittest.IsolatedAsyncioTestCase):
             job.start()
             return job
 
-        async def launch_command(job_id, command, description):
-            job = CommandJob(job_id, command, description, parent=self.parent)
+        async def launch_command(job_id, command, description, parent):
+            job = CommandJob(job_id, command, description, parent=parent)
             self.commands.append(job)
             job.start()
             return job
@@ -540,6 +540,22 @@ class BackgroundCommandTest(SupervisorTestCase):
 
         self.assertIsNone(supervisor.read(job_id, caller=object()))
         self.assertFalse(supervisor.stop(job_id, caller=object()))
+
+    async def test_a_command_belongs_to_the_caller_that_started_it(self) -> None:
+        """Whoever asked owns it, whatever the launcher would have guessed."""
+        supervisor = self.make()
+        other = FakeCaller()
+        job_id, running = await self.start_command(supervisor, parent=other)
+        running.output.append(b"listening on 3000\n")
+
+        self.assertIs(self.commands[0].parent, other)
+        self.assertEqual(supervisor.children(other), [job_id])
+        self.assertIn("listening on 3000", supervisor.read(job_id, caller=other).text)
+        self.assertIsNone(supervisor.read(job_id, caller=self.parent))
+        answer = await supervisor.handle("read_job", {"job_id": job_id}, caller=self.parent)
+        self.assertIn("no agent or background command", answer)
+        self.assertIs(await supervisor.wait(job_id, caller=self.parent, timeout=5),
+                      State.UNKNOWN)
 
     async def test_stopping_kills_the_command_and_closes_its_pane(self) -> None:
         supervisor = self.make()

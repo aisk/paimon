@@ -336,7 +336,7 @@ class PaimonApp(App):
         self._sync_panes()
         return pane.job
 
-    async def _launch_command(self, job_id: str, command, description: str) -> Job:
+    async def _launch_command(self, job_id: str, command, description: str, parent) -> Job:
         """Open a background pane for a command a session asked to run.
 
         Hidden and unfocused for the same reason a spawned agent's pane is: the
@@ -344,10 +344,15 @@ class PaimonApp(App):
         """
         if len(self._panes) >= MAX_PANES:
             raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
-        owner = self._session()
-        if owner is None:
+        # The pane that asked, not the one on screen: the user may be looking
+        # at another conversation while this one works. The fallback is for an
+        # agent whose own pane has gone, and only lends its cwd and mode.
+        owner = next((pane for pane in self.sessions if pane.agent is parent), None)
+        if owner is None and (owner := self._session()) is None:
             raise SupervisorError("there is no conversation to attach a command to")
-        job = CommandJob(job_id, command, description, parent=owner.agent)
+        # Owned by the caller even when the pane was borrowed: ownership is
+        # what read_job, stop_job, the wake-up and kill_children all key on.
+        job = CommandJob(job_id, command, description, parent=parent)
         pane = CommandPane(job, cwd=owner.cwd, mode=owner.mode, id=f"pane-{self._next_pane}")
         self._next_pane += 1
         self._panes.append(pane)

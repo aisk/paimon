@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.models.function import FunctionModel
 from textual.widgets import RichLog, Static
@@ -21,6 +21,7 @@ from paimon.ui import (
 )
 from tests.support.agent import stub_model
 from tests.support.app import AppTestCase
+from tests.support.jobs import FakeCommand
 
 
 class SpawnAgentTest(AppTestCase):
@@ -380,6 +381,53 @@ class BackgroundTaskTest(AppTestCase):
                 await self._wait_for(pilot, lambda: len(app.panes) == 3)
                 self.assertIn("Started agent", answer)
                 self.assertEqual(app.panes[2].agent.cwd, parent.agent.cwd)
+
+    async def test_a_command_belongs_to_the_pane_that_started_it(self) -> None:
+        # The user is looking at another conversation when the first one's
+        # agent starts a command: ownership follows the caller, not the screen.
+        app = self.make_app(mode="yolo")
+        # A fake process: only ownership is under test, and its exit has to be
+        # the test's to time.
+        running = FakeCommand("npm run dev")
+        with patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.supervisor.start_background",
+                      new=AsyncMock(return_value=running)):
+            async with app.run_test() as pilot:
+                first = app.pane
+                await pilot.press("ctrl+t")
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+                second = app.pane
+                self.assertIsNot(second, first)
+
+                answer = await app._supervisor.handle(
+                    "run_background", {"command": "npm run dev", "description": "dev server"},
+                    caller=first.agent)
+                self.assertIn("Started background command", answer)
+                await self._wait_for(pilot, lambda: len(app.panes) == 3)
+                task = app.panes[2]
+                job_id = task.job.job_id
+                self.assertIs(app.pane, second, "the user's pane stays on screen")
+                self.assertIs(task.job.parent, first.agent)
+
+                running.output.append(b"listening on 3000\n")
+                mine = await app._supervisor.handle(
+                    "read_job", {"job_id": job_id}, caller=first.agent)
+                self.assertIn("listening on 3000", mine)
+                theirs = await app._supervisor.handle(
+                    "read_job", {"job_id": job_id}, caller=second.agent)
+                self.assertIn("no agent or background command", theirs)
+
+                # The exit is news for the pane that started it, and only for
+                # that one: the other conversation never heard of this command.
+                running.exit(1)
+                await self._wait_for(
+                    pilot, lambda: any(is_agents_message(message)
+                                       for message in first.agent.history))
+                await self._wait_for(pilot, lambda: not first.is_busy)
+                self.assertIn(f"Agents: {job_id} exited (code 1)", self._log_text(first))
+                self.assertFalse(second.is_busy, "nothing woke the pane on screen")
+                self.assertFalse(any(is_agents_message(message)
+                                     for message in second.agent.history))
 
     async def test_a_denied_confirmation_starts_nothing(self) -> None:
         app = self.make_app(mode="read")
