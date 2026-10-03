@@ -61,6 +61,17 @@ class LockfileTest(unittest.TestCase):
 
         self.assertEqual(self._probe(), 3)
 
+    def test_a_held_lock_does_not_pin_the_file_in_place(self) -> None:
+        # flock never stopped anyone removing the file; on Windows an fd from
+        # os.open does, which kept a session log undeletable while it was open.
+        self.assertTrue(lockfile.acquire(self.path))
+        self.addCleanup(lockfile.release, self.path)
+
+        self.path.unlink()
+
+        self.assertFalse(self.path.exists())
+        self.assertTrue(lockfile.held(self.path), "the claim outlives the name")
+
 
 if __name__ == "__main__":
     unittest.main()

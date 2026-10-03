@@ -4,8 +4,10 @@ POSIX uses flock, which is tied to the locking file description: other fds
 the process opens and closes on the same file (e.g. for appending) do not
 release it, unlike POSIX record locks. Windows has no advisory whole-file
 lock, so one byte far past any real offset is range-locked instead; the
-(mandatory) lock then never collides with reads or appends. Both variants
-die with the process, so a crash never leaves a stale lock behind.
+(mandatory) lock then never collides with reads or appends. The locked handle
+is also opened sharing delete access, so holding a lock does not pin the file
+in place any more than flock does. Both variants die with the process, so a
+crash never leaves a stale lock behind.
 
 Locks are refcounted per process: re-acquiring a path this process already
 holds succeeds, while other processes are kept out until the last release.
@@ -17,7 +19,9 @@ import time
 from pathlib import Path
 
 if sys.platform == "win32":
+    import ctypes
     import msvcrt
+    from ctypes import wintypes
 else:
     import fcntl
 
@@ -26,6 +30,38 @@ _POLL_SECONDS = 0.05
 
 # Held locks: resolved path -> [fd, refcount].
 _held: dict[str, list] = {}
+
+
+def _open(path: Path) -> int:
+    """A read-write fd on path, created if missing, to hold the lock on.
+
+    os.open on Windows never grants FILE_SHARE_DELETE, so the file could be
+    neither removed nor renamed for as long as the lock was held — a session
+    log could not be deleted while its pane was open, which flock allows on
+    POSIX. CreateFileW with every share mode gives the same latitude here.
+    """
+    if sys.platform != "win32":
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
+        0x1 | 0x2 | 0x4,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        None,
+        4,  # OPEN_ALWAYS
+        0x80,  # FILE_ATTRIBUTE_NORMAL
+        None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDWR)
+    except OSError:
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
+        raise
 
 
 def _try_lock(fd: int) -> None:
@@ -45,7 +81,7 @@ def acquire(path: Path, timeout: float = 0.0) -> bool:
     if entry:
         entry[1] += 1
         return True
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _open(path)
     deadline = time.monotonic() + max(timeout, 0.0)
     while True:
         try:
