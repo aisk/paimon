@@ -120,16 +120,6 @@ def _join(blocks: list[str]) -> str:
     return "\n\n".join(block for block in blocks if block)
 
 
-def render_text(messages: list[ModelMessage]) -> str:
-    """The assistant text of these messages, and nothing else.
-
-    Never the raw messages: an agent exists to keep its thinking and its tool
-    output out of the caller's context, and handing those back would spend the
-    tokens the split was meant to save.
-    """
-    return _join(_blocks(messages))
-
-
 class Job:
     """Something the app is running, and the coroutine that runs it."""
 
