@@ -166,8 +166,10 @@ class CommandPane(Pane):
             for line in decode_output(head).split("\n"):
                 # A carriage return means the program redrew the line in place
                 # (a progress bar); the last redraw is what a terminal would
-                # be showing.
-                log.write(Text.from_ansi(line.rpartition("\r")[2]))
+                # be showing. A carriage return that only ends the line is
+                # CRLF, which is how nearly everything on Windows writes, and
+                # taking what follows it would blank every such line.
+                log.write(Text.from_ansi(line.rstrip("\r").rpartition("\r")[2]))
         if self._pending and not self.is_running:
             # Nothing will terminate this line now.
             log.write(Text.from_ansi(decode_output(self._pending)))
