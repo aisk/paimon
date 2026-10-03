@@ -1663,17 +1663,23 @@ class BackgroundCommand:
         no loop left to come back and finish the job.
         """
         self.killed = True
-        if self._proc.returncode is None:
-            if os.name == "nt":
-                # Nothing left to await taskkill on; fire it detached so the
-                # tree still goes down after this process is gone.
-                try:
-                    subprocess.Popen(["taskkill", "/PID", str(self._proc.pid), "/T", "/F"],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except OSError:
-                    pass
-            _signal_group(self._pgid, signal.SIGTERM, self._proc)
-            _signal_group(self._pgid, signal.SIGKILL, self._proc)
+        if self._proc.returncode is not None:
+            return
+        if os.name == "nt":
+            # Nothing left to await taskkill on; fire it detached so the tree
+            # still goes down after this process is gone. The leader is left
+            # to taskkill as well: it finds the tree by walking parent pids
+            # from the leader, so killing that first would orphan the rest.
+            # There is no SIGKILL to escalate to here (the name does not even
+            # exist on Windows), and /F is already the forced kill.
+            try:
+                subprocess.Popen(["taskkill", "/PID", str(self._proc.pid), "/T", "/F"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                _signal_group(self._pgid, signal.SIGTERM, self._proc)
+            return
+        _signal_group(self._pgid, signal.SIGTERM, self._proc)
+        _signal_group(self._pgid, signal.SIGKILL, self._proc)
 
 
 async def start_background(command: str, cwd: Path) -> BackgroundCommand:

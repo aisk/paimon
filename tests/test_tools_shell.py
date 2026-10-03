@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from paimon.tools import (
     MAX_OUTPUT,
+    BackgroundCommand,
     _kill_tree,
     _shell,
     _signal_group,
@@ -256,6 +257,43 @@ class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):
                 patch("paimon.tools.os.killpg",
                       side_effect=AssertionError("killpg called on the nt path")):
             _signal_group(1234, signal.SIGTERM, fake)
+        self.assertEqual(calls, ["kill"])
+
+    def _exiting_command(self, calls: list) -> BackgroundCommand:
+        """A running command as terminate_now sees it, without a process."""
+        from types import SimpleNamespace
+        running = BackgroundCommand.__new__(BackgroundCommand)
+        running.killed = False
+        running._pgid = 1234
+        running._proc = SimpleNamespace(pid=1234, returncode=None,
+                                        kill=lambda: calls.append("kill"))
+        return running
+
+    def test_terminate_now_on_windows_leaves_the_tree_to_taskkill(self) -> None:
+        from types import SimpleNamespace
+        calls: list = []
+        running = self._exiting_command(calls)
+        # Windows' signal module has no SIGKILL at all, so the stand-in has
+        # none either: reaching for it is the failure this guards against.
+        with patch("paimon.tools.os.name", "nt"), \
+                patch("paimon.tools.signal", SimpleNamespace(SIGTERM=signal.SIGTERM)), \
+                patch("paimon.tools.subprocess.Popen",
+                      side_effect=lambda argv, **_: calls.append(argv)):
+            running.terminate_now()
+
+        self.assertTrue(running.killed)
+        self.assertEqual(calls, [["taskkill", "/PID", "1234", "/T", "/F"]],
+                         "killing the leader first would orphan the tree taskkill walks")
+
+    def test_terminate_now_on_windows_kills_the_leader_when_taskkill_is_missing(self) -> None:
+        from types import SimpleNamespace
+        calls: list = []
+        running = self._exiting_command(calls)
+        with patch("paimon.tools.os.name", "nt"), \
+                patch("paimon.tools.signal", SimpleNamespace(SIGTERM=signal.SIGTERM)), \
+                patch("paimon.tools.subprocess.Popen", side_effect=OSError("no taskkill")):
+            running.terminate_now()
+
         self.assertEqual(calls, ["kill"])
 
 
