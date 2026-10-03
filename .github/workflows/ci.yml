@@ -7,11 +7,24 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # The other platforms differ in the shell, process and file-locking
+        # code rather than by Python version, so the oldest and the newest
+        # supported one each is enough there.
+        include:
+          - os: windows-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
