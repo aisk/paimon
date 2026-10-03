@@ -90,12 +90,13 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gate("start_new_session", {"prompt": "x"}, mode, self.cwd), "confirm")
 
     def test_safe_shell_commands_auto_allowed(self) -> None:
-        for mode in ("read", "edit"):
-            self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
-            self.assertEqual(gate("shell", {"command": "git status"}, mode, self.cwd), "allow")
-        with patch.dict(os.environ, {"CDPATH": ""}):
-            self.assertEqual(gate("shell", {"command": "cd sub && ls"}, "read", self.cwd), "allow")
-        self.assertEqual(gate("shell", {}, "read", self.cwd), "confirm")
+        with patch("paimon.tools.shell_executable", return_value="/bin/sh"):
+            for mode in ("read", "edit"):
+                self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
+                self.assertEqual(gate("shell", {"command": "git status"}, mode, self.cwd), "allow")
+            with patch.dict(os.environ, {"CDPATH": ""}):
+                self.assertEqual(gate("shell", {"command": "cd sub && ls"}, "read", self.cwd), "allow")
+            self.assertEqual(gate("shell", {}, "read", self.cwd), "confirm")
 
     def test_strict_disables_safe_commands(self) -> None:
         for mode in ("read", "edit"):
@@ -108,6 +109,11 @@ class SafeCommandTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.cwd = Path(tmp.name).resolve()
+        # The list models sh, so it is tested as if sh ran the command on
+        # every platform; under cmd.exe nothing is recognized at all.
+        shell = patch("paimon.tools.shell_executable", return_value="/bin/sh")
+        shell.start()
+        self.addCleanup(shell.stop)
 
     def test_recognized_read_only_commands(self) -> None:
         for cmd in (
@@ -167,12 +173,13 @@ class SafeCommandTest(unittest.TestCase):
                     "grep ';' f"):
             self.assertTrue(safe_command(cmd, self.cwd), cmd)
 
-    def test_cmd_expansion_rejects_on_windows(self) -> None:
-        # cmd.exe runs the command there: it expands %VAR% and unescapes "^"
-        # after the check has already looked at the literal text.
-        with patch("paimon.tools.os.name", "nt"):
-            for cmd in ("echo %USERNAME%", "cat %SECRET_FILE%", 'cat "%SECRET_FILE%"',
-                        "cat .^./x"):
+    def test_nothing_is_recognized_under_cmd(self) -> None:
+        # cmd.exe parses differently from the sh this list models: "'" is not
+        # a quote there, %VAR% expands, "^" escapes, and a command is looked
+        # up in the current directory before PATH.
+        with patch("paimon.tools.shell_executable", return_value=None):
+            for cmd in ("ls", "git status", "echo %USERNAME%", "cat .^./x",
+                        "echo ' && del important.txt && echo '"):
                 self.assertFalse(safe_command(cmd, self.cwd), cmd)
 
     def test_operator_edge_cases_reject(self) -> None:
@@ -334,7 +341,8 @@ class BackgroundGateTest(unittest.TestCase):
 
     def test_a_safe_looking_command_still_confirms(self) -> None:
         args = {"command": "ls -la", "description": "listing"}
-        self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
+        with patch("paimon.tools.shell_executable", return_value="/bin/sh"):
+            self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
         self.assertEqual(gate("run_background", args, "read", self.cwd), "confirm",
                          "nothing that keeps running is waved through")
         self.assertEqual(gate("run_background", args, "edit", self.cwd), "confirm")

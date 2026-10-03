@@ -361,12 +361,6 @@ def _inside(path: Path, cwd: Path) -> bool:
 # like grep "a|b" stay allowed.
 _SHELL_METACHARS = frozenset("$`<>()\\{[\n\r")
 
-# The same idea for cmd.exe, which is what runs the command on Windows and
-# which the set above knows nothing about: %VAR% expands everywhere, quotes
-# included, and "^" escapes the next character, so "cat %SECRET%" or
-# "cat .^./x" would be checked as one path and run as another.
-_CMD_METACHARS = frozenset("%^")
-
 
 def _split_segments(command: str) -> Optional[list[tuple[str, str]]]:
     """Split a command at unquoted &&, ||, ";" and "|" into (operator,
@@ -597,10 +591,16 @@ def safe_command(command: str, cwd: Path) -> bool:
     Compound commands pass when every &&/||/;/|-separated segment passes on
     its own. A cd segment moves the base later relative paths resolve
     against, but containment is always checked against the original cwd.
+
+    Nothing is recognized when cmd.exe runs the command: everything below
+    models sh. cmd does not treat "'" as a quote, so "echo ' && del x && echo '"
+    reads as one echo here and runs as three commands there, and it looks a
+    command up in the current directory before PATH, so "cat" may be a
+    cat.bat the agent wrote a moment ago.
     """
-    if any(ch in _SHELL_METACHARS for ch in command):
+    if shell_executable() is None:
         return False
-    if os.name == "nt" and any(ch in _CMD_METACHARS for ch in command):
+    if any(ch in _SHELL_METACHARS for ch in command):
         return False
     parts = _split_segments(command)
     if parts is None:
@@ -1599,10 +1599,14 @@ def _line_buffered(command: str) -> str:
     inherit; it does nothing for Go or Rust programs, or on musl. This is a
     mitigation, not a fix — output arriving late is what a pipe instead of a
     terminal costs.
+
+    Left alone under cmd.exe: the only stdbuf found there is the one Git for
+    Windows ships, and wrapping would run the command in its sh instead of the
+    shell the system prompt names.
     """
-    if not shutil.which("stdbuf"):
+    shell = shell_executable()
+    if shell is None or not shutil.which("stdbuf"):
         return command
-    shell = shell_executable() or "sh"
     return f"stdbuf -oL -eL {shlex.quote(shell)} -c {shlex.quote(command)}"
 
 
@@ -1626,6 +1630,7 @@ class BackgroundCommand:
         self._transport = transport
         self._pgid = pgid
         self._reading = asyncio.ensure_future(self._read())
+        self._killing: Optional[asyncio.Future] = None
 
     @property
     def running(self) -> bool:
@@ -1660,7 +1665,9 @@ class BackgroundCommand:
         if self.killed or not self.running:
             return
         self.killed = True
-        asyncio.ensure_future(_kill_tree(self._proc, self._pgid))
+        # Held so the escalation is not collected halfway: the loop keeps only
+        # a weak reference to a task.
+        self._killing = asyncio.ensure_future(_kill_tree(self._proc, self._pgid))
 
     def terminate_now(self) -> None:
         """Signal the group without awaiting anything, on the way out.

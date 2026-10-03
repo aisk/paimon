@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +52,7 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(denied)
         self.assertIn("hi", result)
 
+    @unittest.skipIf(os.name == "nt", "nothing is auto-allowed under cmd.exe")
     async def test_safe_command_runs_without_confirm_hook(self) -> None:
         result, denied = await run_tool("shell", {"command": "ls"}, self.cwd, "read")
         self.assertFalse(denied)
