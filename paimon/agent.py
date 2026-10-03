@@ -924,7 +924,7 @@ class Agent:
                     ) as stream:
                         async for event in stream:
                             if first_event_at is None:
-                                first_event_at = time.monotonic()
+                                first_event_at = time.perf_counter()
                             if isinstance(event, PartStartEvent):
                                 part = event.part
                                 if isinstance(part, ThinkingPart) and part.content:
@@ -945,7 +945,10 @@ class Agent:
                                     yield TextDelta(delta.content_delta)
                         response = stream.get()
                         if first_event_at is not None:
-                            elapsed = time.monotonic() - first_event_at
+                            # perf_counter, not monotonic: Windows ticks monotonic
+                            # every ~16ms, so a short response measured 0s and
+                            # reported no stats at all.
+                            elapsed = time.perf_counter() - first_event_at
                             usage = response.usage
                             if usage.output_tokens and elapsed > 0:
                                 stats = RequestStats(usage.output_tokens, elapsed,
