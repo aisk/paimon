@@ -19,6 +19,7 @@ from textual.widgets import RichLog, Static
 
 from .jobs import CommandJob, State
 from .pane import Pane
+from .tools import decode_output
 
 # How often the pane takes what has arrived. Polling rather than a callback
 # from the reader: bursts coalesce into one repaint, and nothing in the output
@@ -162,14 +163,14 @@ class CommandPane(Pane):
         self._pending += data
         head, newline, self._pending = self._pending.rpartition(b"\n")
         if newline:
-            for line in head.decode("utf-8", errors="replace").split("\n"):
+            for line in decode_output(head).split("\n"):
                 # A carriage return means the program redrew the line in place
                 # (a progress bar); the last redraw is what a terminal would
                 # be showing.
                 log.write(Text.from_ansi(line.rpartition("\r")[2]))
         if self._pending and not self.is_running:
             # Nothing will terminate this line now.
-            log.write(Text.from_ansi(self._pending.decode("utf-8", errors="replace")))
+            log.write(Text.from_ansi(decode_output(self._pending)))
             self._pending = b""
 
     def _refresh_status(self) -> None:

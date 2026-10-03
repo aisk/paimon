@@ -1098,6 +1098,21 @@ def _format_size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f}MB"
 
 
+def decode_output(data: bytes) -> str:
+    """Command output as text.
+
+    Windows console programs (cmd.exe built-ins above all) write in the OEM
+    code page rather than UTF-8, so output that is not valid UTF-8 is read as
+    that instead of being turned into replacement marks.
+    """
+    if os.name == "nt":
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("oem", errors="replace")
+    return data.decode("utf-8", errors="replace")
+
+
 def _prune_overflow(directory: Path) -> None:
     """Drop overflow files old enough that no live session can still cite them."""
     cutoff = time.time() - _OVERFLOW_TTL
@@ -1172,7 +1187,7 @@ class _OutputTail:
         if len(data) > _SHELL_MAX_BYTES:
             data = data[len(data) - _SHELL_MAX_BYTES:]
             trimmed = True
-        text = data.decode("utf-8", errors="replace")
+        text = decode_output(data)
         partial_line = False
         if trimmed:
             newline = text.find("\n")
@@ -1335,6 +1350,25 @@ def shell_executable() -> Optional[str]:
     return shutil.which("bash") or "/bin/sh"
 
 
+def _output_pipe():
+    """A pipe for a command's output: the read end for the loop, the write fd
+    for the child.
+
+    On Windows the proactor loop can only read a handle opened for overlapped
+    I/O, which os.pipe() does not produce (registering it with the completion
+    port fails and the output is silently lost), so the pipe is built the way
+    asyncio builds its own subprocess pipes.
+    """
+    if os.name == "nt":
+        import msvcrt
+        from asyncio import windows_utils
+
+        read_handle, write_handle = windows_utils.pipe(overlapped=(True, False))
+        return windows_utils.PipeHandle(read_handle), msvcrt.open_osfhandle(write_handle, 0)
+    read_fd, write_fd = os.pipe()
+    return os.fdopen(read_fd, "rb", 0), write_fd
+
+
 async def _spawn_shell(
     command: str, cwd: Path, env: Optional[dict] = None
 ) -> tuple[asyncio.subprocess.Process, asyncio.StreamReader, asyncio.ReadTransport]:
@@ -1347,7 +1381,7 @@ async def _spawn_shell(
     alone; the read end comes back as a stream plus the transport to close
     when a descendant will not let go.
     """
-    read_fd, write_fd = os.pipe()
+    pipe, write_fd = _output_pipe()
     try:
         options = dict(
             cwd=str(cwd),
@@ -1376,11 +1410,10 @@ async def _spawn_shell(
             # flips it into POSIX mode.
             proc = await asyncio.create_subprocess_exec(shell, "-c", command, **options)
     except BaseException:
-        os.close(read_fd)
+        pipe.close()
         raise
     finally:
         os.close(write_fd)
-    pipe = os.fdopen(read_fd, "rb", 0)
     stream = asyncio.StreamReader()
     try:
         transport, _ = await asyncio.get_running_loop().connect_read_pipe(
@@ -1425,7 +1458,9 @@ async def _stop_reader(reader: asyncio.Task, transport: asyncio.ReadTransport) -
     """End the pump task, closing the pipe if a descendant still holds it open."""
     if not reader.done():
         reader.cancel()
-        _stop_reading(transport)
+    # Unconditional: the proactor transport stays open after EOF, unlike the
+    # POSIX one, and closing a closed transport does nothing.
+    _stop_reading(transport)
     try:
         await reader
     except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup only
@@ -1659,7 +1694,7 @@ def tail_text(data: bytes, dropped: int = 0, limit: int = _SHELL_MAX_BYTES) -> s
     if trimmed > 0:
         data = data[-limit:]
         dropped += trimmed
-    text = data.decode("utf-8", errors="replace")
+    text = decode_output(data)
     if dropped > 0:
         text = f"[{_format_size(dropped)} of earlier output dropped]\n{text}"
     return text
