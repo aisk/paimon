@@ -284,9 +284,6 @@ class ConfigDurableWriteTest(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text())["model"], "test:m")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ConfigSkillsTest(unittest.TestCase):
     def setUp(self) -> None:

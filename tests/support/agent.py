@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from paimon import agent as agent_module
+from paimon.config import Config
 from paimon.session import Session
 
 # Constructor arguments for one instance of every event ``Agent.run`` and
@@ -62,6 +63,13 @@ def make_session(cwd: Path) -> Session:
         "created_at": "2026-01-01T00:00:00+00:00",
     })
     return session
+
+
+def open_agent(cwd: Path, **kwargs) -> agent_module.Agent:
+    """An Agent on a fresh persisted session in cwd, with a stub model configured."""
+    session = make_session(cwd)
+    session.append_system_prompt("snapshot")
+    return agent_module.Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"), **kwargs)
 
 
 def stub_model(tool_name: str | None = None, arguments: str = "{}") -> FunctionModel:

@@ -72,6 +72,3 @@ class LocateLineTest(unittest.TestCase):
         self.assertIsNone(locate_line(str(self.path), "gone", "also gone"))
         self.assertIsNone(locate_line("no/such/file", "a", "b"))
 
-
-if __name__ == "__main__":
-    unittest.main()

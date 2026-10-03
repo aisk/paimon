@@ -166,6 +166,3 @@ class SpawnToolWithTypesTest(unittest.TestCase):
         self.assertNotIn("agent", function["parameters"]["properties"])
         self.assertNotIn("- explore:", function["description"])
 
-
-if __name__ == "__main__":
-    unittest.main()

@@ -398,6 +398,3 @@ class ChildSessionTest(SessionScanTestCase):
         self.assertEqual(forked.parent_id, parent.id)
         self.assertNotIn(forked.id, [session.id for session in Session.list(self.cwd)])
 
-
-if __name__ == "__main__":
-    unittest.main()

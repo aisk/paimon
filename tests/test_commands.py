@@ -532,6 +532,3 @@ class VersionTest(unittest.TestCase):
         with patch("paimon.commands.metadata.version", side_effect=commands.metadata.PackageNotFoundError):
             self.assertEqual(commands.version(), "unknown")
 
-
-if __name__ == "__main__":
-    unittest.main()

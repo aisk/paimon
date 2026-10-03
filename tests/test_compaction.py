@@ -192,9 +192,6 @@ class SessionCompactionTest(unittest.TestCase):
             self.assertEqual([record.get("type") for record in records].count("compaction"), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class AgentStatusExclusionTest(unittest.TestCase):
     def test_agent_status_lines_never_reach_the_summary_prompt(self) -> None:

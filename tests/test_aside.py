@@ -332,6 +332,3 @@ class AsideRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.sleeps, [])
 
-
-if __name__ == "__main__":
-    unittest.main()

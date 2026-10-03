@@ -72,6 +72,3 @@ class LockfileTest(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertTrue(lockfile.held(self.path), "the claim outlives the name")
 
-
-if __name__ == "__main__":
-    unittest.main()

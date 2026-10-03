@@ -87,6 +87,3 @@ class ProviderAvailabilityTest(unittest.TestCase):
         ]), patch("paimon.login.is_provider_available", side_effect=lambda name: name != "bedrock"):
             self.assertEqual(_providers(), ["anthropic", "zai"])
 
-
-if __name__ == "__main__":
-    unittest.main()

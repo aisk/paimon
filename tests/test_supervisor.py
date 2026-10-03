@@ -616,6 +616,3 @@ class BackgroundCommandTest(SupervisorTestCase):
         self.assertEqual(supervisor.status_summary(self.parent), f"{job_id} exited (code 1)")
         self.assertIsNone(supervisor.status_summary(self.parent), "said once, not every turn")
 
-
-if __name__ == "__main__":
-    unittest.main()

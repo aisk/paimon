@@ -391,9 +391,6 @@ class DriveTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("partial", ends[0]["partial_text"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class HeadlessToolsetTest(unittest.TestCase):
     """-p runs one turn and then tears the loop down, so an agent it started

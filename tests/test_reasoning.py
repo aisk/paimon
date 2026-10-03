@@ -200,6 +200,3 @@ class StripForeignThinkingTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(_strip_foreign_thinking([foreign], model), [])
 
-
-if __name__ == "__main__":
-    unittest.main()

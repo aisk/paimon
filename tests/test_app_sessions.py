@@ -245,10 +245,10 @@ class ProfileSwitchTest(AppTestCase):
             # An unlisted typed name switches to a not-yet-existing profile,
             # which has no model, so the login flow opens. Cancel it.
             app.screen.dismiss("fresh")
-            await pilot.pause()
-            await pilot.pause()
+            await self._wait_for(
+                pilot, lambda: self._login_screens(app) and isinstance(app.screen, PickerScreen))
             await pilot.press("escape")
-            await pilot.pause()
+            await self._wait_for(pilot, lambda: app.config.profile == "default")
             self.assertEqual(app.config.profile, "default")
             self.assertEqual(app.config.model, "test-model")
             self.assertIs(app.pane.agent.config, app.config)

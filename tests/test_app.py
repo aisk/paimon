@@ -112,12 +112,7 @@ class MultiPaneTest(AppTestCase):
                 await pilot.pause()
                 pane = app.pane
                 pane.handle_submit(PromptInput.Submitted("go"))
-                for _ in range(200):
-                    await pilot.pause()
-                    if pane.needs_confirm:
-                        break
-                else:
-                    raise AssertionError("confirm panel never appeared")
+                await self._wait_for(pilot, lambda: pane.needs_confirm)
 
                 await pilot.press("ctrl+w")
                 await pilot.pause()

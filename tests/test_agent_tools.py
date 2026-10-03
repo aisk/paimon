@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,7 +23,7 @@ from paimon.agent import (
     replay_events,
 )
 from paimon.config import Config
-from tests.support.agent import FakeSupervisor, make_session, stub_model
+from tests.support.agent import FakeSupervisor, make_session, open_agent, stub_model
 
 
 class HistoryToolWiringTest(unittest.IsolatedAsyncioTestCase):
@@ -46,12 +47,6 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
     """The agent consults the gate per tool call: allow skips the confirm hook,
     confirm awaits it. The gate's full decision table is covered in test_tools."""
 
-    @staticmethod
-    def _agent(cwd: Path, **kwargs) -> Agent:
-        session = make_session(cwd)
-        session.append_system_prompt("snapshot")
-        return Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"), **kwargs)
-
     async def _run_tool_turn(self, agent: Agent, name: str, arguments: str) -> ToolEnd:
         agent._cached_model = None  # the agent caches per config; each turn gets a fresh stub
         with patch("paimon.agent.build_model", return_value=stub_model(name, arguments)):
@@ -62,7 +57,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory).resolve()
             confirm = AsyncMock(return_value=False)
-            agent = self._agent(cwd, confirm=confirm, mode="edit")
+            agent = open_agent(cwd, confirm=confirm, mode="edit")
 
             end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
 
@@ -74,7 +69,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory).resolve()
             confirm = AsyncMock(return_value=False)
-            agent = self._agent(cwd, confirm=confirm, mode="read")
+            agent = open_agent(cwd, confirm=confirm, mode="read")
 
             end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
             confirm.assert_awaited_once()
@@ -87,12 +82,13 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(end.denied)
             self.assertEqual((cwd / "a.txt").read_text(), "hi")
 
+    @unittest.skipIf(os.name == "nt", "nothing is auto-allowed under cmd.exe")
     async def test_read_only_commands_run_unless_the_config_says_strict(self) -> None:
         """The safe_commands setting has to reach run_tool, not just the gate."""
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory).resolve()
             confirm = AsyncMock(return_value=False)
-            agent = self._agent(cwd, confirm=confirm, mode="read")
+            agent = open_agent(cwd, confirm=confirm, mode="read")
 
             end = await self._run_tool_turn(agent, "shell", '{"command": "pwd"}')
             confirm.assert_not_awaited()
@@ -247,12 +243,6 @@ class AskUserTest(unittest.IsolatedAsyncioTestCase):
     as the tool result; without a hook it fails with a readable error."""
 
     @staticmethod
-    def _agent(cwd: Path, **kwargs) -> Agent:
-        session = make_session(cwd)
-        session.append_system_prompt("snapshot")
-        return Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"), **kwargs)
-
-    @staticmethod
     async def _run(agent: Agent, arguments: str) -> list:
         with patch("paimon.agent.build_model", return_value=stub_model("ask_user", arguments)):
             return [event async for event in agent.run("go")]
@@ -261,7 +251,7 @@ class AskUserTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             ask = AsyncMock(return_value="Postgres")
-            agent = self._agent(cwd, ask=ask, mode="read")
+            agent = open_agent(cwd, ask=ask, mode="read")
 
             events = await self._run(agent, '{"question": "Which db?", "options": ["Postgres", "SQLite"]}')
 
@@ -278,7 +268,7 @@ class AskUserTest(unittest.IsolatedAsyncioTestCase):
     async def test_dismissal_tells_the_model_to_carry_on(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
-            agent = self._agent(cwd, ask=AsyncMock(return_value=None), mode="read")
+            agent = open_agent(cwd, ask=AsyncMock(return_value=None), mode="read")
 
             events = await self._run(agent, '{"question": "Which db?"}')
 
@@ -289,7 +279,7 @@ class AskUserTest(unittest.IsolatedAsyncioTestCase):
     async def test_without_ask_hook_the_call_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
-            agent = self._agent(cwd, mode="yolo")
+            agent = open_agent(cwd, mode="yolo")
 
             events = await self._run(agent, '{"question": "Which db?"}')
 
@@ -301,7 +291,7 @@ class AskUserTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             ask = AsyncMock(return_value="x")
-            agent = self._agent(cwd, ask=ask, mode="read")
+            agent = open_agent(cwd, ask=ask, mode="read")
 
             events = await self._run(agent, '{"question": "  "}')
 
@@ -315,12 +305,6 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
     request; without a confirm hook it is denied even in yolo mode."""
 
     @staticmethod
-    def _agent(cwd: Path, **kwargs) -> Agent:
-        session = make_session(cwd)
-        session.append_system_prompt("snapshot")
-        return Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"), **kwargs)
-
-    @staticmethod
     async def _run(agent: Agent, arguments: str = '{"prompt": "next phase"}') -> list:
         with patch("paimon.agent.build_model",
                    return_value=stub_model("start_new_session", arguments)):
@@ -330,7 +314,7 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             confirm = AsyncMock(return_value=True)
-            agent = self._agent(cwd, confirm=confirm, mode="yolo")
+            agent = open_agent(cwd, confirm=confirm, mode="yolo")
 
             events = await self._run(agent)
 
@@ -350,7 +334,7 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             confirm = AsyncMock(return_value=False)
-            agent = self._agent(cwd, confirm=confirm, mode="read")
+            agent = open_agent(cwd, confirm=confirm, mode="read")
 
             events = await self._run(agent)
 
@@ -363,7 +347,7 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
     async def test_without_confirm_hook_denied_even_in_yolo(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
-            agent = self._agent(cwd, mode="yolo")
+            agent = open_agent(cwd, mode="yolo")
 
             events = await self._run(agent)
 
@@ -376,7 +360,7 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             confirm = AsyncMock(return_value=True)
-            agent = self._agent(cwd, confirm=confirm, mode="read")
+            agent = open_agent(cwd, confirm=confirm, mode="read")
 
             events = await self._run(agent, '{"prompt": "  "}')
 
@@ -390,15 +374,9 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
 class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
     """The four supervised tools as the agent loop sees them."""
 
-    @staticmethod
-    def _agent(cwd: Path, **kwargs) -> Agent:
-        session = make_session(cwd)
-        session.append_system_prompt("snapshot")
-        return Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"), **kwargs)
-
     async def test_without_a_supervisor_they_refuse_instead_of_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            agent = self._agent(Path(directory))
+            agent = open_agent(Path(directory))
             with patch("paimon.agent.build_model",
                        return_value=stub_model("spawn_agent", '{"prompt": "go"}')):
                 events = [event async for event in agent.run("do it")]
@@ -409,7 +387,7 @@ class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_narrowed_toolset_disables_them_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             toolset = tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED)
-            agent = self._agent(Path(directory), toolset=toolset)
+            agent = open_agent(Path(directory), toolset=toolset)
             agent.supervisor = FakeSupervisor()
             with patch("paimon.agent.build_model",
                        return_value=stub_model("spawn_agent", '{"prompt": "go"}')):
@@ -422,7 +400,7 @@ class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_call_is_handed_to_the_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            agent = self._agent(Path(directory))
+            agent = open_agent(Path(directory))
             agent.supervisor = supervisor = FakeSupervisor()
             with patch("paimon.agent.build_model",
                        return_value=stub_model("read_job", '{"job_id": "a1f2"}')):
@@ -436,7 +414,7 @@ class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
     def test_the_offered_schema_lists_the_types_and_the_registry_is_untouched(self) -> None:
         """The spawn_agent schema includes discovered types without changing the registry."""
         with tempfile.TemporaryDirectory() as directory:
-            agent = self._agent(Path(directory))
+            agent = open_agent(Path(directory))
             offered = next(schema for schema in agent.tool_schemas
                            if schema["function"]["name"] == "spawn_agent")["function"]
             self.assertIn("agent", offered["parameters"]["properties"])

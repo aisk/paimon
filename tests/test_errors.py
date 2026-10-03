@@ -29,6 +29,3 @@ class ErrorTreeTest(unittest.TestCase):
         for error in (SessionBusyError, SessionIncompleteError):
             self.assertTrue(issubclass(error, SessionError), error.__name__)
 
-
-if __name__ == "__main__":
-    unittest.main()

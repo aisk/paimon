@@ -511,9 +511,6 @@ class HeadlessRunTest(CliTestCase):
         self.assertLess(prompt.index("log line"), prompt.index("summarize"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class SkillFlagsTest(unittest.TestCase):
     def setUp(self) -> None:

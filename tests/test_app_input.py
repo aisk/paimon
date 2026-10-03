@@ -87,12 +87,7 @@ class ConfirmPanelTest(AppTestCase):
                    return_value=stub_model("shell", '{"command": "rm x"}')):
             async with app.run_test() as pilot:
                 app.pane.handle_submit(PromptInput.Submitted("go"))
-                for _ in range(200):
-                    await pilot.pause()
-                    if app.query(ConfirmPanel):
-                        break
-                else:
-                    raise AssertionError("confirm panel never appeared")
+                await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
                 await pilot.press("ctrl+c")
 
     async def test_long_command_shows_head_and_tail(self) -> None:
@@ -392,10 +387,7 @@ class FailedTurnQueueTest(AppTestCase):
         async with app.run_test() as pilot:
             with patch("paimon.agent.build_model", return_value=self._failing_model()):
                 app.pane.job.submit("go")
-                for _ in range(200):
-                    await pilot.pause()
-                    if not app.pane.is_busy:
-                        break
+                await self._wait_for(pilot, lambda: not app.pane.is_busy)
             self.assertIs(app.pane.job.result.outcome, Outcome.FAILED)
             self.assertIn("provider failed", self._log_text(app.pane),
                           "the error is shown in the log, not raised out of the driver")

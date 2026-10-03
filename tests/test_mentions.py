@@ -89,6 +89,3 @@ class ExpandMentionsTest(unittest.TestCase):
 
             self.assertEqual(expand_mentions("@pkg", cwd), "@pkg")
 
-
-if __name__ == "__main__":
-    unittest.main()
