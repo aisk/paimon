@@ -361,6 +361,12 @@ def _inside(path: Path, cwd: Path) -> bool:
 # like grep "a|b" stay allowed.
 _SHELL_METACHARS = frozenset("$`<>()\\{[\n\r")
 
+# The same idea for cmd.exe, which is what runs the command on Windows and
+# which the set above knows nothing about: %VAR% expands everywhere, quotes
+# included, and "^" escapes the next character, so "cat %SECRET%" or
+# "cat .^./x" would be checked as one path and run as another.
+_CMD_METACHARS = frozenset("%^")
+
 
 def _split_segments(command: str) -> Optional[list[tuple[str, str]]]:
     """Split a command at unquoted &&, ||, ";" and "|" into (operator,
@@ -593,6 +599,8 @@ def safe_command(command: str, cwd: Path) -> bool:
     against, but containment is always checked against the original cwd.
     """
     if any(ch in _SHELL_METACHARS for ch in command):
+        return False
+    if os.name == "nt" and any(ch in _CMD_METACHARS for ch in command):
         return False
     parts = _split_segments(command)
     if parts is None:

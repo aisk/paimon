@@ -167,6 +167,14 @@ class SafeCommandTest(unittest.TestCase):
                     "grep ';' f"):
             self.assertTrue(safe_command(cmd, self.cwd), cmd)
 
+    def test_cmd_expansion_rejects_on_windows(self) -> None:
+        # cmd.exe runs the command there: it expands %VAR% and unescapes "^"
+        # after the check has already looked at the literal text.
+        with patch("paimon.tools.os.name", "nt"):
+            for cmd in ("echo %USERNAME%", "cat %SECRET_FILE%", 'cat "%SECRET_FILE%"',
+                        "cat .^./x"):
+                self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
     def test_operator_edge_cases_reject(self) -> None:
         for cmd in ("ls &&", "&& ls", "| wc", "ls |", "ls ;; pwd",
                     "ls && && pwd", "ls & pwd", "ls & rm x", "ls &",
@@ -177,7 +185,7 @@ class SafeCommandTest(unittest.TestCase):
         with patch.dict(os.environ, {"CDPATH": ""}):
             for cmd in ("cd sub && ls", "cd sub && cat a.txt",
                         "cd sub && cd deeper && ls", "cd sub && ls ../",
-                        "cd 'sub' && ls", f"cd {self.cwd}/sub && ls", "cd sub"):
+                        "cd 'sub' && ls", f"cd {self.cwd.as_posix()}/sub && ls", "cd sub"):
                 self.assertTrue(safe_command(cmd, self.cwd), cmd)
 
     def test_cd_forms_reject(self) -> None:
