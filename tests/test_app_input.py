@@ -32,6 +32,7 @@ from paimon.ui import (
 )
 from tests.support.agent import stub_model
 from tests.support.app import AppTestCase, end_turn, hold_turn
+from tests.support.shell import sleeper
 
 
 class ConfirmPanelTest(AppTestCase):
@@ -144,7 +145,13 @@ class QuestionPanelTest(AppTestCase):
     async def _open(app: PaimonApp, pilot, question: str = "Which db?",
                     options: list[str] | None = None) -> asyncio.Future:
         task = asyncio.ensure_future(app.pane._ask(question, options or []))
-        await pilot.pause()
+        # Until the keyboard is where the panel wants it, not for one pause:
+        # mounting and the focus hand-off to the answer box each take their
+        # own trips round the loop, and a key pressed earlier goes nowhere.
+        wanted = QuestionPanel if options else Input
+        await QuestionPanelTest._wait_for(
+            pilot, lambda: task.done() or (app.pane.needs_confirm
+                                           and isinstance(app.focused, wanted)))
         return task
 
     async def test_digit_picks_an_option_and_restores_prompt(self) -> None:
@@ -248,8 +255,7 @@ class ModeCycleTest(AppTestCase):
     async def test_shift_tab_while_confirm_panel_open_keeps_pending_future(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            task = asyncio.ensure_future(app.pane._confirm("shell", {"command": "echo hi"}))
-            await pilot.pause()
+            task = await self._open_confirm(app, pilot)
             await pilot.press("shift+tab")
             self.assertEqual(app.pane.mode, "edit")
             self.assertTrue(app.query(ConfirmPanel), "panel survives a mode switch")
@@ -503,7 +509,7 @@ class UserCommandTest(AppTestCase):
             interrupted = []
             app.pane.job.interrupt = lambda: interrupted.append(True)
 
-            app.pane.run_user_command("sleep 30")
+            app.pane.run_user_command(sleeper())
             await pilot.pause()
             app.pane.interrupt()
             with contextlib.suppress(WorkerCancelled):

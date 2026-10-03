@@ -39,9 +39,17 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
         return PaimonApp(agent, resumed=session is not None, pick_session=pick_session)
 
     @staticmethod
-    async def _open_confirm(app: PaimonApp, pilot, tool: str = "shell", args: dict | None = None) -> asyncio.Future:
-        task = asyncio.ensure_future(app.pane._confirm(tool, args or {"command": "echo hi"}))
-        await pilot.pause()
+    async def _open_confirm(app: PaimonApp, pilot, tool: str = "shell", args: dict | None = None,
+                            *, pane: SessionPane | None = None) -> asyncio.Future:
+        """Ask ``pane`` (the one on screen by default) to confirm a tool call."""
+        pane = pane or app.pane
+        job = pane.job
+        blocked = job.blocked
+        task = asyncio.ensure_future(pane._confirm(tool, args or {"command": "echo hi"}))
+        # Until the panel is up and waiting, not for one pause: mounting it
+        # takes several trips round the loop, and a key pressed before the
+        # last of them answers nothing and leaves the task pending for good.
+        await AppTestCase._wait_for(pilot, lambda: job.blocked > blocked or task.done())
         return task
 
     @staticmethod

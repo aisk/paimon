@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 from unittest.mock import AsyncMock, patch
 
@@ -22,6 +21,7 @@ from paimon.ui import (
 from tests.support.agent import stub_model
 from tests.support.app import AppTestCase
 from tests.support.jobs import FakeCommand
+from tests.support.shell import alive, pid_from, printer, spawner
 
 
 class SpawnAgentTest(AppTestCase):
@@ -49,6 +49,9 @@ class SpawnAgentTest(AppTestCase):
                 self.assertIs(app.focused, prompt, "a pane the user did not open takes no keys")
                 self.assertEqual(child.agent.cwd, parent.agent.cwd)
                 self.assertEqual(child.mode, parent.mode)
+                # The pane exists before the call that opened it has returned
+                # its result to the parent's log.
+                await self._wait_for(pilot, lambda: child.job.job_id in self._log_text(parent))
                 self.assertIn(child.job.job_id, self._log_text(parent),
                               "the parent is told the id it has to use")
                 self.assertIn(f"{child.job.job_id} check the parser",
@@ -78,6 +81,10 @@ class SpawnAgentTest(AppTestCase):
                 child = await self._spawn(app, pilot)
 
                 self.assertEqual(child.agent.session.parent_id, parent.agent.session.id)
+                # Listings only show a session once it holds a message, which
+                # the child writes when its first turn starts, not when its
+                # pane appears.
+                await self._wait_for(pilot, lambda: child.agent.history)
                 listed = [session.id for session in Session.list(parent.agent.cwd)]
                 self.assertNotIn(child.agent.session.id, listed)
                 self.assertIn(child.agent.session.id,
@@ -240,10 +247,17 @@ class SpawnAgentTest(AppTestCase):
                                 "the model only learns of it through the history")
 
 
+# What the command prints, as opposed to the command line itself, which also
+# holds the word and is shown at the top of its tab.
+PID = r"pid \d+"
+
+
 class BackgroundTaskTest(AppTestCase):
     """run_background in the UI: a process with a tab and no keyboard."""
 
-    COMMAND = "printf 'pid %s\\n' $$; sleep 30"
+    # Prints its own pid and starts a child, so "the command is gone" is
+    # checked on a process only a kill of the whole tree brings down.
+    COMMAND = spawner(then_sleep=True, own_pid=True)
 
     def _model(self, command: str | None = None) -> FunctionModel:
         return stub_model("run_background", json.dumps(
@@ -251,17 +265,9 @@ class BackgroundTaskTest(AppTestCase):
 
     @staticmethod
     def _pid(pane: CommandPane) -> int:
-        match = re.search(r"pid (\d+)", pane.command.output.since(0)[0].decode())
-        assert match, "the command never printed its pid"
-        return int(match.group(1))
+        return pid_from(pane.command.output.since(0)[0].decode())
 
-    @staticmethod
-    def _alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            return False
-        return True
+    _alive = staticmethod(alive)
 
     async def _start(self, app: PaimonApp, pilot) -> CommandPane:
         app.pane.handle_submit(PromptInput.Submitted("run the dev server"))
@@ -298,14 +304,16 @@ class BackgroundTaskTest(AppTestCase):
 
                 answer = await app._supervisor.handle(
                     "read_job", {"job_id": task.job.job_id}, caller=parent.agent)
-                self.assertIn("pid", answer)
+                self.assertRegex(answer, PID)
                 self.assertIn("running", answer)
-                self.assertNotIn("pid", self._command_log_text(task),
-                                 "a hidden tab writes nothing; RichLog would defer it all")
+                self.assertNotRegex(self._command_log_text(task), PID,
+                                    "a hidden tab writes nothing; RichLog would defer it all")
 
                 app._switch_to(task)
-                await self._wait_for(pilot, lambda: "pid" in self._command_log_text(task))
-                self.assertIn(self.COMMAND.split(";")[0].strip(), self._command_log_text(task),
+                await self._wait_for(pilot, lambda: re.search(PID, self._command_log_text(task)))
+                # Whitespace aside: the log wraps a command line this long.
+                self.assertIn("".join(self.COMMAND.split()),
+                              "".join(self._command_log_text(task).split()),
                               "the tab opens with the command it is running")
 
     @staticmethod
@@ -355,7 +363,7 @@ class BackgroundTaskTest(AppTestCase):
     async def test_an_exit_ends_the_tab_without_closing_it(self) -> None:
         app = self.make_app(mode="yolo")
         with patch("paimon.agent.build_model",
-                   return_value=self._model("printf 'built\\n'; exit 1")):
+                   return_value=self._model(printer("built", exit_code=1))):
             async with app.run_test() as pilot:
                 task = await self._start(app, pilot)
                 await self._wait_for(pilot, lambda: not task.is_running)
@@ -428,6 +436,29 @@ class BackgroundTaskTest(AppTestCase):
                 self.assertFalse(second.is_busy, "nothing woke the pane on screen")
                 self.assertFalse(any(is_agents_message(message)
                                      for message in second.agent.history))
+
+    async def test_crlf_lines_are_shown_and_redrawn_lines_keep_their_last_state(self) -> None:
+        app = self.make_app(mode="yolo")
+        running = FakeCommand("build")
+        with patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.supervisor.start_background",
+                      new=AsyncMock(return_value=running)):
+            async with app.run_test() as pilot:
+                await app._supervisor.handle(
+                    "run_background", {"command": "build", "description": "build"},
+                    caller=app.pane.agent)
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+                task = app.panes[1]
+                # The way Windows programs end a line, then a progress bar
+                # redrawn in place and ended the same way.
+                running.output.append(b"compiling\r\n10%\r90%\r\ndone\n")
+
+                app._switch_to(task)
+                await self._wait_for(pilot, lambda: "done" in self._command_log_text(task))
+                shown = self._command_log_text(task)
+                self.assertIn("compiling", shown, "a CRLF line is a line, not a blank")
+                self.assertIn("90%", shown)
+                self.assertNotIn("10%", shown, "only the last redraw is on screen")
 
     async def test_a_denied_confirmation_starts_nothing(self) -> None:
         app = self.make_app(mode="read")

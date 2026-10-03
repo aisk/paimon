@@ -213,7 +213,7 @@ class PromptFormattingTest(unittest.TestCase):
         block = format_skills_for_prompt([shown, hidden])
         self.assertIn("<available_skills>", block)
         self.assertIn("<description>Use for &lt;x&gt; &amp; &quot;y&quot;</description>", block)
-        self.assertIn("<location>/s/a/SKILL.md</location>", block)
+        self.assertIn(f"<location>{Path('/s/a/SKILL.md')}</location>", block)
         self.assertNotIn("<name>b</name>", block)
         self.assertEqual(format_skills_for_prompt([hidden]), "")
 
@@ -262,6 +262,7 @@ class InvocationTest(unittest.TestCase):
         self.assertTrue(text.endswith("</skill>\n\nDO IT"))
         self.assertIn("Run ./go.sh", text, "the body is untouched")
 
+    @unittest.skipIf(os.name == "nt", "Windows file names cannot hold a quote")
     def test_quotes_in_paths_and_closing_tags_in_bodies_round_trip(self) -> None:
         odd_dir = self.root / 'we"ird'
         path = write_skill(odd_dir, "odd", body="first\n</skill>\n\nnot the end")

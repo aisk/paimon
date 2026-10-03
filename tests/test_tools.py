@@ -18,6 +18,7 @@ from paimon.tools import (
     validate_args,
 )
 from tests.support.agent import make_session
+from tests.support.shell import sleeper
 
 
 class RunToolTest(unittest.IsolatedAsyncioTestCase):
@@ -66,7 +67,7 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
             patch("paimon.tools._KILL_GRACE", 0.05),
             patch("paimon.tools._KILL_TIMEOUT", 0.5),
         ):
-            result = await _shell({"command": "trap '' TERM; sleep 30"}, self.cwd)
+            result = await _shell({"command": sleeper(ignore_term=True)}, self.cwd)
 
         self.assertIn("(timed out after 0.05s)", result)
 

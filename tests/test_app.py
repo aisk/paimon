@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import patch
 
 from textual.containers import VerticalScroll
@@ -155,8 +154,7 @@ class PaneAttentionTest(AppTestCase):
             await pilot.press("ctrl+t")
             await pilot.pause()
 
-            task = asyncio.ensure_future(first._confirm("shell", {"command": "rm x"}))
-            await pilot.pause()
+            task = await self._open_confirm(app, pilot, args={"command": "rm x"}, pane=first)
             self.assertTrue(first.needs_confirm)
             self.assertIn("1 waiting on you",
                           str(app.query_one("#statusbar", Static).render()))
@@ -267,8 +265,7 @@ class BackgroundPaneTest(AppTestCase):
         async with app.run_test() as pilot:
             other = await self._background_pane(app)
             prompt = app.pane.query_one(PromptInput)
-            task = asyncio.ensure_future(other._confirm("shell", {"command": "rm x"}))
-            await pilot.pause()
+            task = await self._open_confirm(app, pilot, args={"command": "rm x"}, pane=other)
 
             self.assertEqual(len(other.query(ConfirmPanel)), 1, "the panel is up in its own pane")
             self.assertIs(app.focused, prompt, "the visible pane keeps the keyboard")
@@ -283,8 +280,7 @@ class BackgroundPaneTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             other = await self._background_pane(app)
-            waiting = asyncio.ensure_future(other._confirm("shell", {"command": "rm x"}))
-            await pilot.pause()
+            waiting = await self._open_confirm(app, pilot, args={"command": "rm x"}, pane=other)
             mine = await self._open_confirm(app, pilot)
 
             self.assertEqual(len(other.query(ConfirmPanel)), 1, "the sweep is pane-scoped")
