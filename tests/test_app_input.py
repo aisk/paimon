@@ -514,7 +514,9 @@ class UserCommandTest(AppTestCase):
             app.pane.interrupt()
             with contextlib.suppress(WorkerCancelled):
                 await app.workers.wait_for_complete()
-            await pilot.pause()
+            # The cancelled worker reports once the process tree is dead,
+            # which on Windows means waiting for taskkill.
+            await self._wait_for(pilot, lambda: app.query(ToolResult))
 
             self.assertEqual(interrupted, [])  # the turn is still running
             self.assertIn("interrupted", str(app.query(ToolResult).first().render()))

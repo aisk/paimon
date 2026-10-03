@@ -72,6 +72,15 @@ class RecapTest(AppTestCase):
         app.pane.handle_submit(PromptInput.Submitted("go"))
         await self._wait_for(pilot, lambda: not app.pane.is_busy)
 
+    async def _armed(self, app: PaimonApp, pilot):
+        """The recap timer, once the finished turn has got round to arming it.
+
+        The job stops being busy a few awaits before the pane closes the turn
+        out, which is where the timer is set.
+        """
+        await self._wait_for(pilot, lambda: app.pane._recap_timer is not None)
+        return app.pane._recap_timer
+
     async def test_a_recap_follows_a_tool_turn_that_goes_quiet(self) -> None:
         app = self.make_app(config=self._config())
         with patch("paimon.agent.build_model", return_value=self._model()):
@@ -112,7 +121,7 @@ class RecapTest(AppTestCase):
         with patch("paimon.agent.build_model", return_value=self._model()):
             async with app.run_test() as pilot:
                 await self._finish_a_turn(app, pilot)
-                armed = app.pane._recap_timer
+                armed = await self._armed(app, pilot)
                 self.assertIsNotNone(armed)
 
                 await pilot.press("h")
@@ -127,7 +136,7 @@ class RecapTest(AppTestCase):
         with patch("paimon.agent.build_model", return_value=self._model()):
             async with app.run_test() as pilot:
                 await self._finish_a_turn(app, pilot)
-                self.assertIsNotNone(app.pane._recap_timer)
+                await self._armed(app, pilot)
 
                 app.pane.handle_submit(PromptInput.Submitted("more"))
                 await pilot.pause()
