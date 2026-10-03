@@ -120,7 +120,7 @@ def load_context_files(cwd: Path) -> list[tuple[Path, str]]:
         candidate = current / CONTEXT_FILE
         if candidate.is_file():
             try:
-                found.append((candidate, candidate.read_text(errors="replace")))
+                found.append((candidate, candidate.read_text(encoding="utf-8", errors="replace")))
             except OSError:
                 pass
         if current == current.parent:

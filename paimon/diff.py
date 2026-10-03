@@ -108,7 +108,7 @@ def locate_line(path: str, old: str, new: str,
     if cwd is not None and not p.is_absolute():
         p = cwd / p
     try:
-        text = p.read_text(errors="replace")
+        text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     for needle in (old, new):

@@ -419,7 +419,7 @@ class ConfirmPanel(BlockingPanel):
             path = str(args.get("path") or "")
             content = self._clip(str(args.get("content") or ""))
             try:
-                existing = self._preview_path(path).read_text(errors="replace") if path else ""
+                existing = self._preview_path(path).read_text(encoding="utf-8", errors="replace") if path else ""
             except OSError:
                 existing = ""
             if existing:
