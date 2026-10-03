@@ -21,7 +21,6 @@ from paimon.login import LoginScreen, PickerScreen
 from paimon.pane import _session_label
 from paimon.ui import (
     AssistantMessage,
-    ConfirmPanel,
     PromptInput,
     ToolResult,
     UserMessage,
@@ -151,7 +150,7 @@ class HandoffTest(AppTestCase):
                    return_value=stub_model("start_new_session", '{"prompt": "carry on"}')):
             async with app.run_test() as pilot:
                 app.pane.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
+                await self._wait_for_panel(app, pilot)
                 await pilot.press("enter")
                 await self._wait_for(pilot, lambda: app.pane.agent.session.id != old.id
                                      and not app.pane.is_busy)
@@ -171,7 +170,7 @@ class HandoffTest(AppTestCase):
                    return_value=stub_model("start_new_session", '{"prompt": "carry on"}')):
             async with app.run_test() as pilot:
                 app.pane.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for(pilot, lambda: app.query(ConfirmPanel))
+                await self._wait_for_panel(app, pilot)
                 await pilot.press("escape")
                 await self._wait_for(pilot, lambda: not app.pane.is_busy)
 

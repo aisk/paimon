@@ -271,7 +271,9 @@ class SkillAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     def test_project_skills_are_discovered_and_listed_in_the_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
+            # Resolved, as discovery reports it: the temp dir is reached through
+            # a symlink on macOS and may be spelled as a short name on Windows.
+            cwd = Path(directory).resolve()
             (cwd / ".git").mkdir()
             path = self._write_skill(cwd / ".agents" / "skills" / "demo", "demo")
             with patch("paimon.skills.default_skill_dirs", wraps=real_default_skill_dirs) as dirs, \

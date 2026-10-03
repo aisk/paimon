@@ -219,7 +219,7 @@ class QuestionPanelTest(AppTestCase):
         with patch("paimon.agent.build_model", return_value=stub_model("ask_user", arguments)):
             async with app.run_test() as pilot:
                 app.pane.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for(pilot, lambda: app.query(QuestionPanel))
+                await self._wait_for_panel(app, pilot)
                 await pilot.press("1")
                 await self._wait_for(pilot, lambda: not app.pane.is_busy)
 

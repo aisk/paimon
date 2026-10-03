@@ -20,6 +20,7 @@ from paimon.session import (
     Session,
 )
 from paimon.tabs import PaneTab
+from paimon.ui import BlockingPanel
 
 
 class AppTestCase(unittest.IsolatedAsyncioTestCase):
@@ -51,6 +52,17 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
         # last of them answers nothing and leaves the task pending for good.
         await AppTestCase._wait_for(pilot, lambda: job.blocked > blocked or task.done())
         return task
+
+    @staticmethod
+    async def _wait_for_panel(app: PaimonApp, pilot) -> None:
+        """Wait until the pane on screen is asking and its panel has the keys.
+
+        A panel that is merely mounted is not enough to press a key at: focus
+        arrives a trip round the loop later, and until then the key goes to
+        nobody and the turn waits for an answer that already came and went.
+        """
+        await AppTestCase._wait_for(
+            pilot, lambda: app.pane.needs_confirm and isinstance(app.focused, BlockingPanel))
 
     @staticmethod
     def _old_session(content: str = "hello there") -> Session:

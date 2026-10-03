@@ -144,8 +144,21 @@ class BackgroundCommandTest(unittest.IsolatedAsyncioTestCase):
 
     async def _start(self, command: str):
         running = await start_background(command, self.cwd)
-        self.addCleanup(running.terminate_now)
+        self.addAsyncCleanup(self._stop, running)
         return running
+
+    @staticmethod
+    async def _stop(running) -> None:
+        """End the command before its working directory is cleaned up.
+
+        terminate_now only fires the kill on Windows, and a directory that is
+        still some process's working directory cannot be removed there, so the
+        tree kill is awaited instead.
+        """
+        if os.name == "nt":
+            await _kill_tree(running._proc, running._pgid)
+        else:
+            running.terminate_now()
 
     async def _wait(self, predicate, message: str) -> None:
         for _ in range(200):
