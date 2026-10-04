@@ -98,7 +98,7 @@ class CompactTest(unittest.IsolatedAsyncioTestCase):
         ]
         with (
             patch("paimon.compaction.count_tokens", return_value=10),
-            patch("paimon.compaction.model_request", new=AsyncMock(return_value=response)),
+            patch("paimon.llm.model_request", new=AsyncMock(return_value=response)),
         ):
             result = await compaction.compact(
                 messages,
@@ -155,7 +155,7 @@ class BoundedSummaryInputTest(unittest.TestCase):
                     _user("recent request")]
         with (
             patch("paimon.compaction.count_tokens", return_value=10),
-            patch("paimon.compaction.model_request", new=request_mock),
+            patch("paimon.llm.model_request", new=request_mock),
         ):
             asyncio.run(compaction.compact(
                 messages, model=object(), keep_recent_tokens=15,

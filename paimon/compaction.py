@@ -11,22 +11,20 @@ import weakref
 from dataclasses import dataclass
 from typing import Optional
 
-from pydantic_ai.direct import model_request
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     SystemPromptPart,
-    TextPart,
     ThinkingPart,
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_ai.models import Model
 
 from .errors import PaimonError
-from .llm import user_agent
+from .llm import ask_once
 from .model_windows import CONTEXT_WINDOWS
 from .session import summary_message
 
@@ -265,17 +263,14 @@ Use these sections:
 </conversation>"""
 
     async with _slot():
-        response = await model_request(
+        summary = await ask_once(
             model,
             [ModelRequest(parts=[
                 SystemPromptPart(content="You create context checkpoint summaries for an AI coding agent."),
                 UserPromptPart(content=prompt),
             ])],
-            model_settings={"max_tokens": _SUMMARY_MAX_TOKENS,
-                            "extra_headers": {"User-Agent": user_agent()}},
-            model_request_parameters=ModelRequestParameters(allow_text_output=True),
+            max_tokens=_SUMMARY_MAX_TOKENS,
         )
-    summary = "".join(part.content for part in response.parts if isinstance(part, TextPart))
     if not summary.strip():
         raise CompactionError("Context compaction returned an empty summary")
     result = CompactionResult(summary.strip(), kept_messages, tokens_before, tokens_after=0)
