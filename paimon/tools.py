@@ -1858,8 +1858,8 @@ REGISTRY: dict[str, Tool] = {
                 "name": "shell",
                 "description": (
                     "Run a shell command in the working directory and return its combined "
-                    "stdout/stderr. Use this for listing, searching (grep/find/ls), git, running "
-                    "tests, etc. Output is truncated to the last 2000 lines or ~28KB, whichever "
+                    "stdout/stderr. Use this for git, running tests and anything the other "
+                    "tools do not cover. Output is truncated to the last 2000 lines or ~28KB, whichever "
                     "comes first; when that happens the full output is written to a file and its "
                     "path is included in the result, so you can read the earlier part back."
                 ),
@@ -2091,7 +2091,7 @@ REGISTRY: dict[str, Tool] = {
                                 "was started and when it was stopped): resume that "
                                 "conversation with its history and role intact, the prompt "
                                 "becoming its next turn. Only your own agents' sessions "
-                                "qualify. Optional; not combinable with 'agent'."
+                                "qualify. Optional."
                             ),
                         },
                     },
@@ -2278,8 +2278,9 @@ SUPERVISED_TOOLS = ("spawn_agent", "send_to_agent", "run_background",
                     "read_job", "wait_for_job", "stop_job")
 
 # Tools that need a user at the keyboard. Headless has nobody to answer, so it
-# leaves them out rather than offering the model a question it cannot ask.
-INTERACTIVE_TOOLS = ("ask_user",)
+# leaves them out rather than offering the model a question it cannot ask or a
+# handoff nobody can approve, which would only ever come back denied.
+INTERACTIVE_TOOLS = ("ask_user", "start_new_session")
 
 # What a spawned agent must not be given: every job tool, and the handoff.
 #
@@ -2297,7 +2298,7 @@ INTERACTIVE_TOOLS = ("ask_user",)
 # The question, because a subagent works for the agent that started it, not
 # for the user: what it cannot settle belongs in its report, where the parent
 # can decide or ask on its behalf.
-SUBAGENT_DENIED = ("start_new_session", *INTERACTIVE_TOOLS, *SUPERVISED_TOOLS)
+SUBAGENT_DENIED = (*INTERACTIVE_TOOLS, *SUPERVISED_TOOLS)
 
 
 def without(registry: dict[str, Tool], names) -> dict[str, Tool]:

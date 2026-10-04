@@ -432,6 +432,8 @@ class Agent:
             cwd, extra_paths=config.skills, include_defaults=config.include_default_skills)
         agent_types, agent_type_diagnostics = agents.discover_agent_types(
             cwd, extra_paths=config.agents, include_defaults=config.include_default_agents)
+        # The prompt only mentions tools this agent will actually be offered.
+        tool_names = frozenset(tools.REGISTRY if toolset is None else toolset)
         is_new = session is None
         if session is None:
             session = Session.create(cwd, parent_session_id, agent_type)
@@ -442,7 +444,7 @@ class Agent:
         try:
             if is_new:
                 appended = append_system_prompt.strip() if append_system_prompt else None
-                system_prompt = build_system_prompt(cwd, skills)
+                system_prompt = build_system_prompt(cwd, skills, tool_names)
                 if appended:
                     system_prompt += f"\n\n{appended}"
                 session.append_system_prompt(system_prompt, appended=appended)
@@ -451,7 +453,7 @@ class Agent:
                 stored, appended = session.system_prompt_parts()
                 if stored is None:
                     raise SessionIncompleteError("Session does not contain a persisted system prompt")
-                system_prompt = build_system_prompt(cwd, skills)
+                system_prompt = build_system_prompt(cwd, skills, tool_names)
                 if appended:
                     system_prompt += f"\n\n{appended}"
                 if system_prompt != stored:
