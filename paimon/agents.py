@@ -252,7 +252,8 @@ def spawn_tool_with_types(tool: tools.Tool, types: Sequence[AgentType]) -> tools
     function["parameters"]["properties"]["agent"] = {
         "type": "string",
         "description": "Named agent type to run as (optional; omit for a "
-                       "general-purpose agent with your own tools).",
+                       "general-purpose agent with your own tools). Not "
+                       "combinable with 'session'.",
     }
     listing = "\n".join(f"- {t.name}: {t.description}" for t in types)
     function["description"] += f"\n\nAgent types available for 'agent':\n{listing}"

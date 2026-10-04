@@ -1,5 +1,6 @@
 import gc
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from paimon import compaction, lockfile, tools
+from paimon import compaction, lockfile, prompt, tools
 from paimon.agent import (
     Agent,
 )
@@ -39,7 +40,7 @@ class AgentSystemPromptTest(unittest.TestCase):
 
             self.assertEqual(first.system_prompt, "snapshot")
             self.assertEqual(session.system_prompt(), "snapshot")
-            generate.assert_called_once_with(cwd, [])
+            generate.assert_called_once_with(cwd, [], frozenset(tools.REGISTRY))
 
             def snapshots() -> list[str]:
                 return [json.loads(line)["content"]
@@ -115,6 +116,32 @@ class AgentSystemPromptTest(unittest.TestCase):
                                    toolset={"read_file": tools.REGISTRY["read_file"]})
 
             self.assertNotIn("You have these tools", agent.system_prompt)
+
+    def test_prompt_only_mentions_tools_the_agent_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            held = ("read_file", "glob", "grep")
+
+            with patch("paimon.agent.Session.create", return_value=session):
+                agent = Agent.open(cwd=cwd, config=Config(model="test:stub"),
+                                   toolset={name: tools.REGISTRY[name] for name in held})
+
+            # The intro says "shell commands" whatever the toolset is.
+            guidelines = agent.system_prompt.partition("Guidelines:")[2].partition("\n\n")[0]
+            self.assertIn("grep to search file contents", guidelines)
+            for name in set(tools.REGISTRY) - set(held):
+                self.assertNotRegex(guidelines, rf"\b{name}\b")
+
+    def test_guidelines_declare_every_tool_they_name(self) -> None:
+        # The pairing is what drops a guideline for a narrowed toolset; a tool
+        # named in the text but missing from its tuple would leak through.
+        for needs, text in prompt._GUIDELINES:
+            named = {name for name in tools.REGISTRY if re.search(rf"\b{name}\b", text)}
+            self.assertEqual(named, set(needs), text)
+            self.assertLessEqual(set(needs), set(tools.REGISTRY))
+        full = prompt.instructions(None)
+        self.assertEqual(full, prompt.instructions(frozenset(tools.REGISTRY)))
 
     def test_session_without_snapshot_does_not_regenerate_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
