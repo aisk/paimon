@@ -10,8 +10,11 @@ description: >
 
 # Driving Paimon
 
-Paimon is a coding agent CLI. `paimon -p "task"` runs one turn without a UI
-and exits; the conversation is persisted and can be resumed later.
+Paimon is a coding agent CLI. `paimon -p "task"` runs the task without a UI
+and exits; the conversation is persisted and can be resumed later. Paimon may
+start agents of its own for parallel work. The run waits for them, so
+`--timeout` covers all of it, while `--max-tool-calls` applies to each agent
+and each turn separately.
 
 ## Preflight
 

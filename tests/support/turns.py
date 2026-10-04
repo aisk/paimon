@@ -1,4 +1,4 @@
-"""Controllable jobs without model requests or subprocesses."""
+"""Controllable agents and commands without model requests or subprocesses."""
 
 import asyncio
 from pathlib import Path
@@ -19,7 +19,6 @@ class FakeAgent:
 
     def __init__(self) -> None:
         self.history: list = []
-        self.supervisor = None
         self.cwd = Path(".")
         self.prompts: list[str] = []
         self.events: list = []

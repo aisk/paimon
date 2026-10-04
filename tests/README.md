@@ -2,7 +2,7 @@
 
 Run from the repository root with `uv run pytest`; CI also runs `uv run ruff check .`.
 Use pytest even for `unittest.TestCase` tests: `conftest.py` provides per-test
-config/data isolation, disables telemetry and local skill/agent discovery, and
+config/data isolation, disables telemetry and local skill discovery, and
 blocks real model requests. Tests opt into the behavior they exercise with a
 local patch. `FunctionModel` stubs still exercise the real agent loop.
 
@@ -11,7 +11,7 @@ local patch. `FunctionModel` stubs still exercise the real agent loop.
 | Area | Files |
 | --- | --- |
 | Agent construction, prompts, session lifetime | `test_agent.py` |
-| Agent tool execution and supervision wiring | `test_agent_tools.py` |
+| Agent tool execution and job tool wiring | `test_agent_tools.py` |
 | Streaming, queued input, replay and persisted outcomes | `test_agent_events.py` |
 | Compaction integration / compaction policy and helpers | `test_agent_compaction.py` / `test_compaction.py` |
 | TUI panes, tabs and focus | `test_app.py` |
@@ -20,7 +20,7 @@ local patch. `FunctionModel` stubs still exercise the real agent loop.
 | TUI rendering, background jobs and recaps | `test_app_rendering.py`, `test_app_jobs.py`, `test_app_recap.py` |
 | Tool dispatch, file edits, validation and history | `test_tools.py` |
 | Permissions, shell processes/output and grep | `test_tools_permissions.py`, `test_tools_shell.py`, `test_tools_grep.py` |
-| Job state and supervisor routing/ownership | `test_jobs.py`, `test_supervisor.py` |
+| Child agents and background commands / the turn driver | `test_agent_jobs.py` / `test_turns.py` |
 | CLI arguments and end-to-end headless runs / renderer protocol | `test_cli.py` / `test_headless.py` |
 
 Other modules follow the production module name. For example:

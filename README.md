@@ -28,7 +28,7 @@ The first launch asks for a provider, model, API base and key. Then just type wh
 
 While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** asks before writing files or running commands, **edit** lets edits inside the working directory through, **yolo** never asks and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
 
-`Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can open panes itself: ask for two independent things and it starts a second agent in its own tab. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
+`Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can work in parallel: ask for two independent things and it starts a second agent in the background, whose answer comes back into the conversation when it is done. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
 
 ## Skills
 
@@ -105,7 +105,7 @@ Read and edit modes run a small set of clearly read-only commands (`ls`, `cat`, 
 
 ## Architecture
 
-`Agent.run` is a UI-agnostic stream of events; the TUI, `--web` and headless mode are three renderers over that one stream. `Supervisor` sits between an agent and the subagents or background commands it starts, and is the permission boundary for both.
+`Agent.run` is a UI-agnostic stream of events; the TUI, `--web` and headless mode are three renderers over that one stream. An agent holds the subagents and background commands it starts. A subagent is another `Agent` running as a task in the same process, and its answer is delivered to its parent as a message.
 
 ```mermaid
 flowchart TD
@@ -136,12 +136,7 @@ flowchart TD
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path expansion"]
         Aside["aside.py<br/>off-turn question, unrecorded"]
-    end
-
-    subgraph concurrency["Jobs & subagents"]
-        Supervisor["supervisor.py<br/>job pool, permissions"]
-        Jobs["jobs.py<br/>AgentJob / CommandJob"]
-        AgentTypes["agents.py<br/>subagent types"]
+        Jobs["turns.py<br/>turn driver"]
     end
 
     subgraph support["Config & skills"]
@@ -161,9 +156,9 @@ flowchart TD
     App --> CommandPane
     App --> Tabs
     App --> Login
-    App --> Supervisor
     App --> Config
 
+    Pane --> Jobs
     Pane --> AgentLoop
     Pane --> Aside
     Pane --> Diff
@@ -179,7 +174,8 @@ flowchart TD
     AgentLoop --> Compaction
     AgentLoop --> Retry
     AgentLoop --> Mentions
-    AgentLoop -. "spawn_agent / run_background" .-> Supervisor
+    AgentLoop -. "spawn_agent" .-> AgentLoop
+    AgentLoop -. "run_background" .-> CommandPane
 
     Aside --> Retry
     Aside --> SessionMod
@@ -187,14 +183,8 @@ flowchart TD
     PromptMod --> Skills
     Compaction --> ModelWindows
 
-    Supervisor --> Jobs
-    Supervisor --> AgentTypes
-    Supervisor --> ToolsMod
-    Supervisor -. "launch callback" .-> App
     Jobs --> AgentLoop
 
-    AgentTypes --> ToolsMod
-    AgentTypes --> Config
     Skills --> Config
     Config --> LLM
 ```

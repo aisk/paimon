@@ -14,7 +14,7 @@ from pydantic_ai.messages import (
 
 from paimon import compaction
 from paimon.model_windows import CONTEXT_WINDOWS
-from paimon.session import Session, agents_message, is_summary_message
+from paimon.session import Session, job_message, is_summary_message
 
 
 def _user(content: str) -> ModelRequest:
@@ -193,15 +193,15 @@ class SessionCompactionTest(unittest.TestCase):
 
 
 
-class AgentStatusExclusionTest(unittest.TestCase):
-    def test_agent_status_lines_never_reach_the_summary_prompt(self) -> None:
-        """The prompt asks for current status, so a checkpoint would carry an
-        hours-old "a1f2 finished" forward for the rest of the session."""
+class JobNoticeSummaryTest(unittest.TestCase):
+    def test_a_childs_answer_reaches_the_summary_prompt(self) -> None:
+        """The notice is the only place a child's answer exists in the
+        parent's context, so a checkpoint that skipped it would lose the work."""
         serialized = compaction._serialize_messages([
             _user("real request"),
-            agents_message("a1f2 finished"),
+            job_message("agent a1f2 finished:\nthe parser is fine"),
             _assistant("answer"),
         ])
 
-        self.assertNotIn("a1f2 finished", serialized)
-        self.assertEqual(len(serialized.splitlines()), 2)
+        self.assertIn("the parser is fine", serialized)
+        self.assertEqual(len(serialized.splitlines()), 3)

@@ -28,7 +28,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 from .errors import PaimonError
 from .llm import user_agent
 from .model_windows import CONTEXT_WINDOWS
-from .session import is_agents_message, summary_message
+from .session import summary_message
 
 
 class CompactionError(PaimonError):
@@ -181,12 +181,6 @@ def _serialize_messages(messages: list[ModelMessage]) -> str:
     tool results truncated."""
     serialized: list[str] = []
     for message in messages:
-        # Agent status lines are about a moment, not about the work: the
-        # summary prompt asks for current status, and a checkpoint that
-        # preserved "a1f2 finished" from three hours ago would keep saying it
-        # for the rest of the session.
-        if is_agents_message(message):
-            continue
         if isinstance(message, ModelResponse):
             message = ModelResponse(
                 parts=[part for part in message.parts if not isinstance(part, ThinkingPart)],

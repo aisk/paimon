@@ -14,7 +14,7 @@ from textual.worker import WorkerCancelled
 
 from paimon.agent import replay_events
 from paimon.app import PaimonApp
-from paimon.jobs import Outcome
+from paimon.turns import Outcome
 from paimon.pane import _EventRenderer
 from paimon.session import (
     is_shell_message,
@@ -276,7 +276,7 @@ class QueueTest(AppTestCase):
 
             # a finished turn flushes the queue into the next turn
             started: list[str] = []
-            app.pane.job.submit = started.append
+            app.pane.driver.submit = started.append
             await end_turn(app.pane)
             await pilot.pause()
             self.assertEqual(started, ["first message\n\nsecond message"])
@@ -359,7 +359,7 @@ class InterruptTest(AppTestCase):
 
                 await pilot.press("escape")
                 await self._wait_for(pilot, lambda: not app.pane.is_busy)
-                self.assertIs(app.pane.job.result.outcome, Outcome.INTERRUPTED)
+                self.assertIs(app.pane.driver.result.outcome, Outcome.INTERRUPTED)
                 self.assertIn("Paimon stopped", self._log_text(app.pane))
 
                 # The driver survived, so the pane takes the next prompt.
@@ -386,9 +386,9 @@ class FailedTurnQueueTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             with patch("paimon.agent.build_model", return_value=self._failing_model()):
-                app.pane.job.submit("go")
+                app.pane.driver.submit("go")
                 await self._wait_for(pilot, lambda: not app.pane.is_busy)
-            self.assertIs(app.pane.job.result.outcome, Outcome.FAILED)
+            self.assertIs(app.pane.driver.result.outcome, Outcome.FAILED)
             self.assertIn("provider failed", self._log_text(app.pane),
                           "the error is shown in the log, not raised out of the driver")
 
@@ -401,7 +401,7 @@ class FailedTurnQueueTest(AppTestCase):
             await pilot.pause()
 
             started: list[str] = []
-            app.pane.job.submit = started.append
+            app.pane.driver.submit = started.append
             await end_turn(app.pane, Outcome.FAILED, error="provider failed")
             await pilot.pause()
 
@@ -499,7 +499,7 @@ class UserCommandTest(AppTestCase):
         async with app.run_test() as pilot:
             hold_turn(app.pane)
             interrupted = []
-            app.pane.job.interrupt = lambda: interrupted.append(True)
+            app.pane.driver.interrupt = lambda: interrupted.append(True)
 
             app.pane.run_user_command(sleeper())
             await pilot.pause()

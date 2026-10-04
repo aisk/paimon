@@ -28,7 +28,7 @@ uvx paimon
 
 运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 写文件或执行命令前先询问，**edit** 放行工作目录内的编辑，**yolo** 从不询问，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
-`Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 自己也能开 pane：让它同时做两件互不相干的事，它会在新 tab 里起第二个 agent。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
+`Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 也能并行干活：让它同时做两件互不相干的事，它会在后台起第二个 agent，做完后结果会回到当前会话里。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
 
 ## Skills
 
@@ -105,7 +105,7 @@ read 和 edit 模式会不经询问执行一小组明确只读的命令（`ls`�
 
 ## 架构
 
-`Agent.run` 产出一串与 UI 无关的事件流，TUI、`--web` 和无头模式都是这条事件流的渲染器。`Supervisor` 位于 agent 和它启动的子 agent、后台命令之间，是两者共同的权限边界。
+`Agent.run` 产出一串与 UI 无关的事件流，TUI、`--web` 和无头模式都是这条事件流的渲染器。agent 自己持有它启动的子 agent 和后台命令。子 agent 是同一进程里作为任务运行的另一个 `Agent`，它的结果会作为一条消息送回父 agent。
 
 ```mermaid
 flowchart TD
@@ -136,12 +136,7 @@ flowchart TD
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path 展开"]
         Aside["aside.py<br/>回合外提问，不落盘"]
-    end
-
-    subgraph concurrency["任务与子 agent"]
-        Supervisor["supervisor.py<br/>任务池、权限"]
-        Jobs["jobs.py<br/>AgentJob / CommandJob"]
-        AgentTypes["agents.py<br/>子 agent 类型"]
+        Jobs["turns.py<br/>回合驱动"]
     end
 
     subgraph support["配置与 skills"]
@@ -161,9 +156,9 @@ flowchart TD
     App --> CommandPane
     App --> Tabs
     App --> Login
-    App --> Supervisor
     App --> Config
 
+    Pane --> Jobs
     Pane --> AgentLoop
     Pane --> Aside
     Pane --> Diff
@@ -179,7 +174,8 @@ flowchart TD
     AgentLoop --> Compaction
     AgentLoop --> Retry
     AgentLoop --> Mentions
-    AgentLoop -. "spawn_agent / run_background" .-> Supervisor
+    AgentLoop -. "spawn_agent" .-> AgentLoop
+    AgentLoop -. "run_background" .-> CommandPane
 
     Aside --> Retry
     Aside --> SessionMod
@@ -187,14 +183,8 @@ flowchart TD
     PromptMod --> Skills
     Compaction --> ModelWindows
 
-    Supervisor --> Jobs
-    Supervisor --> AgentTypes
-    Supervisor --> ToolsMod
-    Supervisor -. "启动回调" .-> App
     Jobs --> AgentLoop
 
-    AgentTypes --> ToolsMod
-    AgentTypes --> Config
     Skills --> Config
     Config --> LLM
 ```

@@ -393,10 +393,9 @@ class DriveTest(unittest.IsolatedAsyncioTestCase):
 
 
 class HeadlessToolsetTest(unittest.TestCase):
-    """-p runs one turn and then tears the loop down, so an agent it started
-    would be cancelled at an arbitrary point, mid-cleanup included."""
+    """-p has no tab for a background command and nobody at the keyboard."""
 
-    def test_agent_tools_are_not_offered(self) -> None:
+    def test_tools_that_need_a_ui_are_not_offered(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             renderer = headless.JsonRenderer(io.StringIO(), _config())
@@ -407,14 +406,14 @@ class HeadlessToolsetTest(unittest.TestCase):
             agent = drive.call_args[0][0]
             self.addCleanup(agent.session.unlock)
 
-            for name in tools.SUPERVISED_TOOLS:
+            for name in tools.BACKGROUND_TOOLS:
                 self.assertNotIn(name, agent.toolset)
             self.assertNotIn("ask_user", agent.toolset, "nobody is there to answer")
             self.assertNotIn("start_new_session", agent.toolset, "nobody is there to approve")
             self.assertNotIn("start_new_session", agent.system_prompt)
             self.assertNotIn("ask_user", agent.system_prompt)
             names = [schema["function"]["name"] for schema in agent.tool_schemas]
-            self.assertNotIn("spawn_agent", names)
+            self.assertIn("spawn_agent", names, "the run waits for the agents it starts")
             self.assertIn("shell", names, "the ordinary tools are all still there")
 
 

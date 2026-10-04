@@ -10,7 +10,6 @@ import asyncio
 import random
 import time
 from datetime import datetime
-from uuid import uuid4
 
 from pydantic_ai.messages import ModelRequest
 from textual import events, on, work
@@ -25,7 +24,7 @@ from textual.widgets.markdown import MarkdownStream
 from . import aside, lockfile, tools
 from .agent import (
     Agent,
-    AgentsNotice,
+    JobNotice,
     CompactionNotice,
     ContextCompactionFailed,
     ContextCompacted,
@@ -43,7 +42,7 @@ from .agent import (
     replay_events,
 )
 from .diff import locate_line
-from .jobs import AgentJob, Outcome, Result, State, TurnOver
+from .turns import TurnDriver, Outcome, Result, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint, shell_message
 from .skills import parse_skill_block
@@ -140,10 +139,16 @@ class _EventRenderer:
             self._first_text_block = True
             self._pane._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
 
-        elif isinstance(ev, AgentsNotice):
+        elif isinstance(ev, JobNotice):
             await self.close()
             self._first_text_block = True
-            self._pane._add(Content.from_markup("[$text-muted]Agents: $text[/]", text=ev.text))
+            # The first line names the job and how it ended; an agent's answer
+            # follows it and folds like any other result.
+            header, _, body = ev.text.partition("\n")
+            header = header.rstrip(":")
+            self._pane._add(Content.from_markup("[$text-muted]$text[/]", text=header))
+            if body:
+                self._pane._add_tool_result(body, label=header)
 
         elif isinstance(ev, ShellRun):
             # Replay only: a command run live is logged as it happens, by the
@@ -278,9 +283,8 @@ class Pane(Vertical):
             super().__init__()
 
     # The defaults are the quiet ones, so a kind of pane only has to state
-    # what is true of it. Subclasses carry three attributes besides: ``job``,
-    # the thing this pane is a window onto, and ``cwd`` and ``mode``, which is
-    # what a pane opened in place of this one inherits.
+    # what is true of it. Subclasses carry two attributes besides: ``cwd`` and
+    # ``mode``, which is what a pane opened in place of this one inherits.
     needs_confirm = False
     is_busy = False
     is_running = False
@@ -305,6 +309,10 @@ class Pane(Vertical):
     def _focus_input(self) -> None:
         """Focus whatever this pane is waiting on, if it is the one on screen."""
 
+    def focus_attention(self) -> None:
+        """Focus what is waiting on the user here, if anything is."""
+        self._focus_input()
+
     def close(self) -> None:
         """Give up everything this pane owns; the app removes the widget."""
 
@@ -318,23 +326,20 @@ class Pane(Vertical):
 class SessionPane(Pane):
     """A single conversation: an agent, its rendered log and its prompt."""
 
-    def __init__(self, agent: Agent, *, job_id: str, owner=None, resumed: bool = False,
-                 id: str | None = None, supervisor=None) -> None:
+    def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None) -> None:
         super().__init__(id=id)
-        # The pool this pane's agent can start and talk to other agents through.
-        self.supervisor = supervisor
-        # The Agent whose subagent this conversation is, or None when the user
-        # opened it. It is what decides who may read and stop this pane's
-        # work, so it lives on the job; the pane keeps it to build the next
-        # one. (Not _parent: MessagePump owns that name, and assigning it
-        # takes the whole pane out of the DOM.)
-        self._owner = owner
+        # One confirmation or question on screen at a time. The conversation
+        # and every agent it started ask through this pane, and a second panel
+        # mounting over the first would leave the first one's answer waiting
+        # forever.
+        self._panel_lock = asyncio.Lock()
+        self._compacting = False
         # Set before _adopt, which cancels whatever recap the pane had armed.
         self._recap_timer = None
         # Whether the turn now running has called a tool. A turn that only
         # answered needs no recap: the answer is right there on the screen.
         self._used_tools = False
-        self._adopt(agent, job_id)
+        self._adopt(agent)
         self.mode = agent.mode
         self._resumed = resumed
         # Tab label, kept here rather than read back from the session file on
@@ -343,7 +348,7 @@ class SessionPane(Pane):
         # Last context size measured for this session, so redrawing the status
         # bar for an unrelated reason does not blank the readout.
         self._tokens: int | None = None
-        # Set by close(): the job is cancelled and the widgets go away, so
+        # Set by close(): the driver is cancelled and the widgets go away, so
         # nothing it unwinds through must touch the DOM. Not named _closing:
         # MessagePump already owns that attribute, and setting it strands the
         # widget's message loop on teardown.
@@ -384,32 +389,28 @@ class SessionPane(Pane):
     @property
     def is_running(self) -> bool:
         """Whether a turn is streaming right now. For display only."""
-        return self.job.state is State.RUNNING
+        return self.driver.is_running
 
     @property
     def is_busy(self) -> bool:
         """Whether a turn is running, or one is already queued behind it.
 
-        What every guard asks. Taken from the job rather than from a worker's
+        What every guard asks. Taken from the driver rather than from a worker's
         status: the driver accepts a prompt the instant it is submitted, so
         there is no window in which a second turn can be started by the user
-        and the supervisor at the same moment.
+        and a wake-up at the same moment.
         """
-        return self.job.is_busy
+        return self.driver.is_busy
 
     @property
     def needs_confirm(self) -> bool:
-        """Whether this pane is blocked on a permission confirmation."""
-        return self.job.blocked > 0
+        """Whether a confirmation or question here is waiting on the user."""
+        return self.driver.blocked > 0
 
     @property
     def tab_title(self) -> str:
         """Short label for the tab strip."""
-        title = " ".join(self._title.split())
-        title = title or "new session"
-        # The id is only worth a tab's width while somebody holds it: it is
-        # what the model that started this pane calls it.
-        return f"{self.job.job_id} {title}" if self.job.parent is not None else title
+        return " ".join(self._title.split()) or "new session"
 
     def notice(self, renderable) -> None:
         self._add(renderable)
@@ -426,7 +427,7 @@ class SessionPane(Pane):
         self._pane_closing = True
         # Nothing more may reach the widgets: they go one message loop from
         # now, and mounting into them after that raises.
-        self.job.sink = None
+        self.driver.sink = None
         self._cancel_recap()
         self._retire_agent()
 
@@ -440,10 +441,10 @@ class SessionPane(Pane):
         """
         if not self._pane_closing:
             self._pane_closing = True
-            self.job.sink = None
+            self.driver.sink = None
             self._cancel_recap()
-            self.job.shutdown()
-            self.agent.session.unlock()
+            self.driver.shutdown()
+            self.agent.close()
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
@@ -462,15 +463,15 @@ class SessionPane(Pane):
         yield prompt
 
     async def on_mount(self) -> None:
-        # The first job is built in __init__, before there is a loop to drive
-        # it; every later one is started by _swap_agent as it is made.
-        self.job.start()
+        # The first driver is built in __init__, before there is a loop to
+        # run it; every later one is started by _swap_agent as it is made.
+        self.driver.start()
         self.query_one("#log", VerticalScroll).anchor()
         self._focus_input()
         self._refresh_mode()
         if self._resumed:
             await self._show_resumed()
-        diagnostics = [*self.agent.skill_diagnostics, *self.agent.agent_type_diagnostics]
+        diagnostics = self.agent.skill_diagnostics
         if diagnostics:
             first = diagnostics[0]
             more = f" (+{len(diagnostics) - 1} more)" if len(diagnostics) > 1 else ""
@@ -483,11 +484,14 @@ class SessionPane(Pane):
         Clicking the log (say, to expand a folded result) focuses the scroll
         container and keystrokes would silently vanish; any printable key that
         bubbles up unclaimed refocuses the prompt and lands in it. Modal
-        screens and this pane's confirm panel keep the keyboard to themselves.
+        screens keep the keyboard to themselves, and so does a panel that has
+        taken the prompt's place.
         """
-        if not event.is_printable or len(self.app.screen_stack) > 1 or self.query(BlockingPanel):
+        if not event.is_printable or len(self.app.screen_stack) > 1:
             return
         prompt = self.query_one(PromptInput)
+        if not prompt.display or isinstance(self.app.focused, BlockingPanel):
+            return
         if self.app.focused is not prompt:
             prompt.focus()
             prompt.insert(event.character)
@@ -498,9 +502,11 @@ class SessionPane(Pane):
     def _focus_input(self) -> None:
         """Focus what this pane is waiting on, unless another pane is on screen.
 
-        A pending confirmation or question wins over the prompt: the prompt is
-        hidden underneath it, and switching to a pane to answer it has to land
-        on the panel or the keys go nowhere.
+        A panel that has taken the prompt's place wins over it: the prompt is
+        hidden underneath, and switching to a pane to answer it has to land on
+        the panel or the keys go nowhere. A panel raised by an agent this
+        conversation started sits above a prompt that is still there, and the
+        prompt keeps the keyboard.
 
         Widget.focusable only looks at ``visible``, which is unrelated to
         ``display``, so a hidden pane focusing anything really does take the
@@ -508,69 +514,69 @@ class SessionPane(Pane):
         """
         if not self.is_current:
             return
+        prompt = self.query_one(PromptInput)
+        panels = self.query(BlockingPanel)
+        if isinstance(self.app.focused, BlockingPanel) and self.app.focused in panels:
+            # The user turned to it; a turn ending elsewhere must not take the
+            # keyboard back, or their answer lands in the prompt.
+            return
+        (prompt if prompt.display or not panels else panels.last()).focus()
+
+    def focus_attention(self) -> None:
+        """Turn to the pending confirmation or question, whoever raised it."""
+        if not self.is_current:
+            return
         panels = self.query(BlockingPanel)
         (panels.last() if panels else self.query_one(PromptInput)).focus()
 
     # ---- session switching --------------------------------------------------
 
-    def _adopt(self, agent: Agent, job_id: str) -> None:
-        """Take over an agent: this pane confirms and answers for it and renders its job."""
+    def _adopt(self, agent: Agent) -> None:
+        """Take over an agent: this pane confirms and answers for it and renders its turns."""
         self._cancel_recap()
         self.agent = agent
         agent.confirm = self._confirm
+        agent.confirm_child = self._confirm_child
         agent.ask = self._ask
-        agent.supervisor = self.supervisor
         agent.pending = self._take_queued
+        agent.on_jobs_changed = self._jobs_changed
+        agent.open_command = self._open_command
         # One renderer per conversation rather than one per turn: a turn now
         # opens with a UserInput event, which is what resets it. A new one per
         # agent, so a swapped-out session cannot leave a live markdown stream
         # pointing at a log that has just been emptied.
         self._renderer = _EventRenderer(self)
-        self.job = AgentJob(job_id, agent, parent=self._owner)
-        self.job.sink = self._on_event
-        self.job.on_change.append(self._on_change)
-        if self.supervisor is not None:
-            self.supervisor.register(self.job)
+        self.driver = TurnDriver(agent)
+        self.driver.sink = self._on_event
+        self.driver.on_change = self._on_change
 
     def _swap_agent(self, agent: Agent) -> None:
-        """Put a different conversation in this pane, under a new job.
-
-        The new one is nobody's subagent even when the old one was: the id the
-        parent holds names the conversation being left behind, which stays in
-        the table as killed and readable rather than quietly becoming a
-        different session the parent never asked for.
-        """
-        self._owner = None
-        self._adopt(agent, self._new_job_id())
-        self.job.start()
-
-    def _new_job_id(self) -> str:
-        return self.supervisor.new_id() if self.supervisor is not None else uuid4().hex[:4]
+        """Put a different conversation in this pane, under a driver of its own."""
+        self._adopt(agent)
+        self.driver.start()
 
     def _retire_agent(self) -> list[str]:
-        """Release the current session and stop the agents it started.
+        """Release the current session and stop the jobs it started.
 
-        Their ids only mean anything inside the conversation being left behind,
-        and their sessions are children of it, so nothing would ever read them
-        again. Returns the ids, for the caller to report.
+        Their ids only mean anything inside the conversation being left
+        behind, so nothing would ever hear from them again. Returns the ids
+        of the ones still running, for the caller to report.
         """
-        killed = self.supervisor.kill_children(self.agent) if self.supervisor is not None else []
+        killed = [job_id for job_id, job in self.agent.jobs.items() if job.running]
         # A "!" command outlives neither the session it was run in nor the
         # pane: it holds a process tree, and nothing left would read its
         # output.
         worker, self._shell_worker = self._shell_worker, None
         if worker is not None:
             worker.cancel()
-        self.job.cancel()
-        if self.supervisor is not None:
-            self.supervisor.released(self.job)
-        self.agent.session.unlock()
+        self.driver.cancel()
+        self.agent.close()
         return killed
 
     def _report_killed(self, killed: list[str]) -> None:
         if killed:
             self._add(Content.from_markup(
-                "[$text-muted]Stopped $n agent(s) started by the previous session: $ids[/]",
+                "[$text-muted]Stopped $n job(s) started by the previous session: $ids[/]",
                 n=str(len(killed)), ids=", ".join(killed)))
 
     async def _show_resumed(self) -> None:
@@ -592,12 +598,9 @@ class SessionPane(Pane):
     def new_session(self) -> None:
         if self.is_busy:
             return
-        # The toolset travels with the pane, not with the session: a pane
-        # started as a subagent keeps its narrowed set, without spawning or
-        # handing off, even though the new conversation is nobody's subagent.
+        # The toolset travels with the pane, not with the session.
         agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
-                           config=self.config, toolset=self.agent.toolset,
-                           parent_session_id=self.agent.session.parent_id)
+                           config=self.config, toolset=self.agent.toolset)
         killed = self._retire_agent()
         self._swap_agent(agent)
         self._title = ""
@@ -678,14 +681,18 @@ class SessionPane(Pane):
             self._add(Content.from_markup("[$text-muted]Busy — compact the context after this turn[/]"))
             return
         self._set_status(True, " Compacting context")
+        self._compacting = True
         try:
             result = await self.agent.compact_now()
         except Exception as exc:  # noqa: BLE001 — the session is still usable
             self._add(Content.from_markup("[$text-error b]Compaction failed:[/] $body", body=str(exc)))
             return
         finally:
+            self._compacting = False
             self._set_status(False)
             self._focus_input()
+            # A job that ended meanwhile was held back; report it now.
+            self._jobs_changed()
         if result is None:
             self._add(Content.from_markup("[$text-muted]Nothing to compact yet — the context is still short[/]"))
             return
@@ -812,30 +819,54 @@ class SessionPane(Pane):
         future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
         return await self._block_on(QuestionPanel(question, options, future), future)
 
-    async def _block_on(self, panel: BlockingPanel, future: asyncio.Future):
-        """Show ``panel`` in place of the prompt until ``future`` is answered."""
-        prompt = self.query_one(PromptInput)
-        # Removal below is asynchronous, so a panel from the previous confirm
-        # (or an interrupted turn) may still be mounted; sweep it first. The
-        # query is pane-scoped: another pane's pending panel is not ours to
-        # remove.
-        await self.query(BlockingPanel).remove()
-        await self.mount(panel, before=prompt)
-        prompt.display = False
-        # A panel in a background pane must not grab the keyboard: the user's
-        # next keystroke would answer a question they never saw.
-        if self.is_current:
-            panel.focus()
-        # Counted on the job rather than here: removing the panel is
-        # asynchronous, and the tab badge has to clear the moment the answer is
-        # in, not whenever the widget finally goes.
-        self.job.mark_blocked(True)
-        try:
-            return await future
-        finally:
-            self.job.mark_blocked(False)
-            prompt.display = True
-            panel.remove()
+    async def _confirm_child(self, job_id: str, tool_name: str, args: dict) -> bool:
+        """A confirmation for an agent this conversation started.
+
+        Shown here because the child has no screen of its own, and beside the
+        prompt rather than over it: the user may be in the middle of typing,
+        and a panel that took the keyboard would be answered by their next
+        keystroke.
+        """
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        panel = ConfirmPanel(tool_name, args, future, cwd=self.agent.cwd,
+                             source=f"agent {job_id}")
+        return await self._block_on(panel, future, beside=True) == "allow"
+
+    async def _block_on(self, panel: BlockingPanel, future: asyncio.Future, *,
+                        beside: bool = False):
+        """Show ``panel`` until ``future`` is answered: in place of the prompt,
+        or with ``beside`` above a prompt that keeps the keyboard."""
+        async with self._panel_lock:
+            # Held across the wait: the session can be swapped while a panel is
+            # up, and the count taken from one driver must go back to that one.
+            driver = self.driver
+            prompt = self.query_one(PromptInput)
+            # Removal below is asynchronous, so a panel from the previous
+            # confirm (or an interrupted turn) may still be mounted; sweep it
+            # first. Under the lock nothing live can be among them. The query
+            # is pane-scoped: another pane's pending panel is not ours to
+            # remove.
+            await self.query(BlockingPanel).remove()
+            await self.mount(panel, before=prompt)
+            if not beside:
+                prompt.display = False
+                # A panel in a background pane must not grab the keyboard: the
+                # user's next keystroke would answer a question they never saw.
+                if self.is_current:
+                    panel.focus()
+            # Counted on the driver rather than here: removing the panel is
+            # asynchronous, and the tab badge has to clear the moment the
+            # answer is in, not whenever the widget finally goes.
+            driver.mark_blocked(True)
+            try:
+                return await future
+            finally:
+                driver.mark_blocked(False)
+                prompt.display = True
+                held_keyboard = panel.has_focus
+                panel.remove()
+                if beside and held_keyboard and not self._pane_closing:
+                    prompt.focus()
 
     # ---- input → turn -------------------------------------------------------
 
@@ -858,7 +889,7 @@ class SessionPane(Pane):
             self._queue.append(text)
             self._refresh_queued()
             return
-        self.job.submit(text)
+        self.driver.submit(text)
 
     def run_user_command(self, command: str, *, record: bool = True) -> None:
         """Run a "!" command, log it, and let the model in on it unless quiet."""
@@ -957,7 +988,7 @@ class SessionPane(Pane):
         if worker is not None:
             worker.cancel()
             return
-        self.job.interrupt()
+        self.driver.interrupt()
 
     # ---- idle recap ---------------------------------------------------------
 
@@ -1008,10 +1039,30 @@ class SessionPane(Pane):
             return
         self.query_one("#log", VerticalScroll).mount(RecapMessage(text.strip()))
 
-    # ---- the job's two hooks ------------------------------------------------
+    # ---- the agent's job hooks ----------------------------------------------
 
-    def _on_change(self, job) -> None:
-        """This pane's job moved. Called from its driver and from cancellation.
+    def _jobs_changed(self) -> None:
+        """An agent or command this conversation started moved.
+
+        A notice that arrives while the conversation is idle starts a turn for
+        it; one that arrives mid-turn is picked up between steps, and wake()
+        refuses.
+        """
+        if self._pane_closing or not self.is_mounted:
+            return
+        self._sync_statusbar()
+        # Not during a manual compaction, which runs outside the driver: a
+        # turn started under it would append to a history about to be replaced.
+        if self.agent.notices and not self._compacting:
+            self.driver.wake()
+
+    async def _open_command(self, job_id: str, command, description: str) -> None:
+        await self.app.open_command(self, job_id, command, description)
+
+    # ---- the driver's two hooks ---------------------------------------------
+
+    def _on_change(self) -> None:
+        """This pane's driver moved. Called from its loop and from cancellation.
 
         Only a notification: everything that has to happen in order with the
         turn's own output belongs in the sink below, which is the one place
@@ -1022,7 +1073,7 @@ class SessionPane(Pane):
         self._notify_state()
 
     async def _on_event(self, ev) -> None:
-        """Render one event of this pane's job. The job's sink.
+        """Render one event of this pane's turns. The driver's sink.
 
         Awaited by the driver, so the renderer's mounts are what paces a turn
         and nothing has to be buffered on the way here.
@@ -1034,8 +1085,8 @@ class SessionPane(Pane):
             return
         if isinstance(ev, UserInput):
             self._begin_turn(ev.text)
-        elif isinstance(ev, AgentsNotice):
-            # A wake-up turn opens with the status line instead of a user
+        elif isinstance(ev, JobNotice):
+            # A wake-up turn opens with a job notice instead of a user
             # message; in a normal turn the UserInput already ran this and the
             # timer marker makes it a no-op. Empty text keeps the tab title.
             self._begin_turn("")
@@ -1089,7 +1140,7 @@ class SessionPane(Pane):
         Queued messages were typed against a turn that then stopped or failed,
         so they go back to the input rather than at a model the user just
         interrupted. That is a decision about a text box, which is why it lives
-        here and not in the job's inbox.
+        here and not in the driver's inbox.
         """
         await self._renderer.close()
         self._set_state(None)
@@ -1114,12 +1165,18 @@ class SessionPane(Pane):
             self._queue.clear()
             self._refresh_queued()
             if result.finished:
-                self.job.submit(text)
+                self.driver.submit(text)
             else:
                 prompt_input = self.query_one(PromptInput)
                 draft = prompt_input.text
                 prompt_input.load_text(f"{text}\n{draft}" if draft else text)
                 prompt_input.move_cursor(prompt_input.document.end)
+        # A job that ended during the last step has not been reported: the
+        # loop only looks between steps. Refused when a queued message just
+        # started a turn, which reports it anyway. Not after a turn the user
+        # stopped or that failed: the notice waits for whatever runs next.
+        if result.finished and self.agent.notices:
+            self.driver.wake()
         # Last, so a turn started just above (a queued message, a handoff) is
         # already busy and arms nothing. Only for a turn that ran to its own
         # end: recapping work the user just stopped is not what they asked for.
@@ -1144,7 +1201,7 @@ class SessionPane(Pane):
         self.new_session()
         self._add(Content.from_markup(
             "[$text-muted]Handed off — previous session: $hint[/]", hint=hint))
-        self.job.submit(prompt)
+        self.driver.submit(prompt)
 
     # ---- the spinner --------------------------------------------------------
 

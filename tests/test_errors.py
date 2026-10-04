@@ -3,14 +3,14 @@
 import unittest
 
 from paimon import PaimonError
+from paimon.app import PaneLimitError
 from paimon.aside import AsideError
 from paimon.compaction import CompactionError
 from paimon.llm import NoModelError
 from paimon.session import SessionBusyError, SessionError, SessionIncompleteError
-from paimon.supervisor import SupervisorError
 
 ERRORS = [AsideError, CompactionError, NoModelError, SessionError,
-          SessionBusyError, SessionIncompleteError, SupervisorError]
+          SessionBusyError, SessionIncompleteError, PaneLimitError]
 
 
 class ErrorTreeTest(unittest.TestCase):
