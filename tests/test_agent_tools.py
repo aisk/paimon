@@ -23,7 +23,7 @@ from paimon.agent import (
     replay_events,
 )
 from paimon.config import Config
-from tests.support.agent import FakeSupervisor, make_session, open_agent, stub_model
+from tests.support.agent import make_session, open_agent, stub_model
 
 
 class HistoryToolWiringTest(unittest.IsolatedAsyncioTestCase):
@@ -371,56 +371,34 @@ class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(events[-1], TurnEnd)
 
 
-class AgentToolsTest(unittest.IsolatedAsyncioTestCase):
-    """The four supervised tools as the agent loop sees them."""
+class JobToolsTest(unittest.IsolatedAsyncioTestCase):
+    """The job tools as the agent loop sees them; test_agent_jobs covers the jobs."""
 
-    async def test_without_a_supervisor_they_refuse_instead_of_crashing(self) -> None:
+    async def _call(self, agent: Agent, name: str, arguments: str) -> ToolEnd:
+        with patch("paimon.agent.build_model", return_value=stub_model(name, arguments)):
+            events = [event async for event in agent.run("do it")]
+        return next(event for event in events if isinstance(event, ToolEnd))
+
+    async def test_a_background_command_needs_somewhere_to_show(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            agent = open_agent(Path(directory))
-            with patch("paimon.agent.build_model",
-                       return_value=stub_model("spawn_agent", '{"prompt": "go"}')):
-                events = [event async for event in agent.run("do it")]
-
-            end = next(event for event in events if isinstance(event, ToolEnd))
-            self.assertIn("only works in the interactive UI", end.result)
+            with open_agent(Path(directory)) as agent:
+                end = await self._call(agent, "run_background",
+                                       '{"command": "npm run dev", "description": "dev"}')
+            self.assertIn("only work in the interactive UI", end.result)
 
     async def test_a_narrowed_toolset_disables_them_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             toolset = tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED)
-            agent = open_agent(Path(directory), toolset=toolset)
-            agent.supervisor = FakeSupervisor()
-            with patch("paimon.agent.build_model",
-                       return_value=stub_model("spawn_agent", '{"prompt": "go"}')):
-                events = [event async for event in agent.run("do it")]
-
-            end = next(event for event in events if isinstance(event, ToolEnd))
+            with open_agent(Path(directory), toolset=toolset) as agent:
+                end = await self._call(agent, "spawn_agent", '{"prompt": "go"}')
+                names = [schema["function"]["name"] for schema in agent.tool_schemas]
             self.assertIn("unknown tool", end.result)
-            names = [schema["function"]["name"] for schema in agent.tool_schemas]
             self.assertNotIn("spawn_agent", names, "and the model is never offered it")
 
-    async def test_a_call_is_handed_to_the_supervisor(self) -> None:
+    async def test_an_id_that_names_nothing_is_an_error_the_model_can_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            agent = open_agent(Path(directory))
-            agent.supervisor = supervisor = FakeSupervisor()
-            with patch("paimon.agent.build_model",
-                       return_value=stub_model("read_job", '{"job_id": "a1f2"}')):
-                events = [event async for event in agent.run("do it")]
-
-            self.assertEqual(supervisor.calls, [("read_job", {"job_id": "a1f2"})])
-            end = next(event for event in events if isinstance(event, ToolEnd))
-            self.assertEqual(end.result, "handled")
-
-
-    def test_the_offered_schema_lists_the_types_and_the_registry_is_untouched(self) -> None:
-        """The spawn_agent schema includes discovered types without changing the registry."""
-        with tempfile.TemporaryDirectory() as directory:
-            agent = open_agent(Path(directory))
-            offered = next(schema for schema in agent.tool_schemas
-                           if schema["function"]["name"] == "spawn_agent")["function"]
-            self.assertIn("agent", offered["parameters"]["properties"])
-            self.assertIn("- explore:", offered["description"])
-
-            registry = tools.REGISTRY["spawn_agent"].schema["function"]
-            self.assertNotIn("agent", registry["parameters"]["properties"])
-            self.assertNotIn("- explore:", registry["description"])
-            agent.close()
+            with open_agent(Path(directory)) as agent:
+                for name in ("read_job", "stop_job"):
+                    agent._cached_model = None
+                    end = await self._call(agent, name, '{"job_id": "a1f2"}')
+                    self.assertIn("no agent or background command a1f2", end.result)

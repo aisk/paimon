@@ -14,7 +14,7 @@ from pydantic_ai.messages import (
 from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.config import Config
-from paimon.jobs import Outcome, Result
+from paimon.turns import Outcome, Result
 from paimon.pane import SessionPane
 from paimon.session import (
     Session,
@@ -44,7 +44,7 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
                             *, pane: SessionPane | None = None) -> asyncio.Future:
         """Ask ``pane`` (the one on screen by default) to confirm a tool call."""
         pane = pane or app.pane
-        job = pane.job
+        job = pane.driver
         blocked = job.blocked
         task = asyncio.ensure_future(pane._confirm(tool, args or {"command": "echo hi"}))
         # Until the panel is up and waiting, not for one pause: mounting it
@@ -118,10 +118,10 @@ def hold_turn(pane) -> None:
     The driver is parked on its inbox, so a stand-in for the turn task is all
     is_busy needs; submitting a prompt would really run one.
     """
-    pane.job._turn = _HeldTurn()
+    pane.driver._turn = _HeldTurn()
 
 
 async def end_turn(pane, outcome: Outcome = Outcome.SUCCESS, error: str = "") -> None:
     """Finish the held turn the way the driver would."""
-    pane.job._turn = None
+    pane.driver._turn = None
     await pane._end_turn(Result(outcome, error=error))

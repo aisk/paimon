@@ -16,7 +16,7 @@ from textual.widgets import Static
 from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import PaimonApp
-from paimon.jobs import AgentJob, Outcome
+from paimon.turns import TurnDriver, Outcome
 from paimon.login import LoginScreen, PickerScreen
 from paimon.pane import _session_label
 from paimon.ui import (
@@ -189,7 +189,7 @@ class HandoffTest(AppTestCase):
             # Patched on the class, not the instance: the handoff opens a new
             # session, and with it the new job the prompt actually lands in.
             started: list[str] = []
-            with patch.object(AgentJob, "submit",
+            with patch.object(TurnDriver, "submit",
                               lambda self, text: started.append(text) or True):
                 await end_turn(app.pane)
                 await pilot.pause()
@@ -205,7 +205,7 @@ class HandoffTest(AppTestCase):
         async with app.run_test() as pilot:
             app.pane._pending_handoff = "next phase"
             started: list[str] = []
-            app.pane.job.submit = started.append
+            app.pane.driver.submit = started.append
             old_id = app.pane.agent.session.id
 
             await end_turn(app.pane, Outcome.FAILED, error="provider failed")

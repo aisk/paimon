@@ -1,9 +1,11 @@
 """Model stubs, event samples and persisted sessions for agent tests."""
 
-import dataclasses
+import asyncio
 import json
+import typing
 from pathlib import Path
 
+from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from paimon import agent as agent_module
@@ -28,7 +30,7 @@ EVENT_SAMPLES = {
     "ModelRetry": (1, 4, 2.0, "HTTP 429"),
     "UserInput": ("hi",),
     "CompactionNotice": (),
-    "AgentsNotice": ("a1f2 finished",),
+    "JobNotice": ("agent a1f2 finished:\nthe parser is fine",),
     "ShellRun": ("ls", "a.txt"),
 }
 
@@ -37,14 +39,10 @@ SILENT_EVENTS = {"TurnEnd", "SessionHandoff", "RequestStats", "ToolBudgetExhaust
 
 
 def agent_events() -> list[object]:
-    """One instance of every event dataclass defined in paimon.agent."""
+    """One instance of every event in paimon.agent's AgentEvent union."""
     events = []
-    for name in dir(agent_module):
-        attribute = getattr(agent_module, name)
-        if not (isinstance(attribute, type) and dataclasses.is_dataclass(attribute)):
-            continue
-        if attribute.__module__ != agent_module.__name__:
-            continue
+    for attribute in sorted(typing.get_args(agent_module.AgentEvent), key=lambda e: e.__name__):
+        name = attribute.__name__
         if name not in EVENT_SAMPLES:
             raise AssertionError(f"add an EVENT_SAMPLES entry for the new event {name}")
         events.append(attribute(*EVENT_SAMPLES[name]))
@@ -94,15 +92,34 @@ def session_records(session: Session) -> list[dict]:
             session.path.read_text(encoding="utf-8").splitlines()]
 
 
+def spawning_model(prompts: list[str], *, gate: asyncio.Event | None = None,
+                   answer: str = "done", fail: str | None = None) -> FunctionModel:
+    """One stub for a parent and the agents it starts.
 
-class FakeSupervisor:
-    def __init__(self, summary=None) -> None:
-        self.summary = summary
-        self.calls: list = []
+    The parent's first request spawns one agent per prompt and every later one
+    answers "ok". A request whose conversation opens with one of the prompts
+    is a child's: it waits for ``gate`` when there is one, then answers
+    ``answer`` or raises ``fail``.
+    """
+    requests = 0
 
-    def status_summary(self, caller) -> object:
-        return self.summary
+    async def stream(messages, info: AgentInfo):
+        nonlocal requests
+        asked = [part.content for message in messages for part in message.parts
+                 if isinstance(part, UserPromptPart)]
+        if any(prompt in asked for prompt in prompts):
+            if gate is not None:
+                await gate.wait()
+            if fail:
+                raise RuntimeError(fail)
+            yield answer
+            return
+        requests += 1
+        if requests == 1:
+            yield {index: DeltaToolCall(name="spawn_agent", tool_call_id=f"call-{index}",
+                                        json_args=json.dumps({"prompt": prompt}))
+                   for index, prompt in enumerate(prompts)}
+        else:
+            yield "ok"
 
-    async def handle(self, name: str, args: dict, *, caller) -> str:
-        self.calls.append((name, args))
-        return "handled"
+    return FunctionModel(stream_function=stream)

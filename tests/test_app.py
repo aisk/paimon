@@ -249,7 +249,7 @@ class BackgroundPaneTest(AppTestCase):
     """
 
     async def _background_pane(self, app: PaimonApp) -> SessionPane:
-        pane = SessionPane(Agent.open(config=app.config), job_id="bg01", id="pane-2")
+        pane = SessionPane(Agent.open(config=app.config), id="pane-2")
         self.addCleanup(pane.agent.session.unlock)
         await app.mount(pane)
         pane.display = False

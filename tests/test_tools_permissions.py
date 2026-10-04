@@ -352,5 +352,5 @@ class BackgroundGateTest(unittest.TestCase):
             gate("run_background", {"command": "npm run dev"}, "yolo", self.cwd), "allow")
 
     def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
-        for name in ("read_job", "wait_for_job", "stop_job"):
+        for name in ("read_job", "stop_job"):
             self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")

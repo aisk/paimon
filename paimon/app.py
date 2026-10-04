@@ -14,15 +14,13 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.widgets import ContentSwitcher, Static
 
-from . import agents, compaction, tools
+from . import compaction
 from .agent import Agent
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .errors import PaimonError
 from .login import LoginScreen, PickerScreen, PromptScreen
 from .pane import Pane, SessionPane
-from .session import Session, SessionError
-from .jobs import CommandJob, Job
-from .supervisor import Supervisor, SupervisorError
+from .session import SessionError
 from .tabs import PaneTabs
 from .commandpane import CommandPane
 from .ui import PromptInput
@@ -32,6 +30,10 @@ from .ui import PromptInput
 # strip. A soft cap keeps a runaway loop of "one more session" from taking the
 # app down with it.
 MAX_PANES = 8
+
+
+class PaneLimitError(PaimonError):
+    """Every pane is taken, so nothing more can be put on screen."""
 
 
 class PaimonApp(App):
@@ -88,8 +90,28 @@ class PaimonApp(App):
             SystemCommand("New pane", "Open another session alongside this one",
                           self.action_new_pane),
             SystemCommand("Close pane", "Close this session's pane", self.action_close_pane),
+            *self._agent_commands(),
             *self._skill_commands(),
         ]
+
+    def _agent_commands(self) -> list[SystemCommand]:
+        """One palette entry per agent the current conversation has running.
+
+        An agent has no tab to close, so this is the user's way to stop one.
+        """
+        pane = self._session()
+        if pane is None:
+            return []
+        return [
+            SystemCommand(f"Stop agent {job_id}", " ".join(job.label.split()),
+                          partial(self.action_stop_agent, job_id))
+            for job_id, job in pane.agent.jobs.items()
+            if job.kind == "agent" and job.running
+        ]
+
+    def action_stop_agent(self, job_id: str) -> None:
+        if (pane := self._session()) is not None:
+            pane.agent.stop_job(job_id, by_user=True)
 
     def _skill_commands(self) -> list[SystemCommand]:
         """One palette entry per skill the current conversation knows.
@@ -118,12 +140,7 @@ class PaimonApp(App):
         self._persist_theme_changes = False
         super().__init__()
         self.config = agent.config
-        # Agents live in panes, so the supervisor borrows the app to open and
-        # close them; everything else about them it owns itself.
-        self._supervisor = Supervisor(launch=self._launch_agent, close=self._close_job,
-                                      launch_command=self._launch_command, limit=MAX_PANES)
-        pane = SessionPane(agent, job_id=self._supervisor.new_id(), resumed=resumed,
-                           id="pane-1", supervisor=self._supervisor)
+        pane = SessionPane(agent, resumed=resumed, id="pane-1")
         self._panes = [pane]
         self._current = pane
         self._next_pane = 2
@@ -183,7 +200,7 @@ class PaimonApp(App):
     def on_pane_state_changed(self, event: Pane.StateChanged) -> None:
         """A pane started or finished something the strip or the bar shows."""
         event.stop()
-        # A job's driver posts this as it unwinds too, which on the way out is
+        # A pane's driver posts this as it unwinds too, which on the way out is
         # after the screen it would redraw has already been pruned.
         if self.screen_stack:
             self._sync_panes()
@@ -213,10 +230,9 @@ class PaimonApp(App):
         await self._switcher.add_content(pane, set_current=True)
         self._sync_panes()
 
-    def _make_pane(self, agent: Agent, *, owner=None, job_id=None) -> SessionPane:
+    def _make_pane(self, agent: Agent) -> SessionPane:
         """Register a pane for an agent. The caller mounts it."""
-        pane = SessionPane(agent, job_id=job_id or self._supervisor.new_id(), owner=owner,
-                           id=f"pane-{self._next_pane}", supervisor=self._supervisor)
+        pane = SessionPane(agent, id=f"pane-{self._next_pane}")
         self._next_pane += 1
         self._panes.append(pane)
         return pane
@@ -234,13 +250,9 @@ class PaimonApp(App):
             return
         index = self._panes.index(pane)
         pane.close()
-        # A job whose pane is gone is over, but what it produced stays
-        # readable: whoever started it may still be about to ask.
-        self._supervisor.released(pane.job)
         self._panes.remove(pane)
         if not self._panes:
-            # Closing a pane stops the agents it started, so the last two can
-            # go at once. The app always has one conversation in it.
+            # The app always has one conversation in it.
             await self._replace_last_pane(pane)
         current = self._panes[min(index, len(self._panes) - 1)]
         await pane.remove()
@@ -257,103 +269,19 @@ class PaimonApp(App):
             return
         await self._switcher.add_content(self._make_pane(agent))
 
-    # ---- agents -------------------------------------------------------------
+    # ---- background commands ------------------------------------------------
 
-    async def _launch_agent(self, job_id: str, parent, model: str | None,
-                            agent: str | None, session: str | None) -> Job:
-        """Open a background pane for an agent another pane asked for.
+    async def open_command(self, owner: SessionPane, job_id: str, command,
+                           description: str) -> None:
+        """Open a background pane for a command ``owner``'s agent started.
 
-        It is mounted hidden and never focused: a pane the user did not open
-        must not take the keyboard, or their next keystroke answers a
-        confirmation they never saw. ``agent`` names one of the caller's agent
-        types; ``session`` resumes an earlier subagent's session instead of
-        starting fresh. Bad values of either come back as a tool error via
-        SupervisorError.
+        It is mounted hidden and never focused: the user asked for a command,
+        not for their keyboard to move.
         """
         if len(self._panes) >= MAX_PANES:
-            raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
-        # Only conversations have an agent, so a command's pane is never asked
-        # about one; the fallback is for an agent whose own pane has gone.
-        owner = next((pane for pane in self.sessions if pane.agent is parent), None)
-        if owner is None and (owner := self._session()) is None:
-            raise SupervisorError("there is no conversation to start an agent from")
-        known = getattr(parent, "agent_types", None) or ()
-        stored = None
-        if session:
-            if agent:
-                raise SupervisorError(
-                    "pass either agent or session, not both: a resumed session "
-                    "already carries its type")
-            stored = next((s for s in Session.list(owner.cwd, include_children=True)
-                           if s.id.startswith(session)), None)
-            # The check that keeps this from resuming just any session in the
-            # directory: only this conversation's own children come back.
-            if stored is None or stored.parent_id != owner.agent.session.id:
-                raise SupervisorError(
-                    f"no agent session of this conversation starts with {session!r}")
-            # The type it was spawned as, when that type still exists, so the
-            # resumed agent keeps its tool narrowing; the persisted system
-            # prompt (the type's body included) is rebuilt by Agent.open.
-            agent_type = agents.find_type(stored.agent_type, known) if stored.agent_type else None
-        else:
-            # Resolved against the caller's discovery, not a fresh scan: the
-            # types the model was offered are exactly the ones it may name.
-            agent_type = agents.find_type(agent, known) if agent else None
-            if agent and agent_type is None:
-                names = ", ".join(sorted(t.name for t in known)) or "none"
-                raise SupervisorError(f"unknown agent type {agent!r}; available: {names}")
-        base = tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED)
-        toolset = base if agent_type is None or agent_type.tools is None else {
-            name: tool for name, tool in base.items() if name in set(agent_type.tools)}
-        child = Agent.open(
-            cwd=owner.cwd, mode=owner.mode, config=self.config, session=stored,
-            # Explicit choice first, then the type's, then whatever the caller
-            # itself runs on — not config.model, which a caller override beats.
-            model_override=model or (agent_type.model if agent_type else None)
-            or getattr(parent, "model_override", None),
-            # Marked as this session's child so it stays out of the session
-            # lists and out of `paimon -c`; the type name is recorded so a
-            # resume can restore the narrowing above. Both are header fields
-            # of a new session and ignored when resuming one.
-            parent_session_id=owner.agent.session.id,
-            agent_type=agent_type.name if agent_type else None,
-            # The type's body rides the same channel as --append-system-prompt,
-            # so it is persisted with the session and survives a resume — on
-            # which passing it again is forbidden, hence the guard.
-            append_system_prompt=(agent_type.body or None) if agent_type and stored is None else None,
-            toolset=toolset,
-        )
-        pane = self._make_pane(child, owner=parent, job_id=job_id)
-        try:
-            await self._switcher.add_content(pane)
-        except BaseException:
-            # Agent.open took the session lock, and nothing else will ever
-            # release it: without this the session stays busy for the life of
-            # the process, even to `paimon -r`.
-            self._panes.remove(pane)
-            child.session.unlock()
-            raise
-        self._sync_panes()
-        return pane.job
-
-    async def _launch_command(self, job_id: str, command, description: str, parent) -> Job:
-        """Open a background pane for a command a session asked to run.
-
-        Hidden and unfocused for the same reason a spawned agent's pane is: the
-        user asked for a command, not for their keyboard to move.
-        """
-        if len(self._panes) >= MAX_PANES:
-            raise SupervisorError(f"all {MAX_PANES} panes are in use; close one first")
-        # The pane that asked, not the one on screen: the user may be looking
-        # at another conversation while this one works. The fallback is for an
-        # agent whose own pane has gone, and only lends its cwd and mode.
-        owner = next((pane for pane in self.sessions if pane.agent is parent), None)
-        if owner is None and (owner := self._session()) is None:
-            raise SupervisorError("there is no conversation to attach a command to")
-        # Owned by the caller even when the pane was borrowed: ownership is
-        # what read_job, stop_job, the wake-up and kill_children all key on.
-        job = CommandJob(job_id, command, description, parent=parent)
-        pane = CommandPane(job, cwd=owner.cwd, mode=owner.mode, id=f"pane-{self._next_pane}")
+            raise PaneLimitError(f"all {MAX_PANES} panes are in use; close one first")
+        pane = CommandPane(job_id, command, description, cwd=owner.cwd, mode=owner.mode,
+                           id=f"pane-{self._next_pane}")
         self._next_pane += 1
         self._panes.append(pane)
         try:
@@ -361,17 +289,7 @@ class PaimonApp(App):
         except BaseException:
             self._panes.remove(pane)
             raise
-        job.start()
         self._sync_panes()
-        return job
-
-    def _close_job(self, job: Job) -> None:
-        """The supervisor stopped a job: take the pane showing it down too."""
-        pane = next((pane for pane in self._panes if pane.job is job), None)
-        if pane is None:
-            return
-        pane.close()  # cancel the turn, release the session, stop the command
-        self.call_later(self._drop_pane, pane)
 
     def _step_pane(self, step: int) -> None:
         if len(self._panes) > 1:
@@ -388,13 +306,16 @@ class PaimonApp(App):
         """Jump to the next pane blocked on a confirmation or a question.
 
         A background pane waiting for permission blocks whoever is waiting on
-        it, so there has to be one key that always lands on it.
+        it, so there has to be one key that always lands on it. The current
+        pane comes last: a confirmation for an agent it started sits above
+        the prompt without the keyboard, and this is how the user turns to it.
         """
         index = self._panes.index(self._current)
         rotated = self._panes[index + 1:] + self._panes[:index + 1]
         for pane in rotated:
             if pane.needs_confirm:
                 self._switch_to(pane)
+                pane.focus_attention()
                 return
 
     def save_config(self, **fields) -> None:
@@ -516,7 +437,9 @@ class PaimonApp(App):
         mid-turn silently swaps providers between two tool calls. Both refuse
         while any pane is running a turn.
         """
-        return any(pane.is_busy for pane in self.panes)
+        return any(pane.is_busy for pane in self.panes) or any(
+            job.agent is not None and job.running
+            for pane in self.sessions for job in pane.agent.jobs.values())
 
     def action_login(self) -> None:
         if self._config_is_busy():
@@ -602,7 +525,7 @@ class PaimonApp(App):
         if isinstance(pane, SessionPane):
             parts = self._session_status(pane, tokens)
         else:
-            parts = [f"command {pane.job.job_id}", pane.status_text, pane.command.command]
+            parts = [f"command {pane.job_id}", pane.status_text, pane.command.command]
         # A pane blocked on a confirmation the user cannot see blocks whatever
         # is waiting on it, so the count follows them to every other pane.
         waiting = sum(1 for other in self._panes if other is not pane and other.needs_confirm)
@@ -620,6 +543,9 @@ class PaimonApp(App):
                  f"session {pane.agent.session.id[:8]}"]
         if self.config.profile != DEFAULT_PROFILE:
             parts.insert(1, f"profile {self.config.profile}")
+        agents = sum(1 for job in pane.agent.jobs.values() if job.kind == "agent" and job.running)
+        if agents:
+            parts.append(f"{agents} agent{'s' if agents > 1 else ''} running")
         # The last measurement stands until a new one arrives: the bar is
         # redrawn whenever any pane changes state, not only after a turn.
         if tokens is None:

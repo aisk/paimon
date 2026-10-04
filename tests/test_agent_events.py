@@ -18,7 +18,7 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from paimon.agent import (
     Agent,
-    AgentsNotice,
+    JobNotice,
     CompactionNotice,
     ReasoningDelta,
     RequestStats,
@@ -32,13 +32,13 @@ from paimon.agent import (
 )
 from paimon.config import Config
 from paimon.session import (
-    is_agents_message,
+    is_job_message,
     is_shell_message,
     shell_message,
     shell_text,
     summary_message,
 )
-from tests.support.agent import FakeSupervisor, make_session, session_records, stub_model
+from tests.support.agent import make_session, session_records, stub_model
 
 
 class RequestStatsTest(unittest.IsolatedAsyncioTestCase):
@@ -395,30 +395,30 @@ class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("dropped", failures[0]["error"])
 
 
-class AgentStatusInjectionTest(unittest.IsolatedAsyncioTestCase):
-    """What the agents this session started did reaches the model as history."""
+class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
+    """What the jobs this session started did reaches the model as history."""
 
-    async def test_a_status_line_opens_the_turn_and_is_persisted(self) -> None:
+    async def test_a_notice_opens_the_turn_and_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-            agent.supervisor = FakeSupervisor(summary="a1f2 finished")
+            agent.notices.append("a1f2 finished")
 
             with patch("paimon.agent.build_model", return_value=stub_model()):
                 events = [event async for event in agent.run("what now")]
 
-            notices = [event for event in events if isinstance(event, AgentsNotice)]
+            notices = [event for event in events if isinstance(event, JobNotice)]
             self.assertEqual([notice.text for notice in notices], ["a1f2 finished"])
-            self.assertTrue(is_agents_message(agent.history[0]),
+            self.assertTrue(is_job_message(agent.history[0]),
                             "it goes in ahead of the user's own message")
-            self.assertFalse(is_agents_message(agent.history[1]))
+            self.assertFalse(is_job_message(agent.history[1]))
 
             # It survives a reload, and replays as a notice rather than as
             # something the user typed.
             replayed = replay_events(session.messages())
-            self.assertEqual([type(event) for event in replayed][:2], [AgentsNotice, UserInput])
+            self.assertEqual([type(event) for event in replayed][:2], [JobNotice, UserInput])
 
     async def test_nothing_is_injected_without_news(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -426,30 +426,29 @@ class AgentStatusInjectionTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-            agent.supervisor = FakeSupervisor(summary=None)
 
             with patch("paimon.agent.build_model", return_value=stub_model()):
                 events = [event async for event in agent.run("what now")]
 
-            self.assertFalse([event for event in events if isinstance(event, AgentsNotice)])
-            self.assertFalse(any(is_agents_message(message) for message in agent.history))
+            self.assertFalse([event for event in events if isinstance(event, JobNotice)])
+            self.assertFalse(any(is_job_message(message) for message in agent.history))
 
-    async def test_a_wake_up_turn_runs_on_the_status_line_alone(self) -> None:
+    async def test_a_wake_up_turn_runs_on_the_notice_alone(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-            agent.supervisor = FakeSupervisor(summary="a1f2 finished")
+            agent.notices.append("a1f2 finished")
 
             with patch("paimon.agent.build_model", return_value=stub_model()):
                 events = [event async for event in agent.run(None)]
 
-            self.assertIsInstance(events[0], AgentsNotice)
+            self.assertIsInstance(events[0], JobNotice)
             self.assertNotIn(UserInput, [type(event) for event in events])
-            self.assertTrue(is_agents_message(agent.history[0]))
+            self.assertTrue(is_job_message(agent.history[0]))
             self.assertFalse(any(
-                isinstance(part, UserPromptPart) and not is_agents_message(message)
+                isinstance(part, UserPromptPart) and not is_job_message(message)
                 for message in agent.history if isinstance(message, ModelRequest)
                 for part in message.parts), "no user message is fabricated")
             replayed = replay_events(session.messages())
@@ -465,7 +464,6 @@ class AgentStatusInjectionTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-            agent.supervisor = FakeSupervisor(summary=None)
             before = session.path.read_bytes()
 
             events = [event async for event in agent.run(None)]

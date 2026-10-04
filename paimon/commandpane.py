@@ -8,8 +8,8 @@ wants input never gets any.
 The pane pulls rather than being pushed to, unlike a conversation's: RichLog
 defers every write until it has a size, and that backlog is not bounded by
 ``max_lines``, so a chatty command in a tab nobody opened would grow it without
-limit. The job's own buffer is the backlog instead, and it is the one with a
-ceiling.
+limit. The command's own buffer is the backlog instead, and it is the one with
+a ceiling.
 """
 
 from rich.text import Text
@@ -17,7 +17,6 @@ from textual.app import ComposeResult
 from textual.content import Content
 from textual.widgets import RichLog, Static
 
-from .jobs import CommandJob, State
 from .pane import Pane
 from .tools import decode_output
 
@@ -34,10 +33,13 @@ _MAX_LINES = 5_000
 class CommandPane(Pane):
     """A running command, streamed into a tab of its own."""
 
-    def __init__(self, job: CommandJob, *, cwd, mode: str, id: str | None = None) -> None:
+    def __init__(self, job_id: str, command, description: str, *, cwd, mode: str,
+                 id: str | None = None) -> None:
         super().__init__(id=id)
-        self.job = job
-        job.on_change.append(self._on_change)
+        # The id the agent that started it calls it by.
+        self.job_id = job_id
+        self.command = command  # a tools.BackgroundCommand
+        self.description = description
         # Where the command runs and the mode it was started under. Neither
         # means anything to the pane itself; they are what the app inherits
         # from if this is the last pane left when it closes.
@@ -57,26 +59,26 @@ class CommandPane(Pane):
         self._pane_closing = False
 
     @property
-    def command(self):
-        return self.job.command
-
-    @property
     def is_running(self) -> bool:
-        return self.job.state is State.RUNNING
+        return self.command.running and not self.command.killed
 
     @property
     def is_busy(self) -> bool:
-        return self.job.is_busy
+        return self.command.running
 
     @property
     def tab_title(self) -> str:
-        label = " ".join((self.job.description or self.command.command).split()) or "command"
-        return f"{self.job.job_id} {label}"
+        label = " ".join((self.description or self.command.command).split()) or "command"
+        return f"{self.job_id} {label}"
 
     @property
     def status_text(self) -> str:
         """How this command is doing, for the tab and the status bar."""
-        return self.job.status_text
+        if self.command.killed:
+            return "stopped"
+        if self.command.running:
+            return "running"
+        return f"exited (code {self.command.exit_code})"
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="log", wrap=True, markup=False, max_lines=_MAX_LINES,
@@ -105,8 +107,8 @@ class CommandPane(Pane):
         """Closing the tab is what stopping the command means.
 
         A process with no window onto it is one the user cannot see, cannot
-        stop and will not remember; the job keeps its output readable for the
-        agent that started it.
+        stop and will not remember; its output stays readable for the agent
+        that started it.
         """
         if self._pane_closing:
             return
@@ -115,31 +117,29 @@ class CommandPane(Pane):
             self._timer.stop()
             self._timer = None
         self._collect()
-        self.job.cancel()
+        self.command.kill()
 
     def shutdown(self) -> None:
         # No loop will run after this, so the group is signalled outright.
         self._pane_closing = True
-        self.job.shutdown()
+        self.command.terminate_now()
 
     def on_show(self) -> None:
         """Catch up on everything that arrived while this tab was hidden."""
         self._collect()
         self._focus_input()
 
-    def _on_change(self, job) -> None:
-        """The command started or stopped. The job's hook."""
-        if self._pane_closing or not self.is_mounted:
-            return
-        self._refresh_status()
-        self._notify_state()
-
     def _collect(self) -> None:
         """One tick: move new output into the log, and notice the end."""
         if self.display:
             self._drain()
             self._refresh_status()
-        if self.is_running or self._exited:
+        if self.command.killed and not self._pane_closing:
+            # Stopped by the agent that started it: a tab onto a process that
+            # was told to go has nothing left to show.
+            self.app.call_later(self.app._drop_pane, self)
+            return
+        if self.command.running or self._exited:
             return
         # Over. Stop polling a buffer nothing writes to any more; anything
         # still undrained is caught by on_show, which is the only way this
@@ -149,6 +149,7 @@ class CommandPane(Pane):
             self._timer.stop()
             self._timer = None
         self._refresh_status()
+        self._notify_state()
 
     def _drain(self) -> None:
         """Write what has arrived, a whole line at a time.
@@ -170,13 +171,13 @@ class CommandPane(Pane):
                 # CRLF, which is how nearly everything on Windows writes, and
                 # taking what follows it would blank every such line.
                 log.write(Text.from_ansi(line.rstrip("\r").rpartition("\r")[2]))
-        if self._pending and not self.is_running:
+        if self._pending and not self.command.running:
             # Nothing will terminate this line now.
             log.write(Text.from_ansi(decode_output(self._pending)))
             self._pending = b""
 
     def _refresh_status(self) -> None:
         self.query_one("#command-status", Static).update(
-            Content(f"command {self.job.job_id}  ·  {self.status_text}"))
+            Content(f"command {self.job_id}  ·  {self.status_text}"))
         if self.is_current:
             self.app.refresh_statusbar()

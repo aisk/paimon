@@ -1,4 +1,4 @@
-"""Non-interactive mode: run one turn without the UI and exit.
+"""Non-interactive mode: run one prompt without the UI and exit.
 
 ``paimon -p "prompt"`` streams the assistant's answer to stdout and puts
 everything else (tool calls, denials, notices) on stderr, so ``$(paimon -p ...)``
@@ -11,7 +11,7 @@ captures just the answer.
     {"type": "tool_use", "id": str, "name": str, "args": object}
     {"type": "tool_result", "id": str, "name": str, "result": str, "denied": bool}
     {"type": "todos", "todos": array}
-    {"type": "agents", "text": str}
+    {"type": "job", "text": str}
     {"type": "compacted", "tokens_before": int, "tokens_after": int}
     {"type": "compaction_failed", "error": str}
     {"type": "retry", "attempt": int, "max_attempts": int, "delay": float, "error": str}
@@ -49,7 +49,7 @@ from typing import Optional, Sequence
 from . import compaction, tools
 from .agent import (
     Agent,
-    AgentsNotice,
+    JobNotice,
     ContextCompacted,
     ContextCompactionFailed,
     ModelRetry,
@@ -189,8 +189,13 @@ class TextRenderer:
         elif isinstance(ev, TodosUpdate):
             self._note(tools.render_todos(ev.todos))
 
-        elif isinstance(ev, AgentsNotice):
-            self._note(f"· agents: {ev.text}")
+        elif isinstance(ev, JobNotice):
+            # What follows answers the notice, so whatever was being said
+            # before it ends here.
+            if self._out_open:
+                _write(self._out, "\n")
+                self._out_open = False
+            self._note(f"· {ev.text}")
 
         elif isinstance(ev, ContextCompacted):
             self._note(f"· context compacted: {ev.tokens_before:,} → ~{ev.tokens_after:,} tokens")
@@ -229,7 +234,7 @@ class JsonRenderer:
         ToolStart: "tool_use",
         ToolEnd: "tool_result",
         TodosUpdate: "todos",
-        AgentsNotice: "agents",
+        JobNotice: "job",
         ContextCompacted: "compacted",
         ContextCompactionFailed: "compaction_failed",
         ModelRetry: "retry",
@@ -276,7 +281,8 @@ class JsonRenderer:
                         "result": ev.result, "denied": ev.denied})
         elif isinstance(ev, TodosUpdate):
             self._emit({"type": name, "todos": ev.todos})
-        elif isinstance(ev, AgentsNotice):
+        elif isinstance(ev, JobNotice):
+            self._flush_block()
             self._emit({"type": name, "text": ev.text})
         elif isinstance(ev, ContextCompacted):
             self._emit({"type": name, "tokens_before": ev.tokens_before,
@@ -371,7 +377,7 @@ class _ToolBudgetExceeded(Exception):
     """
 
 
-async def _run_turn(agent: Agent, renderer, text: str,
+async def _run_turn(agent: Agent, renderer, text: Optional[str],
                     max_tool_calls: Optional[int] = None) -> None:
     try:
         # The budget itself is enforced inside Agent.run, at the point every
@@ -381,6 +387,23 @@ async def _run_turn(agent: Agent, renderer, text: str,
             await renderer.handle(ev)
             if isinstance(ev, ToolBudgetExhausted):
                 raise _ToolBudgetExceeded
+        # Agents the turn started outlive it, and nobody is here to come back
+        # for their answers: wait for them and let the model react, until
+        # there is nothing left running and nothing left unsaid. Each of
+        # these turns, and each agent, gets the tool budget afresh.
+        changed = asyncio.Event()
+        agent.on_jobs_changed = changed.set
+        while True:
+            if not agent.notices:
+                if not any(job.kind == "agent" for job in agent.jobs.values()):
+                    break
+                changed.clear()
+                await changed.wait()
+                continue
+            async for ev in agent.run(None, max_tool_calls=max_tool_calls):
+                await renderer.handle(ev)
+                if isinstance(ev, ToolBudgetExhausted):
+                    raise _ToolBudgetExceeded
     finally:
         await renderer.close()
 
@@ -437,7 +460,10 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         model: Optional[str] = None, timeout: Optional[float] = None,
         max_tool_calls: Optional[int] = None,
         append_system_prompt: Optional[str] = None) -> int:
-    """Run one turn and return the process exit code.
+    """Run one prompt to its end and return the process exit code.
+
+    That is one turn, plus one more for every batch of answers from agents it
+    started, until none is left running.
 
     ``model`` overrides the configured model for this run only; nothing is
     written back to the config file. ``timeout`` and ``max_tool_calls`` bound
@@ -462,14 +488,13 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         return 1
 
     try:
-        # No agent tools here: -p runs exactly one turn and asyncio.run tears
-        # the loop down the moment it returns, cancelling any agent still
-        # working at whatever point it had reached — including, mid-cleanup,
-        # the kill of a shell command's process group. Offering the model a
-        # tool that cannot be finished is worse than not having it.
+        # No background commands here: there is no tab to show one in, and
+        # asyncio.run tears the loop down the moment the run is over, so a
+        # process started there would be one nobody ever kills. Agents are
+        # fine: the run waits for them.
         agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
                            append_system_prompt=append_system_prompt,
-                           toolset=tools.without(tools.REGISTRY, (*tools.SUPERVISED_TOOLS,
+                           toolset=tools.without(tools.REGISTRY, (*tools.BACKGROUND_TOOLS,
                                                                   *tools.INTERACTIVE_TOOLS)))
         text = build_prompt(prompt, piped, cwd, agent.skills)
     except SessionError as exc:  # busy in another process, or no persisted system prompt
@@ -506,4 +531,4 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
         return 130
     finally:
         # Synchronous: a cancelled coroutine's finally may never run.
-        agent.session.unlock()
+        agent.close()
