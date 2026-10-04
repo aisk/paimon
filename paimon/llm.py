@@ -15,9 +15,11 @@ import inspect
 import platform
 from functools import cache
 from importlib import metadata
-from typing import Optional
+from typing import Optional, Sequence
 
-from pydantic_ai.models import Model, infer_model
+from pydantic_ai.direct import model_request
+from pydantic_ai.messages import ModelMessage, TextPart
+from pydantic_ai.models import Model, ModelRequestParameters, infer_model
 from pydantic_ai.providers import infer_provider_class
 
 from .errors import PaimonError
@@ -106,3 +108,23 @@ def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[st
 
     provider = provider_cls(**kwargs)
     return infer_model(f"{provider_name}:{model_name}", provider_factory=lambda _: provider)
+
+
+async def ask_once(model: Model, messages: list[ModelMessage], *, max_tokens: int,
+                   tools: Sequence = ()) -> str:
+    """One request outside the turn loop, answered as plain text.
+
+    Not streamed and not retried: the callers are a checkpoint summary and a
+    recap, which have nobody watching the words arrive and a caller that
+    decides what a failure means. A reply holding only tool calls comes back
+    as the empty string.
+    """
+    response = await model_request(
+        model,
+        messages,
+        model_settings={"max_tokens": max_tokens,
+                        "extra_headers": {"User-Agent": user_agent()}},
+        model_request_parameters=ModelRequestParameters(
+            function_tools=list(tools), allow_text_output=True),
+    )
+    return "".join(part.content for part in response.parts if isinstance(part, TextPart))
