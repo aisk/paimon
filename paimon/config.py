@@ -244,6 +244,8 @@ class Config:
     skills: list[str] = field(default_factory=list)
     # Cleared by --no-skills for one run; not a config file setting.
     include_default_skills: bool = True
+    # Cleared by --no-web-search for one run; not a config file setting.
+    web_search: bool = True
 
     @classmethod
     def load(cls, profile: Optional[str] = None) -> "Config":

@@ -69,6 +69,8 @@ def main() -> None:
                         help="load skills from this SKILL.md file or directory too (repeatable)")
     parser.add_argument("--no-skills", action="store_true",
                         help="skip the default skill locations (--skill paths still load)")
+    parser.add_argument("--no-web-search", action="store_true",
+                        help="do not give the model the web_search tool")
     parser.add_argument("--web", action="store_true",
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
@@ -103,6 +105,8 @@ def main() -> None:
         sys.exit(1)
     if args.strict:
         config.safe_commands = False  # session-only; save() never persists this key
+    if args.no_web_search:
+        config.web_search = False  # session-only, like --strict
     if args.model is not None:
         try:
             split_model_string(args.model)
@@ -124,6 +128,8 @@ def main() -> None:
             flags += ["--mode", args.mode]
         if args.strict:
             flags += ["--strict"]
+        if args.no_web_search:
+            flags += ["--no-web-search"]
         if args.model:
             flags += ["--model", args.model]
         if args.profile:

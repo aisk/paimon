@@ -540,3 +540,7 @@ class SkillFlagsTest(unittest.TestCase):
         self.assertEqual(config.skills, ["from-config", "a", "b/SKILL.md"])
         self.assertTrue(config.include_default_skills)
         self.assertFalse(self._config_after("--no-skills").include_default_skills)
+
+    def test_no_web_search_clears_the_flag_for_this_run(self) -> None:
+        self.assertTrue(self._config_after().web_search)
+        self.assertFalse(self._config_after("--no-web-search").web_search)

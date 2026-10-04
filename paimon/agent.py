@@ -460,6 +460,10 @@ class Agent:
         self.history: list[ModelMessage] = session.messages()
         # This agent's tool set; None means everything in tools.REGISTRY.
         self.toolset = dict(tools.REGISTRY if toolset is None else toolset)
+        # Dropped here rather than by each caller, so --no-web-search reaches
+        # every agent opened with this config: new sessions, forks, subagents.
+        if not self.config.web_search:
+            self.toolset.pop("web_search", None)
         self.tool_schemas = tools.schemas(self.toolset)
         self._tool_definitions = tools.definitions(self.toolset)
         self._cached_model: Optional[tuple[tuple, Model]] = None

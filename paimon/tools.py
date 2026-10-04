@@ -25,6 +25,7 @@ from typing import Awaitable, Callable, Optional
 
 from pydantic_ai.tools import ToolDefinition
 
+from . import websearch
 from .session import Session, data_dir
 
 # A confirm callback returns True to allow a dangerous tool, False to deny.
@@ -173,7 +174,7 @@ def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
     With a limit the detail is collapsed onto a single line and truncated,
     for outputs that cannot reflow (a terminal stream) unlike a TUI widget.
     """
-    detail = str(args.get("command") or args.get("path") or args.get("question")
+    detail = str(args.get("command") or args.get("path") or args.get("question") or args.get("query")
                  or json.dumps(args, ensure_ascii=False))
     if limit is None:
         return detail
@@ -1838,6 +1839,33 @@ REGISTRY: dict[str, Tool] = {
                         "max_results": {"type": "integer", "description": f"Maximum matching lines to return (optional, default {_GREP_DEFAULT_RESULTS}, maximum {_GREP_MAX_RESULTS})."},
                     },
                     "required": ["pattern"],
+                },
+            },
+        },
+    ),
+    # Not gated in any mode: a search changes nothing on this machine. The
+    # query does leave it, for whichever public search engines ddgs picks, so
+    # --no-web-search takes the tool away for a run where that matters.
+    "web_search": Tool(
+        access="none",
+        run=lambda args, cwd, mode, ctx: websearch.search(args),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": (
+                    "Search the web and return a numbered list of results, each with its "
+                    "title, URL and a short snippet. Use it for anything that may have "
+                    "changed since your training data: current library versions, API "
+                    "documentation, error messages. It returns snippets, not whole pages."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."},
+                        "max_results": {"type": "integer", "description": f"Maximum results to return (optional, default {websearch.DEFAULT_RESULTS}, maximum {websearch.MAX_RESULTS})."},
+                    },
+                    "required": ["query"],
                 },
             },
         },
