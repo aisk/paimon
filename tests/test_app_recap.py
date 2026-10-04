@@ -2,12 +2,13 @@ import asyncio
 from unittest.mock import patch
 
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from textual.widgets.markdown import MarkdownBlock
 
-from paimon import aside
 from paimon.app import PaimonApp
 from paimon.config import Config
+from paimon.session import Session
 from paimon.ui import (
     PromptInput,
     RecapMessage,
@@ -26,17 +27,15 @@ class RecapTest(AppTestCase):
 
     @staticmethod
     def _model(*, tool: bool = True, recap: str = RECAP, boom: bool = False) -> FunctionModel:
-        """One tool call for the turn, a separate answer for the recap."""
+        """One tool call for the turn, a separate answer for the recap.
+
+        A turn streams and a recap does not, so the two land on different
+        functions without either having to look at what it was asked.
+        """
         requests = 0
 
         async def stream(messages, info):
             nonlocal requests
-            content = getattr(messages[-1].parts[-1], "content", "")
-            if isinstance(content, str) and aside.RECAP_INSTRUCTIONS in content:
-                if boom:
-                    raise ModelHTTPError(401, "stub")
-                yield recap
-                return
             requests += 1
             if tool and requests == 1:
                 yield {0: DeltaToolCall(name="read_file", json_args='{"path": "missing.txt"}',
@@ -44,7 +43,12 @@ class RecapTest(AppTestCase):
             else:
                 yield "done"
 
-        return FunctionModel(stream_function=stream)
+        def answer(messages, info) -> ModelResponse:
+            if boom:
+                raise ModelHTTPError(401, "stub")
+            return ModelResponse(parts=[TextPart(content=recap)])
+
+        return FunctionModel(answer, stream_function=stream)
 
     @staticmethod
     def _config(idle: float = 0.05, enabled: bool = True) -> Config:
@@ -176,4 +180,33 @@ class RecapTest(AppTestCase):
                 await self._finish_a_turn(app, pilot)
 
                 self.assertIsNone(app.pane._recap_timer)
+                await self._stays_away(pilot, lambda: bool(app.query(RecapMessage)))
+
+    async def _session_with_work(self, app: PaimonApp, pilot) -> Session:
+        """A finished tool turn, left behind in a pane that never recapped it."""
+        await self._finish_a_turn(app, pilot)
+        return app.pane.agent.session
+
+    async def test_a_resumed_session_recaps_without_waiting(self) -> None:
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            first = self.make_app(config=self._config(enabled=False))
+            async with first.run_test() as pilot:
+                session = await self._session_with_work(first, pilot)
+
+            # An idle wait far longer than the test: what shows up came from
+            # the resume, not from the timer.
+            app = self.make_app(session=session, config=self._config(idle=30))
+            async with app.run_test() as pilot:
+                await self._wait_for(pilot, lambda: bool(app.query(RecapMessage)))
+
+                self.assertIn(self.RECAP, self._recap_text(app))
+
+    async def test_a_resumed_session_that_only_talked_gets_no_recap(self) -> None:
+        with patch("paimon.agent.build_model", return_value=self._model(tool=False)):
+            first = self.make_app(config=self._config(enabled=False))
+            async with first.run_test() as pilot:
+                session = await self._session_with_work(first, pilot)
+
+            app = self.make_app(session=session, config=self._config(idle=30))
+            async with app.run_test() as pilot:
                 await self._stays_away(pilot, lambda: bool(app.query(RecapMessage)))

@@ -21,7 +21,7 @@ from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
 from textual.widgets.markdown import MarkdownStream
 
-from . import aside, lockfile, tools
+from . import lockfile, tools
 from .agent import (
     Agent,
     JobNotice,
@@ -581,11 +581,18 @@ class SessionPane(Pane):
 
     async def _show_resumed(self) -> None:
         renderer = _EventRenderer(self)
-        for ev in replay_events(self.agent.history):
+        events = replay_events(self.agent.history)
+        for ev in events:
             await renderer.handle(ev)
         await renderer.close()
         self._add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
         self._sync_statusbar(tokens=True)
+        # Coming back to a session is when a recap is wanted most, so this one
+        # does not wait for the idle timer. Same bar as after a turn: there
+        # has to be work to recap, not just an answer already on the screen.
+        if (self.config.recap_enabled and self.is_current
+                and any(isinstance(ev, (ToolStart, CompactionNotice)) for ev in events)):
+            self._recap()
 
     def _reset_measurements(self) -> None:
         """A swapped-in session starts with no measurements of its own."""
@@ -1023,21 +1030,17 @@ class SessionPane(Pane):
     async def _recap(self) -> None:
         """Ask what the session looks like now, and show it under the log.
 
-        Read-only (see Agent.ask_aside): the recap is never part of the
+        Read-only (see Agent.recap): the recap is never part of the
         conversation, so a resumed session does not replay it.
         """
         self._recap_timer = None
         try:
-            text = "".join([delta async for delta in self.agent.ask_aside(
-                aside.RECAP_QUESTION, instructions=aside.RECAP_INSTRUCTIONS)])
+            text = await self.agent.recap()
         except Exception:  # noqa: BLE001 — nobody asked for this, so nobody hears about it
             return
-        # Collected before it is mounted rather than streamed in: cancelling
-        # then leaves no half-written block behind, and after a wait this long
-        # the extra second is nobody's problem.
-        if self._pane_closing or self.is_busy or not self.is_current or not text.strip():
+        if self._pane_closing or self.is_busy or not self.is_current or not text:
             return
-        self.query_one("#log", VerticalScroll).mount(RecapMessage(text.strip()))
+        self.query_one("#log", VerticalScroll).mount(RecapMessage(text))
 
     # ---- the agent's job hooks ----------------------------------------------
 

@@ -14,6 +14,7 @@ local patch. `FunctionModel` stubs still exercise the real agent loop.
 | Agent tool execution and job tool wiring | `test_agent_tools.py` |
 | Streaming, queued input, replay and persisted outcomes | `test_agent_events.py` |
 | Compaction integration / compaction policy and helpers | `test_agent_compaction.py` / `test_compaction.py` |
+| The recap request | `test_agent_recap.py` |
 | TUI panes, tabs and focus | `test_app.py` |
 | TUI input, approvals, queuing and interruption | `test_app_input.py` |
 | TUI resume, fork, handoff and profiles | `test_app_sessions.py` |

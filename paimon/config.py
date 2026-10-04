@@ -233,7 +233,7 @@ class Config:
     # many idle seconds. Seconds rather than a count so a test can turn the
     # wait down; the TUI never writes these back, they are edited by hand.
     recap_enabled: bool = True
-    recap_idle_seconds: float = 15.0
+    recap_idle_seconds: float = 30.0
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000

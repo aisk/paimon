@@ -31,9 +31,9 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import aside, compaction, retry, tools
+from . import compaction, retry, tools
 from .config import Config
-from .llm import NoModelError, build_model, user_agent
+from .llm import NoModelError, ask_once, build_model, user_agent
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -61,6 +61,19 @@ MAX_JOBS = 8
 # the parent's context without the parent having asked for it, so it is kept
 # to what a report needs; the child's session log has the rest.
 ANSWER_LIMIT = 8_000
+
+_RECAP_MAX_TOKENS = 2_048
+
+# Marked so the model answers it rather than taking it for the next
+# instruction and resuming the work.
+RECAP_PROMPT = (
+    "[recap] The user stepped away and is coming back to a screen full of tool "
+    "output. In two to five short lines, say where things stand: what this "
+    "session is working toward overall, what was just done, and the obvious "
+    "next step. Answer in the language the user has been writing in. No "
+    "headings, no code blocks, no preamble, and do not offer to help.\n\n"
+    "Where does this session stand right now?"
+)
 
 
 # ---- Events yielded by Agent.run -------------------------------------------
@@ -672,28 +685,29 @@ class Agent:
         """Compact on demand; None when the history is too short to be worth it."""
         return await self._maybe_compact(force=True)
 
-    async def ask_aside(self, question: str, *,
-                        instructions: str = aside.DEFAULT_INSTRUCTIONS,
-                        max_tokens: int = aside.DEFAULT_MAX_TOKENS) -> AsyncIterator[str]:
-        """Ask a question over this agent's context, yielding the answer as text.
+    def _context(self, model: Model) -> list[ModelMessage]:
+        """What a request over this conversation opens with: the system prompt,
+        then the history as ``model`` can take it."""
+        return [
+            ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
+            *_strip_foreign_thinking(self.history, model),
+        ]
+
+    async def recap(self) -> str:
+        """Where the session stands, in a few lines, for a user coming back to it.
 
         Read-only: neither the question nor the answer enters ``self.history``
-        or the session log, and no compaction is triggered. That is what lets
-        it be asked while a turn is already waiting on the model: it takes a
-        snapshot and opens a request of its own rather than joining the one in
-        flight. A cancelled aside leaves nothing behind either.
+        or the session log, and no compaction is triggered. Only between
+        turns, where the history is a complete request on its own.
 
-        The history it sends is whatever exists when the first delta is asked
-        for, so a turn running alongside it may add messages the answer never
-        saw.
+        The request opens exactly like a turn's (same prompt, tools and
+        history), so a provider that caches prefixes has this one cached.
         """
         model = self._model()
-        context = _strip_foreign_thinking(aside.usable_history(self.history), model)
-        async for delta in aside.stream(model, self.system_prompt, context, question,
-                                        instructions=instructions,
-                                        tool_definitions=self._tool_definitions,
-                                        max_tokens=max_tokens):
-            yield delta
+        question = ModelRequest(parts=[UserPromptPart(content=RECAP_PROMPT)])
+        answer = await ask_once(model, [*self._context(model), question],
+                                max_tokens=_RECAP_MAX_TOKENS, tools=self._tool_definitions)
+        return answer.strip()
 
     # ---- Commands the user runs themselves ---------------------------------
 
@@ -1169,14 +1183,7 @@ class Agent:
                         yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
 
             model = self._model()
-
-            def build_request() -> list[ModelMessage]:
-                return [
-                    ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
-                    *_strip_foreign_thinking(self.history, model),  # noqa: B023 — rebuilt each step
-                ]
-
-            request_messages = build_request()
+            request_messages = self._context(model)
             parameters = ModelRequestParameters(
                 function_tools=self._tool_definitions, allow_text_output=True
             )
@@ -1256,7 +1263,7 @@ class Agent:
                         if compacted:
                             yield ContextCompacted(compacted.tokens_before,
                                                    compacted.tokens_after)
-                            request_messages = build_request()
+                            request_messages = self._context(model)
                             continue
                     if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
                         # Recorded here rather than in run()'s outer boundary
