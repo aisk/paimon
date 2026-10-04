@@ -30,6 +30,10 @@ While it runs: `Shift+Tab` switches how much the agent may do on its own (**read
 
 `Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can work in parallel: ask for two independent things and it starts a second agent in the background, whose answer comes back into the conversation when it is done. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
 
+## Web search
+
+Paimon can search the web without an API key. It asks in no permission mode, because a search changes nothing on your machine. Searches go through [ddgs](https://github.com/deedy5/ddgs), a metasearch library, so a query may be sent to any of several public search engines. `--no-web-search` takes the tool away for a run.
+
 ## Skills
 
 Paimon loads [Agent Skills](https://agentskills.io) from `~/.config/paimon/skills`, `~/.agents/skills` and every `.agents/skills` from the working directory up to the repository root. Only each skill's name and description go into the system prompt; the model reads the `SKILL.md` when a task matches, and `/skill:name args` sends it explicitly (the `/` command palette lists them). More locations go in `config.json` as `"skills": ["~/.claude/skills"]` or on the command line with `--skill PATH`; `--no-skills` skips the default locations. When two skills share a name, explicit paths beat the project's, which beat the global ones.
@@ -88,6 +92,7 @@ paimon log a1b2c3    # what a session did, one line per event
 ```bash
 paimon --mode read                  # start in a more cautious permission mode (yolo is the default)
 paimon --strict                     # ask before every command, even read-only ones
+paimon --no-web-search              # take the web search tool away for this run
 paimon --web                        # the same UI in a browser (--port, default 8000)
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"

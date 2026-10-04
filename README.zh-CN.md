@@ -30,6 +30,10 @@ uvx paimon
 
 `Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 也能并行干活：让它同时做两件互不相干的事，它会在后台起第二个 agent，做完后结果会回到当前会话里。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
 
+## 网页搜索
+
+Paimon 可以搜索网页，不需要 API key。任何权限模式下都不会询问，因为搜索不会改动本机的任何东西。搜索通过元搜索库 [ddgs](https://github.com/deedy5/ddgs) 进行，所以一条 query 可能被发往多个公共搜索引擎中的任意一个。`--no-web-search` 可以在本次运行中去掉这个工具。
+
 ## Skills
 
 Paimon 会从 `~/.config/paimon/skills`、`~/.agents/skills` 以及工作目录到仓库根之间每一层的 `.agents/skills` 加载 [Agent Skills](https://agentskills.io)。system prompt 里只放每个 skill 的名字和描述，任务匹配时模型自己去读 `SKILL.md`，也可以用 `/skill:name 参数` 显式发送（`/` 命令面板里列出了它们）。其他位置可以写进 `config.json` 的 `"skills": ["~/.claude/skills"]`，或者用命令行参数 `--skill PATH`；`--no-skills` 跳过默认位置。同名时显式指定的优先于项目的，项目的优先于全局的。
@@ -88,6 +92,7 @@ paimon log a1b2c3    # 查看会话做了什么，每个事件一行
 ```bash
 paimon --mode read                  # 以更谨慎的权限模式启动（默认为 yolo）
 paimon --strict                     # 每条命令都先询问，包括只读命令
+paimon --no-web-search              # 本次运行不提供网页搜索工具
 paimon --web                        # 在浏览器中使用同一套 UI（--port，默认 8000）
 paimon -p "what does cli.py do?"    # 直接在 stdout 输出回答，不启动 UI
 cat log.txt | paimon -p "summarize this"
