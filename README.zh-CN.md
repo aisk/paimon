@@ -135,7 +135,6 @@ flowchart TD
         ModelWindows["model_windows.py<br/>各模型上下文窗口大小"]
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path 展开"]
-        Aside["aside.py<br/>回合外提问，不落盘"]
         Jobs["turns.py<br/>回合驱动"]
     end
 
@@ -160,7 +159,6 @@ flowchart TD
 
     Pane --> Jobs
     Pane --> AgentLoop
-    Pane --> Aside
     Pane --> Diff
     Pane --> UIWidgets
     Pane --> LLM
@@ -176,9 +174,6 @@ flowchart TD
     AgentLoop --> Mentions
     AgentLoop -. "spawn_agent" .-> AgentLoop
     AgentLoop -. "run_background" .-> CommandPane
-
-    Aside --> Retry
-    Aside --> SessionMod
 
     PromptMod --> Skills
     Compaction --> ModelWindows

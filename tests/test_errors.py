@@ -4,12 +4,11 @@ import unittest
 
 from paimon import PaimonError
 from paimon.app import PaneLimitError
-from paimon.aside import AsideError
 from paimon.compaction import CompactionError
 from paimon.llm import NoModelError
 from paimon.session import SessionBusyError, SessionError, SessionIncompleteError
 
-ERRORS = [AsideError, CompactionError, NoModelError, SessionError,
+ERRORS = [CompactionError, NoModelError, SessionError,
           SessionBusyError, SessionIncompleteError, PaneLimitError]
 
 
