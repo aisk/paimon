@@ -719,6 +719,7 @@ class SessionPane(Pane):
         self.agent.mode = self.mode
         self._refresh_mode()
         self._sync_statusbar()
+        self._notify_state()
 
     def _refresh_mode(self) -> None:
         self.query_one(PromptInput).border_title = f" {self.mode} "

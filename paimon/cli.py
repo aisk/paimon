@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import commands
 from . import headless as headless_mode
+from . import herdr
 from . import telemetry
 from .agent import Agent
 from .app import PaimonApp
@@ -14,6 +15,24 @@ from .config import Config
 from .errors import PaimonError
 from .llm import split_model_string
 from .session import SessionError, resume_hint
+
+
+def _resume_flags(args: argparse.Namespace) -> tuple[str, ...]:
+    """The launch options a resumed session needs to behave like this run.
+
+    Only the ones fixed for the life of the process. The mode, the profile and
+    the model change while the app runs, so the app adds the ones in effect.
+    """
+    flags: list[str] = []
+    if args.strict:
+        flags.append("--strict")
+    if args.no_web_search:
+        flags.append("--no-web-search")
+    if args.no_skills:
+        flags.append("--no-skills")
+    for skill in args.skills:
+        flags += ["--skill", skill]
+    return tuple(flags)
 
 
 def main() -> None:
@@ -193,7 +212,10 @@ def main() -> None:
     except SessionError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)
-    app = PaimonApp(agent, resumed=resume_session is not None, pick_session=args.resume == "")
+    # Not under --tui: there the Herdr pane holds the web server, not the agent.
+    reporter = None if args.tui else herdr.Reporter.from_env()
+    app = PaimonApp(agent, resumed=resume_session is not None, pick_session=args.resume == "",
+                    reporter=reporter, resume_flags=_resume_flags(args))
     try:
         app.run()
     finally:

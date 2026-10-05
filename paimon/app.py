@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.widgets import ContentSwitcher, Static
 
-from . import compaction
+from . import compaction, herdr
 from .agent import Agent
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .errors import PaimonError
@@ -136,10 +136,16 @@ class PaimonApp(App):
         prompt.insert(f"/skill:{name} ")
         prompt.focus()
 
-    def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False) -> None:
+    def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False,
+                 reporter: herdr.Reporter | None = None, resume_flags: tuple[str, ...] = ()) -> None:
         self._persist_theme_changes = False
         super().__init__()
         self.config = agent.config
+        # Set only when running in a Herdr pane. ``resume_flags`` are the
+        # launch options a resumed session needs to behave like this one.
+        self._herdr = reporter
+        self._resume_flags = resume_flags
+        self._resume_pane: SessionPane | None = None
         pane = SessionPane(agent, resumed=resumed, id="pane-1")
         self._panes = [pane]
         self._current = pane
@@ -190,6 +196,53 @@ class PaimonApp(App):
         if self.is_mounted:
             self.screen.set_class(self._tabs.display, "-tabs-bottom")
         self.refresh_statusbar()
+        self._report_herdr()
+
+    def _report_herdr(self) -> None:
+        """Tell Herdr what this process as a whole is doing.
+
+        A Herdr pane has one state and paimon has many conversations, so the
+        most urgent one wins: an agent in a tab the user is not looking at is
+        still paimon working, or paimon waiting on an answer.
+        """
+        if self._herdr is None:
+            return
+        sessions = self.sessions
+        if any(pane.needs_confirm for pane in sessions):
+            state = herdr.BLOCKED
+        elif any(pane.is_busy or any(job.agent is not None and job.running
+                                     for job in pane.agent.jobs.values()) for pane in sessions):
+            # An agent still running in the background counts: its caller is
+            # woken when it ends, so "idle" now would announce the work done
+            # twice. A background command does not, or a dev server left
+            # running would never let the pane go idle.
+            state = herdr.WORKING
+        else:
+            state = herdr.IDLE
+        # One pane restores one session: the one on screen, or the last one
+        # that was while a command's output is. Never an agent another
+        # conversation started, which is not resumed on its own.
+        roots = [pane for pane in sessions if pane.agent.session.parent_id is None]
+        if self._current in roots:
+            self._resume_pane = self._current
+        elif self._resume_pane not in roots:
+            self._resume_pane = roots[0] if roots else None
+        pane = self._resume_pane
+        # An untouched session has nothing to come back to. Herdr keeps the
+        # last command it was given, so until this one has a turn a restart
+        # reopens the session before it.
+        if pane is None or not pane.agent.history:
+            self._herdr.report(herdr.Report(state))
+            return
+        session_id = pane.agent.session.id
+        resume = [herdr.NAME, "--resume", session_id, "--mode", pane.mode]
+        # Read now rather than at launch: both follow a login or a profile
+        # switch made from inside the app.
+        if self.config.profile != DEFAULT_PROFILE:
+            resume += ["--profile", self.config.profile]
+        if self.config.model:
+            resume += ["--model", self.config.model]
+        self._herdr.report(herdr.Report(state, session_id, (*resume, *self._resume_flags)))
 
     def _switch_to(self, pane: Pane) -> None:
         self._current = pane
@@ -363,6 +416,8 @@ class PaimonApp(App):
         """
         for pane in self._panes:
             pane.shutdown()
+        if self._herdr is not None:
+            self._herdr.release()
 
     def on_key(self, event: events.Key) -> None:
         """Keys that reached the app were claimed by no pane.
@@ -458,6 +513,7 @@ class PaimonApp(App):
                 self.pane.notice(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
                 self.exit()
             self.refresh_statusbar()
+            self._report_herdr()
             self.pane._focus_input()
 
         self.push_screen(LoginScreen(), _done)
@@ -511,6 +567,7 @@ class PaimonApp(App):
             "[$text-success b]Profile:[/] $name  [$text-muted]$model[/]",
             name=name, model=self.config.model or ""))
         self.refresh_statusbar()
+        self._report_herdr()
         self.pane._focus_input()
 
     # ---- status bar ---------------------------------------------------------
