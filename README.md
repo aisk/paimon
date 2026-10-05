@@ -102,6 +102,8 @@ paimon --profile work               # a separately configured account
 
 `-p` never stops to ask, so with the default `yolo` mode it can already write files and run commands. Add `--output-format result` for a single JSON object with the outcome, which is what a calling program should read. `paimon --help` lists the rest.
 
+Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume command to Herdr on its own, with nothing to install.
+
 ## Configuration
 
 Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. Sessions live in `~/.local/share/paimon/sessions/`.
