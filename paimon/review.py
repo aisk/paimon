@@ -88,6 +88,9 @@ _VERDICT = re.compile(r"\W*(ALLOW|BLOCK)\b\W*(.*)")
 # provider, so it runs on the account already logged in. Kept to pairs that
 # have been tried; anything else reviews with the model doing the work.
 DEFAULT_REVIEWERS = {
+    "gpt-6.1-sol": "gpt-6-luna",
+    "gpt-6-sol": "gpt-6-luna",
+    "gpt-6-astra": "gpt-6-luna",
     "gpt-5.6-sol": "gpt-5.6-luna",
     "gpt-5.6-terra": "gpt-5.6-luna",
     "glm-5.2": "glm-5.3-flash",

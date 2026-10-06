@@ -46,6 +46,7 @@ class DefaultModelTest(unittest.TestCase):
     def test_a_known_model_gets_its_sibling_from_the_same_provider(self) -> None:
         self.assertEqual(review.default_model("chatgpt:gpt-5.6-sol"), "chatgpt:gpt-5.6-luna")
         self.assertEqual(review.default_model("openai:gpt-5.6-sol"), "openai:gpt-5.6-luna")
+        self.assertEqual(review.default_model("openai:gpt-6.1-sol"), "openai:gpt-6-luna")
         self.assertEqual(review.default_model("zai/glm-5.2"), "zai:glm-5.3-flash")
 
     def test_anything_else_has_none(self) -> None:
