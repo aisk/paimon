@@ -11,6 +11,8 @@ dependencies = [
     "textual>=8.2.7",
     "textual-serve>=1.1.3",
     "pyyaml>=6",
+    "pydantic>=2.10",
+    "typing-extensions>=4.12",
     "ddgs>=9",
 ]
 
