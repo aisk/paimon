@@ -150,13 +150,13 @@ class ValidateArgsTest(unittest.TestCase):
                       validate_args("read_job", {}, REGISTRY))
 
     def test_wrong_top_level_type(self) -> None:
-        self.assertIn("'todos' must be an array",
+        self.assertIn("'todos' must be a valid list",
                       validate_args("write_todos", {"todos": "oops"}, REGISTRY))
-        self.assertIn("'command' must be a string",
+        self.assertIn("'command' must be a valid string",
                       validate_args("shell", {"command": 42}, REGISTRY))
 
     def test_wrong_array_item_shape(self) -> None:
-        self.assertIn("'todos[0]' must be an object",
+        self.assertIn("'todos[0]' must be a valid dictionary",
                       validate_args("write_todos", {"todos": ["x"]}, REGISTRY))
         self.assertIn("missing required argument 'status'",
                       validate_args("write_todos", {"todos": [{"content": "x"}]}, REGISTRY))
@@ -164,7 +164,7 @@ class ValidateArgsTest(unittest.TestCase):
     def test_wrong_enum_value(self) -> None:
         error = validate_args(
             "write_todos", {"todos": [{"content": "x", "status": "bogus"}]}, REGISTRY)
-        self.assertIn("must be one of", error)
+        self.assertIn("'todos[0].status' must be 'pending'", error)
 
     def test_unknown_extra_keys_pass(self) -> None:
         self.assertIsNone(validate_args("shell", {"command": "ls", "stray": 1}, REGISTRY))
