@@ -1,5 +1,6 @@
 import argparse
 import stat
+import sys
 import tempfile
 import time
 import unittest
@@ -59,14 +60,31 @@ class ReporterTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.log = Path(tmp.name) / "calls"
-        binary = Path(tmp.name) / "herdr"
-        binary.write_text(f'#!/bin/sh\necho "$*" >> "{self.log}"\n', encoding="utf-8")
-        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
-        self.binary = binary
+        self.script = Path(tmp.name) / "herdr.py"
+        self._write_script()
+        # A launcher rather than the script itself, which Windows cannot run.
+        if sys.platform == "win32":
+            binary = Path(tmp.name) / "herdr.cmd"
+            binary.write_text(f'@"{sys.executable}" "{self.script}" %*\n', encoding="utf-8")
+        else:
+            binary = Path(tmp.name) / "herdr"
+            binary.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{self.script}" "$@"\n',
+                              encoding="utf-8")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
         self.reporter = Reporter(str(binary), "w1:p1")
         on_path = _on_path()
         on_path.start()
         self.addCleanup(on_path.stop)
+
+    def _write_script(self, slow: str = "") -> None:
+        """Log the arguments of each call, after a long pause on the ``slow`` command."""
+        self.script.write_text(
+            "import sys, time\n"
+            f"if sys.argv[2] == {slow!r}:\n"
+            "    time.sleep(5)\n"
+            f"with open({str(self.log)!r}, 'a', encoding='utf-8') as log:\n"
+            "    log.write(' '.join(sys.argv[1:]) + '\\n')\n",
+            encoding="utf-8")
 
     def _calls(self, count: int) -> list[list[str]]:
         deadline = time.monotonic() + 5
@@ -110,9 +128,7 @@ class ReporterTest(unittest.TestCase):
         self.assertEqual(self._calls(1)[0][-1], "idle")
 
     def test_release_does_not_wait_for_a_report_in_flight(self) -> None:
-        self.binary.write_text(
-            f'#!/bin/sh\n[ "$2" = report-agent ] && sleep 5\necho "$*" >> "{self.log}"\n',
-            encoding="utf-8")
+        self._write_script(slow="report-agent")
         self.reporter.report(Report(herdr.WORKING))
         time.sleep(0.2)
         started = time.monotonic()
