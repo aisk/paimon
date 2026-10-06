@@ -1,8 +1,10 @@
 """Login flow: pick provider → pick model → enter api_base → enter api_key.
 
 Provider and model lists come from pydantic-ai's static ``KnownModelName``
-catalog; no network calls are made. The picker accepts free-typed entries, so
-unlisted providers or brand-new model names still work.
+catalog; no network calls are made. The catalog keeps every model a provider
+ever served, so the model list is cut down to the current ones. The picker
+accepts free-typed entries, so unlisted providers, brand-new model names and
+the models left out still work.
 
 The provider doubles as the wire dialect, so the catalog is narrowed to the
 ones whose SDK ships with Paimon — offering the rest would only produce an
@@ -30,6 +32,45 @@ from paimon.errors import PaimonError
 from paimon.llm import CHATGPT_PROVIDER, is_provider_available
 
 
+# The models worth offering, one line of succession per row, newest first. A
+# provider shows the newest member of each row its catalog has, so a model
+# whose successor has not reached that provider (or this pydantic-ai) stays
+# listed. Resellers name the same models their own way and get their own rows.
+# Left out on purpose: dated snapshots, superseded generations, and models
+# that are not general coding models (cyber, audio, deep research).
+_CURRENT = (
+    ("claude-fable-5-1", "claude-fable-5"),
+    ("claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"),
+    ("claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-4-6-sonnet"),
+    ("claude-haiku-4-5", "claude-4-5-haiku"),
+    ("gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"),
+    ("gpt-6-astra",),
+    ("gpt-5.6-terra",),
+    ("gpt-6-luna", "gpt-5.6-luna"),
+    ("openai.gpt-5.6-sol",),
+    ("openai.gpt-5.6-terra",),
+    ("openai.gpt-5.6-luna",),
+    ("openai-gpt-5-6-sol",),
+    ("openai-gpt-5-6-terra",),
+    ("openai-gpt-5-6-luna",),
+    ("glm-5.3", "glm-5.2", "zai/GLM-5.2"),
+    ("glm-5.3-flashx",),
+    ("glm-5.3-flash",),
+    ("glm-5-turbo",),
+    ("glm-5v-turbo",),
+    ("kimi-k3", "moonshotai/Kimi-K2.6", "kimi-k2-5"),
+    ("kimi-k2.7-code",),
+    ("kimi-k2.7-code-highspeed",),
+    ("deepseek-v4-pro", "deepseek-ai/DeepSeek-V4-Pro", "deepseek-v3-2"),
+    ("deepseek-flash", "deepseek-v4-flash", "deepseek-ai/Deepseek-V4-Flash"),
+    ("qwen-3.8-27b", "qwen3-coder-480b"),
+    ("minimax-m2-1",),
+    ("gemma-4-31b", "google/gemma-4-31b-it"),
+    ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",),
+    ("gpt-oss-120b", "openai.gpt-oss-120b", "openai/gpt-oss-120b"),
+)
+
+
 def _known_models() -> list[str]:
     return sorted(typing.get_args(KnownModelName.__value__))
 
@@ -42,9 +83,12 @@ def _providers() -> list[str]:
 def _models(provider: str) -> list[str]:
     if provider == CHATGPT_PROVIDER:
         # A ChatGPT plan serves OpenAI's own models; which ones depends on the plan.
-        return [name for name in _models("openai") if name.startswith("gpt-5")]
+        provider = "openai"
     prefix = provider + ":"
-    return [name.removeprefix(prefix) for name in _known_models() if name.startswith(prefix)]
+    catalog = [name.removeprefix(prefix) for name in _known_models() if name.startswith(prefix)]
+    current = [next((name for name in line if name in catalog), None) for line in _CURRENT]
+    # A provider none of the rows know is shown whole rather than empty.
+    return [name for name in current if name] or catalog
 
 
 class PickerScreen(ModalScreen[Optional[str]]):
