@@ -11,6 +11,7 @@ import weakref
 from dataclasses import dataclass
 from typing import Optional
 
+from genai_prices.data_snapshot import get_snapshot
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -25,7 +26,6 @@ from pydantic_ai.models import Model
 
 from .errors import PaimonError
 from .llm import ask_once
-from .model_windows import CONTEXT_WINDOWS
 from .session import summary_message
 
 
@@ -75,56 +75,32 @@ class CompactionResult:
         return [summary_message(self.summary), *self.kept_messages]
 
 
-# Fallback window sizes by model-name fragment, consulted only when the
-# generated CONTEXT_WINDOWS table has no entry for the model. First match wins,
-# so the more specific fragment goes first. Deliberately coarse and
-# conservative: a value that is too small only compacts early, while none at
-# all would silently disable the compaction safety net.
-_KNOWN_WINDOWS: tuple[tuple[str, int], ...] = (
-    ("gpt-4.1", 1_000_000),
-    ("gpt-4o", 128_000),
-    ("gpt-5", 272_000),
-    ("glm-4.6", 200_000),
-    ("claude", 200_000),
-    ("gemini", 1_000_000),
-    ("o1", 200_000),
-    ("o3", 200_000),
-    ("o4-mini", 200_000),
-    ("grok", 256_000),
-    ("deepseek", 128_000),
-    ("glm", 128_000),
-    ("kimi", 128_000),
-    ("moonshot", 128_000),
-    ("qwen", 128_000),
-    ("mistral", 128_000),
-    ("llama", 128_000),
-)
+def _window_by_name(model_name: str) -> Optional[int]:
+    """The window genai-prices records for this model name under any provider.
+
+    pydantic-ai matches on the provider as well, which misses a known model
+    served from an endpoint it does not recognize: a proxy, a local gateway.
+    """
+    try:
+        _, info = get_snapshot().find_provider_model(model_name, None, None, None)
+    except LookupError:
+        return None
+    return info.context_window
 
 
-def context_window(model: Optional[str], override: Optional[int] = None) -> Optional[int]:
-    """The window to compact against: the override, else a built-in estimate.
+def context_window(model: Optional[Model], override: Optional[int] = None) -> Optional[int]:
+    """The window to compact against: the override, else what is on record.
 
-    The estimate first looks the model up in the generated table, which knows
-    thousands of models exactly, and falls back to the coarse fragment table
-    for anything it has never heard of.  None means the window is unknown,
-    which disables auto-compaction; callers surface that state rather than let
-    it look like compaction is working.
+    The record is pydantic-ai's own profile for the model, filled from
+    genai-prices.  None means the window is unknown, which disables
+    auto-compaction; callers surface that state rather than let it look like
+    compaction is working.
     """
     if override and override > 0:
         return override
-    if not model:
+    if model is None:
         return None
-    name = model.lower()
-    # "zai:glm-4.6" is looked up as "glm-4.6", but the qualified name is tried
-    # first because a few catalogue entries carry a namespace of their own.
-    for candidate in (name, name.partition(":")[2], name.partition("/")[2]):
-        window = CONTEXT_WINDOWS.get(candidate)
-        if window:
-            return window
-    for fragment, window in _KNOWN_WINDOWS:
-        if fragment in name:
-            return window
-    return None
+    return model.context_window or _window_by_name(model.model_name)
 
 
 def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None,

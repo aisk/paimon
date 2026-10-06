@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.widgets import ContentSwitcher, Static
 
-from . import compaction, herdr
+from . import herdr
 from .agent import Agent
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .errors import PaimonError
@@ -610,8 +610,7 @@ class PaimonApp(App):
         else:
             pane._tokens = tokens
         if tokens is not None:
-            window = compaction.context_window(pane.agent.model_name,
-                                               self.config.compaction_context_window)
+            window = pane.agent.context_window()
             if window:
                 parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
             else:

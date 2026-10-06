@@ -139,7 +139,6 @@ flowchart TD
         ToolsMod["tools.py<br/>tool REGISTRY"]
         SessionMod["session.py<br/>JSONL persistence"]
         Compaction["compaction.py"]
-        ModelWindows["model_windows.py<br/>context window sizes"]
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path expansion"]
         Jobs["turns.py<br/>turn driver"]
@@ -183,7 +182,6 @@ flowchart TD
     AgentLoop -. "run_background" .-> CommandPane
 
     PromptMod --> Skills
-    Compaction --> ModelWindows
 
     Jobs --> AgentLoop
 

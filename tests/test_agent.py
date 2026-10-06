@@ -11,11 +11,12 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from paimon import compaction, lockfile, prompt, tools
+from paimon import lockfile, prompt, tools
 from paimon.agent import (
     Agent,
 )
 from paimon.config import Config
+from paimon.llm import build_model
 from paimon.session import (
     Session,
     SessionIncompleteError,
@@ -283,9 +284,18 @@ class ModelOverrideTest(unittest.TestCase):
 
     def test_the_override_picks_its_own_context_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            config = Config(model="test:stub",
+                            providers={"zai": {"api_key": "k"}})
             agent = Agent(make_session(Path(directory)), "snapshot",
-                          config=Config(model="test:stub"), model_override="claude-x")
-            self.assertEqual(compaction.context_window(agent.model_name), 200_000)
+                          config=config, model_override="zai:glm-5.2")
+            self.assertEqual(agent.context_window(),
+                             build_model("zai:glm-5.2", api_key="k").context_window)
+
+    def test_a_model_that_cannot_be_built_has_no_context_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(make_session(Path(directory)), "snapshot",
+                          config=Config(model="nosuchprovider:x"))
+            self.assertIsNone(agent.context_window())
 
 
 class SkillAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
