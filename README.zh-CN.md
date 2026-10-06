@@ -26,7 +26,7 @@ uvx paimon
 
 首次启动会询问 provider、模型、API base 和 key。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
-运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 写文件或执行命令前先询问，**edit** 放行工作目录内的编辑，**yolo** 从不询问，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
+运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 只读，**auto** 放行工作目录内的编辑，其余操作交给另一次模型调用审批，**yolo** 不做任何检查，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
 `Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 也能并行干活：让它同时做两件互不相干的事，它会在后台起第二个 agent，做完后结果会回到当前会话里。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
 
@@ -44,7 +44,7 @@ Paimon 会从 `~/.config/paimon/skills`、`~/.agents/skills` 以及工作目录�
 
 ```bash
 paimon login --profile glm --model zai:glm-4.7 --api-key-env ZAI_API_KEY
-paimon --profile glm -p "apply the plan in PLAN.md" --mode edit --output-format result
+paimon --profile glm -p "apply the plan in PLAN.md" --mode auto --output-format result
 ```
 
 自带的 skill 会向调用方 agent 说明这套流程：
@@ -65,7 +65,7 @@ import asyncio
 from paimon.agent import Agent, TextDelta
 
 async def main():
-    agent = Agent.open(mode="edit")
+    agent = Agent.open(mode="auto")
     async for event in agent.run("summarize the tests in this directory"):
         if isinstance(event, TextDelta):
             print(event.text, end="", flush=True)
@@ -73,7 +73,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`Agent.open()` 还接受工作目录、用于权限确认的异步 `confirm` 回调，以及 `toolset`，可以只给模型一部分工具，或者换成你自己的工具。agent 被回收时会交还会话，想在确定的时刻交还就调 `close()`，或者把它当上下文管理器用。它写的会话文件和 CLI 一样，所以代码里跑出来的会话之后可以用 `paimon -r` 恢复。
+`Agent.open()` 还接受工作目录、用于剩余权限确认的异步 `confirm` 回调，以及 `toolset`，可以只给模型一部分工具，或者换成你自己的工具。agent 被回收时会交还会话，想在确定的时刻交还就调 `close()`，或者把它当上下文管理器用。它写的会话文件和 CLI 一样，所以代码里跑出来的会话之后可以用 `paimon -r` 恢复。
 
 ## 会话
 
@@ -91,7 +91,7 @@ paimon log a1b2c3    # 查看会话做了什么，每个事件一行
 
 ```bash
 paimon --mode read                  # 以更谨慎的权限模式启动（默认为 yolo）
-paimon --strict                     # 每条命令都先询问，包括只读命令
+paimon --strict                     # 不再放行只读命令
 paimon --no-web-search              # 本次运行不提供网页搜索工具
 paimon --web                        # 在浏览器中使用同一套 UI（--port，默认 8000）
 paimon -p "what does cli.py do?"    # 直接在 stdout 输出回答，不启动 UI
@@ -106,7 +106,7 @@ paimon --profile work               # 单独配置的另一个账号
 
 每个 profile 的模型设置保存在 `~/.config/paimon/<name>/config.json`，由首次启动或 `paimon login` 写入。也可以用 ChatGPT 订阅代替 API key，`paimon login --model chatgpt:gpt-5.5` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
 
-read 和 edit 模式会不经询问执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉。Windows 上命令由 cmd.exe 执行，每条命令都会询问。**这是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
+read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉，Windows 上命令由 cmd.exe 执行，一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。在配置里写 `"review_model": "provider:name"` 可以让审批用另一个模型。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
 ## 架构
 

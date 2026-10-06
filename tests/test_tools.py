@@ -9,7 +9,9 @@ from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
 from paimon.tools import (
     MAX_OUTPUT,
     MODES,
+    READ_DENIAL,
     REGISTRY,
+    USER_DENIAL,
     ToolContext,
     _read_history,
     _search_history,
@@ -23,45 +25,80 @@ from tests.support.shell import sleeper
 
 
 class RunToolTest(unittest.IsolatedAsyncioTestCase):
-    """run_tool is the enforcement point: gating cannot be bypassed by omitting the hook."""
+    """run_tool is the enforcement point: gating cannot be bypassed by omitting the hooks."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.cwd = Path(tmp.name).resolve()
+        self.outside = Path(tmp.name).resolve()
+        self.cwd = self.outside / "project"
+        self.cwd.mkdir()
+        # A write auto mode does not let through on its own.
+        self.held = {"path": "../a.txt", "content": "hi"}
 
-    async def test_without_confirm_hook_dangerous_calls_are_denied(self) -> None:
-        result, denied = await run_tool("write_file", {"path": "a.txt", "content": "hi"}, self.cwd, "read")
+    async def test_read_mode_refuses_without_asking_anyone(self) -> None:
+        confirm = AsyncMock(return_value=True)
+        review = AsyncMock(return_value=None)
+        result, denied = await run_tool("write_file", {"path": "a.txt", "content": "hi"},
+                                        self.cwd, "read", confirm, review=review)
+        confirm.assert_not_awaited()
+        review.assert_not_awaited()
         self.assertTrue(denied)
-        self.assertEqual(result, "User denied this operation.")
+        self.assertEqual(result, READ_DENIAL)
         self.assertFalse((self.cwd / "a.txt").exists())
 
-    async def test_confirm_hook_allows_execution(self) -> None:
+    async def test_auto_mode_runs_what_the_reviewer_lets_through(self) -> None:
+        confirm = AsyncMock(return_value=False)
+        review = AsyncMock(return_value=None)
+        result, denied = await run_tool("write_file", self.held, self.cwd, "auto", confirm,
+                                        review=review)
+        review.assert_awaited_once_with("write_file", self.held)
+        confirm.assert_not_awaited()
+        self.assertFalse(denied)
+        self.assertEqual((self.outside / "a.txt").read_text(), "hi")
+
+    async def test_auto_mode_reports_the_reviewers_refusal(self) -> None:
+        review = AsyncMock(return_value="Denied by the reviewer: no.")
+        result, denied = await run_tool("write_file", self.held, self.cwd, "auto", review=review)
+        self.assertTrue(denied)
+        self.assertEqual(result, "Denied by the reviewer: no.")
+        self.assertFalse((self.outside / "a.txt").exists())
+
+    async def test_without_reviewer_or_confirm_hook_held_calls_are_denied(self) -> None:
+        result, denied = await run_tool("write_file", self.held, self.cwd, "auto")
+        self.assertTrue(denied)
+        self.assertEqual(result, USER_DENIAL)
+        self.assertFalse((self.outside / "a.txt").exists())
+
+    async def test_without_a_reviewer_the_confirm_hook_decides(self) -> None:
         confirm = AsyncMock(return_value=True)
-        result, denied = await run_tool("write_file", {"path": "a.txt", "content": "hi"}, self.cwd, "read", confirm)
+        result, denied = await run_tool("write_file", self.held, self.cwd, "auto", confirm)
         confirm.assert_awaited_once()
         self.assertFalse(denied)
         self.assertIn("Wrote", result)
-        self.assertEqual((self.cwd / "a.txt").read_text(), "hi")
+        self.assertEqual((self.outside / "a.txt").read_text(), "hi")
 
-    async def test_allowed_calls_skip_the_hook(self) -> None:
+    async def test_allowed_calls_skip_the_hooks(self) -> None:
         (self.cwd / "a.txt").write_text("hi")
         confirm = AsyncMock(return_value=False)
-        result, denied = await run_tool("read_file", {"path": "a.txt"}, self.cwd, "read", confirm)
+        review = AsyncMock(return_value="no")
+        result, denied = await run_tool("read_file", {"path": "a.txt"}, self.cwd, "read", confirm,
+                                        review=review)
         confirm.assert_not_awaited()
+        review.assert_not_awaited()
         self.assertFalse(denied)
         self.assertIn("hi", result)
 
     @unittest.skipIf(os.name == "nt", "nothing is auto-allowed under cmd.exe")
-    async def test_safe_command_runs_without_confirm_hook(self) -> None:
+    async def test_safe_command_runs_in_read_mode(self) -> None:
         result, denied = await run_tool("shell", {"command": "ls"}, self.cwd, "read")
         self.assertFalse(denied)
-        self.assertNotEqual(result, "User denied this operation.")
+        self.assertNotEqual(result, READ_DENIAL)
 
-    async def test_strict_denies_safe_command_without_hook(self) -> None:
+    async def test_strict_denies_safe_command(self) -> None:
         result, denied = await run_tool("shell", {"command": "ls"}, self.cwd, "read", safe_commands=False)
         self.assertTrue(denied)
-        self.assertEqual(result, "User denied this operation.")
+        self.assertEqual(result, READ_DENIAL)
 
     async def test_shell_timeout_terminates_and_reaps_process_tree(self) -> None:
         with (

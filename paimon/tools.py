@@ -35,15 +35,24 @@ from .session import Session, data_dir
 # A confirm callback returns True to allow a dangerous tool, False to deny.
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
+# A review callback judges a call auto mode will not let through on its own:
+# None lets it run, a string is the refusal the model is shown.
+ReviewFn = Callable[[str, dict], Awaitable[Optional[str]]]
+
 # An ask callback puts a question (and optional choices) to the user and
 # returns their answer, or None when they dismissed it without answering.
 AskFn = Callable[[str, list[str]], Awaitable[Optional[str]]]
 
-# Permission modes: read (confirm writes, shell and reads outside cwd),
-# edit (auto-approve writes inside cwd), yolo (no confirmation at all).
-# In read and edit modes, shell commands recognized by safe_command() run
-# without confirmation unless the safe_commands toggle is off.
-MODES = ("read", "edit", "yolo")
+# Permission modes: read (reads inside cwd, everything else refused), auto
+# (writes inside cwd too, and a reviewer model decides the rest), yolo (no
+# check at all). In read and auto modes, shell commands recognized by
+# safe_command() run as well unless the safe_commands toggle is off.
+MODES = ("read", "auto", "yolo")
+
+USER_DENIAL = "User denied this operation."
+READ_DENIAL = ("Denied: read mode only allows reading inside the working directory and "
+               "clearly read-only shell commands. Do not look for another way to do "
+               "this; say what you would have done instead.")
 
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
@@ -72,10 +81,10 @@ class Tool:
     mode, ctx) and returns a string or an awaitable
     of one; it is None for tools the agent loop handles itself (write_todos,
     the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
-    "write" is auto-approved inside cwd in edit mode, "execute" needs
-    confirmation outside yolo except for commands safe_command() recognizes as
-    read-only, "background" is "execute" with no such exception, "none" is
-    never gated, "always" needs confirmation even in yolo mode.
+    "write" runs freely inside cwd in auto mode, "execute" is held outside
+    yolo except for commands safe_command() recognizes as read-only,
+    "background" is "execute" with no such exception, "none" is never gated,
+    "always" needs the user's confirmation even in yolo mode.
     """
 
     description: str
@@ -320,7 +329,7 @@ def _real(path: Path) -> Optional[Path]:
     """The path with symlinks resolved, or None when it cannot be resolved.
 
     None never compares equal to a recorded path, so an unresolvable path
-    falls through to confirmation instead of raising inside the gate.
+    is held like any other instead of raising inside the gate.
     """
     try:
         return path.resolve()
@@ -332,7 +341,7 @@ def _inside(path: Path, cwd: Path) -> bool:
     """True if path (symlinks resolved) is inside cwd.
 
     A path that cannot be resolved at all (a symlink loop raises RuntimeError,
-    not OSError) counts as outside: gate() then asks for confirmation instead
+    not OSError) counts as outside: gate() then holds the call instead
     of letting the exception escape the tool-call error boundary and end the
     turn.
     """
@@ -347,8 +356,8 @@ def _inside(path: Path, cwd: Path) -> bool:
 # quoted that fail-closed simplicity wins — means the segment view built below
 # may not be what the shell actually runs (substitution, redirection,
 # escaping, brace expansion, glob character classes that can match ".."), so
-# the command is never auto-allowed. A false rejection only costs one
-# confirmation prompt, so this errs hard toward rejection. ";", "&" and "|"
+# the command is never auto-allowed. A false rejection only costs a review
+# in auto mode, so this errs hard toward rejection. ";", "&" and "|"
 # are not here: _split_segments handles them position-aware, so quoted forms
 # like grep "a|b" stay allowed.
 _SHELL_METACHARS = frozenset("$`<>()\\{[\n\r")
@@ -577,8 +586,8 @@ def safe_command(command: str, cwd: Path) -> bool:
     """Conservatively decide whether a shell command is clearly read-only.
 
     A guardrail against agent mistakes, not a security boundary: anything not
-    positively recognized returns False and the caller falls back to the
-    normal confirmation flow, so a miss costs a prompt, never a denial.
+    positively recognized returns False and the call is held like any other
+    command: reviewed in auto mode, refused in read mode.
 
     Compound commands pass when every &&/||/;/|-separated segment passes on
     its own. A cd segment moves the base later relative paths resolve
@@ -622,62 +631,90 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
          registry: Optional[dict[str, Tool]] = None,
          safe_commands: bool = True,
          ctx: Optional[ToolContext] = None) -> str:
-    """Decide whether a tool call runs freely ("allow") or needs user confirmation ("confirm").
+    """Decide what stands between a tool call and running it.
 
-    ``safe_commands`` auto-allows shell commands recognized as clearly
-    read-only (see safe_command); False restores confirm-everything behavior.
+    "allow" is nothing. A call the mode does not let through on its own is
+    held: "deny" in read mode, "review" in auto mode. "confirm" is the one
+    thing only the user can approve, whatever the mode.
+
+    ``safe_commands`` lets shell commands recognized as clearly read-only
+    through (see safe_command); False holds every command.
     """
     tool = (REGISTRY if registry is None else registry).get(name)
     if tool is not None and tool.access == "always":
         return "confirm"
     if mode == "yolo" or tool is None or tool.access == "none":
         return "allow"
+    held = "review" if mode == "auto" else "deny"
     if tool.access == "execute":
         if safe_commands and safe_command(str(args.get("command") or ""), cwd):
             return "allow"
-        return "confirm"
+        return held
     if tool.access == "background":
         # No safe_command exception here. That list is about what a command
         # reads and writes, and a process that never ends on its own is not
         # harmless just because it only reads: "tail -f" is on the deny side of
         # it precisely because it runs until the timeout — and a background
         # command has no timeout to run into.
-        return "confirm"
+        return held
     # A missing/malformed path resolves to cwd itself; the tool then fails on its own.
     resolved = _resolve(str(args.get("path") or ""), cwd)
     inside = _inside(resolved, cwd)
     if tool.access == "read":
         # An overflow file this agent's own command produced is paimon's record
-        # of something the user already approved, so reading it back is not a
+        # of something already let through, so reading it back is not a
         # new escalation. The exemption is per agent on purpose: the directory
         # itself is shared by every session and project on the machine, and a
         # blanket allowance would let one agent read another one's command
-        # output — a different project's, or last week's — without a prompt.
+        # output — a different project's, or last week's — unchecked.
         own_output = ctx is not None and _real(resolved) in ctx.shell_outputs
-        return "allow" if inside or own_output else "confirm"
-    if tool.access == "write" and mode == "edit" and inside:
+        return "allow" if inside or own_output else held
+    if tool.access == "write" and mode == "auto" and inside:
         return "allow"
-    return "confirm"
+    return held
+
+
+async def authorize(name: str, args: dict, mode: str, cwd: Path,
+                    confirm: Optional[ConfirmFn] = None,
+                    review: Optional[ReviewFn] = None,
+                    registry: Optional[dict[str, Tool]] = None,
+                    safe_commands: bool = True,
+                    ctx: Optional[ToolContext] = None) -> Optional[str]:
+    """Gate a tool call and put it to whoever decides: None when it may run,
+    else the refusal the model is shown.
+
+    This is the enforcement point. A held call is never let through for want
+    of someone to ask: without a reviewer it goes to the confirm hook, and
+    without that either it is refused, so a headless Agent cannot bypass the
+    permission mode.
+    """
+    decision = gate(name, args, mode, cwd, registry, safe_commands=safe_commands, ctx=ctx)
+    if decision == "allow":
+        return None
+    if decision == "deny":
+        return READ_DENIAL
+    if decision == "review" and review is not None:
+        return await review(name, args)
+    allowed = await confirm(name, args) if confirm else False
+    return None if allowed else USER_DENIAL
 
 
 async def run_tool(name: str, args: dict, cwd: Path, mode: str,
                    confirm: Optional[ConfirmFn] = None,
                    registry: Optional[dict[str, Tool]] = None,
                    safe_commands: bool = True,
-                   ctx: Optional[ToolContext] = None) -> tuple[str, bool]:
-    """Gate, optionally confirm, then execute a tool call.
+                   ctx: Optional[ToolContext] = None,
+                   review: Optional[ReviewFn] = None) -> tuple[str, bool]:
+    """Authorize, then execute a tool call. Returns ``(result, denied)``.
 
-    Returns ``(result, denied)``. This is the enforcement point: a call that
-    needs confirmation is denied when no confirm hook is available, so a
-    headless Agent cannot bypass the permission mode. ``registry`` narrows the
-    available tools (an agent's own set); None means the full REGISTRY.
-    ``ctx`` carries the calling agent's own state, so gating decisions that
-    depend on what this agent did earlier stay scoped to it.
+    ``registry`` narrows the available tools (an agent's own set); None means
+    the full REGISTRY. ``ctx`` carries the calling agent's own state, so gating
+    decisions that depend on what this agent did earlier stay scoped to it.
     """
-    if gate(name, args, mode, cwd, registry, safe_commands=safe_commands, ctx=ctx) == "confirm":
-        allowed = await confirm(name, args) if confirm else False
-        if not allowed:
-            return "User denied this operation.", True
+    refusal = await authorize(name, args, mode, cwd, confirm, review, registry,
+                              safe_commands=safe_commands, ctx=ctx)
+    if refusal is not None:
+        return refusal, True
     return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx), False
 
 
@@ -1907,7 +1944,7 @@ REGISTRY: dict[str, Tool] = {
             "lines as path:line:text, in file order. Directories are searched "
             "recursively in deterministic directory order, skipping VCS/dependency/build noise "
             "and binary files. Searches time out after 10 seconds. "
-            "Prefer this over shell grep: it needs no confirmation."
+            "Prefer this over shell grep: it is never held for approval."
         ),
         params=GrepArgs,
     ),

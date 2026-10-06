@@ -9,6 +9,7 @@ from . import commands
 from . import headless as headless_mode
 from . import herdr
 from . import telemetry
+from . import tools
 from .agent import Agent
 from .app import PaimonApp
 from .config import Config
@@ -77,12 +78,12 @@ def main() -> None:
                         help="with --print: add TEXT (e.g. a role definition) to the end of "
                              "the new session's system prompt; persisted with the session, "
                              "so not combinable with --continue/--resume")
-    parser.add_argument("--mode", choices=("read", "edit", "yolo"), default="yolo",
-                        help="permission mode: read (confirm writes, non-read-only commands and "
-                             "reads outside cwd), edit (auto-approve edits in cwd), "
-                             "yolo (no confirmation; the default)")
+    parser.add_argument("--mode", choices=tools.MODES, default="yolo",
+                        help="permission mode: read (only reads in cwd and clearly read-only "
+                             "commands), auto (edits in cwd too; a reviewer model decides "
+                             "everything else), yolo (no checks; the default)")
     parser.add_argument("--strict", action="store_true",
-                        help="always ask before shell commands, even clearly read-only ones "
+                        help="hold every shell command, even clearly read-only ones "
                              "(overrides the safe_commands config for this run)")
     parser.add_argument("--skill", action="append", default=[], metavar="PATH", dest="skills",
                         help="load skills from this SKILL.md file or directory too (repeatable)")

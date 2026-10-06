@@ -38,11 +38,11 @@ class MultiPaneTest(AppTestCase):
     async def test_new_pane_inherits_cwd_and_mode(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            await pilot.press("shift+tab")  # read -> edit
+            await pilot.press("shift+tab")  # read -> auto
             await pilot.press("ctrl+t")
             await pilot.pause()
-            self.assertEqual(app.pane.mode, "edit")
-            self.assertEqual(app.pane.agent.mode, "edit")
+            self.assertEqual(app.pane.mode, "auto")
+            self.assertEqual(app.pane.agent.mode, "auto")
             self.assertEqual(app.pane.agent.cwd, app.panes[0].agent.cwd)
 
     async def test_cycling_wraps_in_both_directions(self) -> None:
@@ -104,7 +104,7 @@ class MultiPaneTest(AppTestCase):
     async def test_closing_a_pane_mid_turn_leaves_nothing_behind(self) -> None:
         # The turn is cancelled while its widgets are being removed, so the
         # worker must unwind without touching them.
-        app = self.make_app()
+        app = self.make_app(mode="auto")
         with patch("paimon.agent.build_model",
                    return_value=stub_model("shell", '{"command": "rm x"}')):
             async with app.run_test() as pilot:

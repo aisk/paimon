@@ -84,6 +84,18 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(err.count("--mode yolo"), 1)  # advised only once
         self.assertEqual(self.out.getvalue(), "")
 
+    async def test_a_denial_in_auto_mode_only_points_at_yolo(self) -> None:
+        renderer = self._renderer()
+        renderer.begin("sid", "test:stub", "auto", Path("/tmp"))
+        await _feed(
+            renderer,
+            ToolStart("call-1", "shell", {"command": "git push"}),
+            ToolEnd("call-1", "shell", "Denied by the auto mode reviewer: no.", denied=True),
+        )
+        err = self.err.getvalue()
+        self.assertIn("--mode yolo", err)
+        self.assertNotIn("--mode auto", err)
+
     async def test_reasoning_is_hidden_by_default_and_shown_when_enabled(self) -> None:
         hidden = self._renderer()
         await _feed(hidden, ReasoningDelta("pondering"))

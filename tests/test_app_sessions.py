@@ -39,14 +39,14 @@ class ResumeSessionTest(AppTestCase):
         old = self._old_session()
         app = self.make_app()
         async with app.run_test() as pilot:
-            app.action_cycle_mode()  # read -> edit, must survive the resume
+            app.action_cycle_mode()  # read -> auto, must survive the resume
             app.action_resume_session()
             await pilot.pause()
             self.assertIsInstance(app.screen, PickerScreen)
             app.screen.dismiss(_session_label(old))
             await pilot.pause()
             self.assertEqual(app.pane.agent.session.id, old.id)
-            self.assertEqual(app.pane.agent.mode, "edit")
+            self.assertEqual(app.pane.agent.mode, "auto")
             self.assertTrue(app.query(UserMessage), "history re-rendered")
             self.assertIn("Resumed session", self._log_text(app))
 

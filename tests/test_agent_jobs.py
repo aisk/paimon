@@ -272,6 +272,14 @@ class StopTest(JobsTestCase):
 class ChildConfirmTest(JobsTestCase):
     """A child has no screen: what it has to ask goes through its parent."""
 
+    def setUp(self) -> None:
+        # The project sits one level down, so the child's write lands outside
+        # it: auto mode holds that, where a write inside would just run.
+        super().setUp()
+        self.out = self.cwd / "out.txt"
+        self.cwd = self.cwd / "project"
+        self.cwd.mkdir()
+
     async def _child_writes(self, agent: Agent) -> None:
         requests = 0
 
@@ -288,7 +296,7 @@ class ChildConfirmTest(JobsTestCase):
                     yield "written"
                 else:
                     yield {0: DeltaToolCall(name="write_file", tool_call_id="w-1", json_args=json.dumps(
-                        {"path": "out.txt", "content": "hi"}))}
+                        {"path": "../out.txt", "content": "hi"}))}
             elif requests == 1:
                 yield {0: DeltaToolCall(name="spawn_agent", tool_call_id="s-1",
                                         json_args=json.dumps({"prompt": "write it"}))}
@@ -301,7 +309,7 @@ class ChildConfirmTest(JobsTestCase):
             await self.until(lambda: bool(agent.notices))
 
     async def test_the_ui_is_asked_with_the_childs_id(self) -> None:
-        agent = self.agent(mode="read")
+        agent = self.agent(mode="auto")
         asked: list = []
 
         async def confirm_child(job_id: str, name: str, args: dict) -> bool:
@@ -311,8 +319,8 @@ class ChildConfirmTest(JobsTestCase):
         agent.confirm_child = confirm_child
         await self._child_writes(agent)
 
-        self.assertEqual(asked, [(True, "write_file", "out.txt")])
-        self.assertEqual((self.cwd / "out.txt").read_text(), "hi")
+        self.assertEqual(asked, [(True, "write_file", "../out.txt")])
+        self.assertEqual(self.out.read_text(), "hi")
 
     async def test_without_that_hook_the_parents_own_confirm_answers(self) -> None:
         asked: list = []
@@ -321,16 +329,16 @@ class ChildConfirmTest(JobsTestCase):
             asked.append(name)
             return False
 
-        agent = self.agent(mode="read", confirm=confirm)
+        agent = self.agent(mode="auto", confirm=confirm)
         await self._child_writes(agent)
 
         self.assertEqual(asked, ["write_file"])
-        self.assertFalse((self.cwd / "out.txt").exists())
+        self.assertFalse(self.out.exists())
 
     async def test_with_nobody_to_ask_it_is_denied(self) -> None:
-        agent = self.agent(mode="read")
+        agent = self.agent(mode="auto")
         await self._child_writes(agent)
-        self.assertFalse((self.cwd / "out.txt").exists())
+        self.assertFalse(self.out.exists())
         self.assertIn("finished", agent.notices[0], "the child carries on and reports")
 
 

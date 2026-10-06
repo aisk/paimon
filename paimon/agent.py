@@ -31,7 +31,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import compaction, retry, tools
+from . import compaction, retry, review, tools
 from .config import Config
 from .llm import NoModelError, ask_once, build_model, user_agent
 from .mentions import expand_mentions
@@ -467,6 +467,9 @@ class Agent:
         self.tool_schemas = tools.schemas(self.toolset)
         self._tool_definitions = tools.definitions(self.toolset)
         self._cached_model: Optional[tuple[tuple, Model]] = None
+        self._cached_review_model: Optional[tuple[tuple, Model]] = None
+        # Refusals in a row from the auto-mode reviewer; see _review.
+        self._review_blocks = 0
         # (history length, provider-reported tokens) after the last completed
         # request: the authoritative context size at that point, used by
         # count_context_tokens so the chars/4 heuristic only covers what was
@@ -598,11 +601,24 @@ class Agent:
         name = self.model_name
         if not name:
             raise NoModelError("No model configured; log in first")
+        self._cached_model = self._built(name, self._cached_model)
+        return self._cached_model[1]
+
+    def _review_model(self) -> Model:
+        """The model auto mode reviews with: the config's own choice, else this agent's."""
+        name = self.config.review_model
+        if not name:
+            return self._model()
+        self._cached_review_model = self._built(name, self._cached_review_model)
+        return self._cached_review_model[1]
+
+    def _built(self, name: str, cached: Optional[tuple[tuple, Model]]) -> tuple[tuple, Model]:
+        """``cached`` if it still matches the config, else ``name`` built anew."""
         api_base, api_key = self.config.provider_auth(name)
         key = (name, api_base, api_key, self.config.profile)
-        if self._cached_model is None or self._cached_model[0] != key:
-            self._cached_model = (key, build_model(*key))
-        return self._cached_model[1]
+        if cached is None or cached[0] != key:
+            cached = (key, build_model(*key))
+        return cached
 
     def context_window(self) -> Optional[int]:
         """The context window compaction works against, None when unknown."""
@@ -785,8 +801,8 @@ class Agent:
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
-        if not await self._permitted(call.tool_name, args):
-            slot.content = "User denied this operation."
+        if (refusal := await self._refusal(call.tool_name, args)) is not None:
+            slot.content = refusal
             slot.outcome = "denied"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
@@ -828,18 +844,43 @@ class Agent:
         persist()
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
 
-    async def _permitted(self, name: str, args: dict) -> bool:
-        """Gate a tool the loop runs itself, the way run_tool gates the rest.
+    async def _refusal(self, name: str, args: dict) -> Optional[str]:
+        """Authorize a tool the loop runs itself, the way run_tool does the rest:
+        None when it may run, else what the model is told."""
+        return await tools.authorize(name, args, self.mode, self.cwd, self.confirm,
+                                     self._review, self.toolset,
+                                     safe_commands=self.config.safe_commands,
+                                     ctx=self.tool_context)
 
-        The enforcement point for everything in _AGENT_HANDLED: without a
-        confirm hook a call that needs one is denied, so a headless agent
-        cannot walk around the permission mode here either.
+    async def _review(self, name: str, args: dict) -> Optional[str]:
+        """Put a call auto mode holds to the reviewer model.
+
+        The user is the fallback, never the first stop: they are asked when no
+        verdict came back, and when the reviewer has refused MAX_BLOCKS calls
+        in a row. With nobody to ask, both are refusals.
         """
-        if tools.gate(name, args, self.mode, self.cwd, self.toolset,
-                      safe_commands=self.config.safe_commands,
-                      ctx=self.tool_context) != "confirm":
-            return True
-        return await self.confirm(name, args) if self.confirm else False
+        try:
+            verdict = await asyncio.wait_for(
+                review.judge(self._review_model(), self.history, name, args, self.cwd),
+                review.TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — any failure means no verdict
+            verdict = None
+            refusal = f"Denied: the auto mode reviewer was unavailable ({exc or type(exc).__name__})."
+        else:
+            if verdict.allow:
+                self._review_blocks = 0
+                return None
+            self._review_blocks += 1
+            refusal = (f"Denied by the auto mode reviewer: {verdict.reason} Do not look "
+                       "for another way to do this; if it is needed, tell the user so.")
+            if self._review_blocks < review.MAX_BLOCKS:
+                return refusal
+        if self.confirm is None:
+            return refusal
+        if not await self.confirm(name, args):
+            return tools.USER_DENIAL
+        self._review_blocks = 0
+        return None
 
     async def _run_job_tool(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
                             persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
@@ -851,8 +892,8 @@ class Agent:
         nothing but what this same agent started.
         """
         yield ToolStart(call.tool_call_id, call.tool_name, args)
-        if not await self._permitted(call.tool_name, args):
-            slot.content = "User denied this operation."
+        if (refusal := await self._refusal(call.tool_name, args)) is not None:
+            slot.content = refusal
             slot.outcome = "denied"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
@@ -1380,7 +1421,8 @@ class Agent:
                 result, denied = await tools.run_tool(name, args, self.cwd, self.mode,
                                                       self.confirm, self.toolset,
                                                       safe_commands=self.config.safe_commands,
-                                                      ctx=self.tool_context)
+                                                      ctx=self.tool_context,
+                                                      review=self._review)
 
                 slot.content = result
                 slot.outcome = "denied" if denied else "success"

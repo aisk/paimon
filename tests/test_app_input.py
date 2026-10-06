@@ -82,7 +82,7 @@ class ConfirmPanelTest(AppTestCase):
     async def test_quit_while_blocked_on_confirm_does_not_crash(self) -> None:
         # Quitting cancels the turn worker only after the DOM is torn down,
         # so the cancel handler must not touch widgets anymore.
-        app = self.make_app()
+        app = self.make_app(mode="auto")
         with patch("paimon.agent.build_model",
                    return_value=stub_model("shell", '{"command": "rm x"}')):
             async with app.run_test() as pilot:
@@ -232,10 +232,10 @@ class ModeCycleTest(AppTestCase):
             self.assertEqual(prompt.border_title, " read ")
 
             await pilot.press("shift+tab")
-            self.assertEqual(app.pane.mode, "edit")
-            self.assertEqual(app.pane.agent.mode, "edit")
-            self.assertEqual(prompt.border_title, " edit ")
-            self.assertIn("edit mode", str(app.query_one("#statusbar", Static).render()))
+            self.assertEqual(app.pane.mode, "auto")
+            self.assertEqual(app.pane.agent.mode, "auto")
+            self.assertEqual(prompt.border_title, " auto ")
+            self.assertIn("auto mode", str(app.query_one("#statusbar", Static).render()))
 
             await pilot.press("shift+tab", "shift+tab")
             self.assertEqual(app.pane.mode, "read")
@@ -245,14 +245,14 @@ class ModeCycleTest(AppTestCase):
         async with app.run_test() as pilot:
             await pilot.press("shift+tab")
             app.action_new_session()
-            self.assertEqual(app.pane.agent.mode, "edit")
+            self.assertEqual(app.pane.agent.mode, "auto")
 
     async def test_shift_tab_while_confirm_panel_open_keeps_pending_future(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             task = await self._open_confirm(app, pilot)
             await pilot.press("shift+tab")
-            self.assertEqual(app.pane.mode, "edit")
+            self.assertEqual(app.pane.mode, "auto")
             self.assertTrue(app.query(ConfirmPanel), "panel survives a mode switch")
             await pilot.press("enter")
             self.assertTrue(await task)

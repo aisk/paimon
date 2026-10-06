@@ -26,7 +26,7 @@ uvx paimon
 
 The first launch asks for a provider, model, API base and key. Then just type what you want done. Write `@path/to/file` in a prompt to hand a file to the agent.
 
-While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** asks before writing files or running commands, **edit** lets edits inside the working directory through, **yolo** never asks and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** only reads, **auto** edits inside the working directory and has a second model call approve everything else, **yolo** checks nothing and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
 
 `Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can work in parallel: ask for two independent things and it starts a second agent in the background, whose answer comes back into the conversation when it is done. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
 
@@ -44,7 +44,7 @@ Frontier models are good at planning and reviewing; the steps in between are oft
 
 ```bash
 paimon login --profile glm --model zai:glm-4.7 --api-key-env ZAI_API_KEY
-paimon --profile glm -p "apply the plan in PLAN.md" --mode edit --output-format result
+paimon --profile glm -p "apply the plan in PLAN.md" --mode auto --output-format result
 ```
 
 The bundled skill teaches the calling agent this workflow:
@@ -65,7 +65,7 @@ import asyncio
 from paimon.agent import Agent, TextDelta
 
 async def main():
-    agent = Agent.open(mode="edit")
+    agent = Agent.open(mode="auto")
     async for event in agent.run("summarize the tests in this directory"):
         if isinstance(event, TextDelta):
             print(event.text, end="", flush=True)
@@ -73,7 +73,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`Agent.open()` also takes a working directory, an async `confirm` callback for permission prompts, and a `toolset` to hand the model fewer tools or tools of your own. An agent holds its session until it goes away; to give it back at a definite moment, call `close()` or use the agent as a context manager. It writes the same session files as the CLI, so a run started in code can be resumed later with `paimon -r`.
+`Agent.open()` also takes a working directory, an async `confirm` callback for the permission prompts that are left, and a `toolset` to hand the model fewer tools or tools of your own. An agent holds its session until it goes away; to give it back at a definite moment, call `close()` or use the agent as a context manager. It writes the same session files as the CLI, so a run started in code can be resumed later with `paimon -r`.
 
 ## Sessions
 
@@ -91,7 +91,7 @@ paimon log a1b2c3    # what a session did, one line per event
 
 ```bash
 paimon --mode read                  # start in a more cautious permission mode (yolo is the default)
-paimon --strict                     # ask before every command, even read-only ones
+paimon --strict                     # hold every command, even read-only ones
 paimon --no-web-search              # take the web search tool away for this run
 paimon --web                        # the same UI in a browser (--port, default 8000)
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
@@ -108,7 +108,7 @@ Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume com
 
 Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. A ChatGPT plan works in place of an API key: `paimon login --model chatgpt:gpt-5.5` signs in through the browser. Sessions live in `~/.local/share/paimon/sessions/`.
 
-Read and edit modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns that off. On Windows, where cmd.exe runs the commands, every command asks. **This is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
+Read and auto modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) on their own; `--strict` turns that off, and on Windows, where cmd.exe runs the commands, none are recognized. Read mode refuses everything else. Auto mode asks a reviewer model, which sees your messages and the agent's tool calls but not its reasoning or any tool output, and answers allow or block. It asks you instead when the reviewer cannot be reached or has blocked three calls in a row, and under `-p` those are refusals. Set `"review_model": "provider:name"` in the config to review with a different model than the one doing the work. **All of this is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
 
 ## Architecture
 

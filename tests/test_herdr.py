@@ -178,7 +178,7 @@ class ResumeFlagsTest(unittest.TestCase):
     @staticmethod
     def _flags(**given) -> tuple[str, ...]:
         args = {"strict": False, "no_web_search": False, "no_skills": False, "skills": [],
-                "profile": "work", "model": "zai:glm-4.7", "mode": "edit"}
+                "profile": "work", "model": "zai:glm-4.7", "mode": "auto"}
         return cli._resume_flags(argparse.Namespace(**{**args, **given}))
 
     def test_nothing_by_default(self) -> None:
@@ -220,9 +220,9 @@ class AppReportingTest(AppTestCase):
         app = self._app(recorder, session=self._old_session())
         async with app.run_test() as pilot:
             await pilot.pause()
-            app.action_cycle_mode()  # read -> edit
+            app.action_cycle_mode()  # read -> auto
             await pilot.pause()
-            self.assertIn("edit", recorder.reports[-1].resume)
+            self.assertIn("auto", recorder.reports[-1].resume)
             app._apply_config(Config(model="other-model", profile="work"))
             app._report_herdr()
             resume = recorder.reports[-1].resume

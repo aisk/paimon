@@ -142,6 +142,7 @@ class TextRenderer:
         self._call_open = False  # a progress line awaits its outcome
         self._denied = 0
         self._session_id: Optional[str] = None
+        self._mode: Optional[str] = None
 
     def _note(self, text: str) -> None:
         self._end_call()
@@ -156,6 +157,7 @@ class TextRenderer:
               mode: Optional[str] = None, cwd: Optional[Path] = None,
               log_path: Optional[Path] = None) -> None:
         self._session_id = session_id
+        self._mode = mode
 
     async def handle(self, ev: object) -> None:
         if isinstance(ev, TextDelta):
@@ -181,8 +183,9 @@ class TextRenderer:
                 _write(self._err, "  → denied\n" if self._call_open else "· denied\n")
                 self._call_open = False
                 if self._denied == 1:
+                    wider = "--mode yolo" if self._mode == "auto" else "--mode auto or --mode yolo"
                     self._note("paimon: --print never asks for confirmation; "
-                               "rerun with --mode edit or --mode yolo to allow this")
+                               f"rerun with {wider} to allow this")
             else:
                 self._end_call()
 

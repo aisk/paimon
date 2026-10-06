@@ -227,8 +227,11 @@ class Config:
     # stub instead; either way it is still generated, persisted and sent back.
     show_reasoning: bool = False
     # Auto-allow clearly read-only shell commands (ls, git status, ...) in
-    # read/edit modes. A guardrail toggle, not a security boundary.
+    # read/auto modes. A guardrail toggle, not a security boundary.
     safe_commands: bool = True
+    # The model auto mode reviews held tool calls with, as "provider:name".
+    # None reviews with the model doing the work. Edited by hand.
+    review_model: Optional[str] = None
     # Offer a short recap once a turn that did some work is followed by this
     # many idle seconds. Seconds rather than a count so a test can turn the
     # wait down; the TUI never writes these back, they are edited by hand.
@@ -264,6 +267,7 @@ class Config:
             theme=data.get("theme"),
             show_reasoning=data.get("show_reasoning", cls.show_reasoning),
             safe_commands=data.get("safe_commands", cls.safe_commands),
+            review_model=data.get("review_model"),
             recap_enabled=data.get("recap_enabled", cls.recap_enabled),
             recap_idle_seconds=data.get("recap_idle_seconds", cls.recap_idle_seconds),
             compaction_enabled=compaction.get("enabled", cls.compaction_enabled),

@@ -455,7 +455,7 @@ class BackgroundTaskTest(AppTestCase):
                 self.assertNotIn("10%", shown, "only the last redraw is on screen")
 
     async def test_a_denied_confirmation_starts_nothing(self) -> None:
-        app = self.make_app(mode="read")
+        app = self.make_app(mode="auto")
         with patch("paimon.agent.build_model", return_value=self._model("ls -la")):
             async with app.run_test() as pilot:
                 app.pane.handle_submit(PromptInput.Submitted("run it"))
