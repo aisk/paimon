@@ -1,8 +1,9 @@
 """Tool definitions and execution.
 
-Each tool is one ``Tool`` entry in ``REGISTRY``: the OpenAI-style JSON schema
-sent to the model, the function that runs it, and the access class that drives
-permission gating. Adding a tool means adding one registry entry.
+Each tool is one ``Tool`` entry in ``REGISTRY``: its description and the
+TypedDict of its arguments, which the schema sent to the model is generated
+from, the function that runs it, and the access class that drives permission
+gating. Adding a tool means adding one registry entry.
 """
 
 import asyncio
@@ -21,9 +22,12 @@ import time
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Annotated, Awaitable, Callable, Literal, Optional
 
-from pydantic_ai.tools import ToolDefinition
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, with_config
+from pydantic_ai.profiles import InlineDefsJsonSchemaTransformer
+from pydantic_ai.tools import GenerateToolJsonSchema, ToolDefinition
+from typing_extensions import NotRequired, TypedDict
 
 from . import websearch
 from .session import Session, data_dir
@@ -62,9 +66,10 @@ class ToolContext:
 
 @dataclass(frozen=True)
 class Tool:
-    """One tool: its model-facing schema, executor, and gating class.
+    """One tool: what the model is told about it, its executor, and gating class.
 
-    ``run`` takes (args, cwd, mode, ctx) and returns a string or an awaitable
+    ``params`` is the TypedDict of its arguments. ``run`` takes (args, cwd,
+    mode, ctx) and returns a string or an awaitable
     of one; it is None for tools the agent loop handles itself (write_todos,
     the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
     "write" is auto-approved inside cwd in edit mode, "execute" needs
@@ -73,7 +78,8 @@ class Tool:
     never gated, "always" needs confirmation even in yolo mode.
     """
 
-    schema: dict
+    description: str
+    params: type
     run: Optional[Callable[[dict, Path, str, ToolContext], object]]
     access: str = "none"
 
@@ -102,70 +108,62 @@ def render_todos(todos: list[dict]) -> str:
     return "\n".join(f"{_TODO_MARKERS.get(t.get('status'), '[ ]')} {t.get('content', '')}" for t in todos)
 
 
-def _validate_value(value: object, schema: dict, path: str) -> Optional[str]:
-    expected = schema.get("type")
-    if expected == "string":
-        if not isinstance(value, str):
-            return f"'{path}' must be a string"
-    elif expected == "integer":
-        if isinstance(value, bool) or not isinstance(value, int):
-            return f"'{path}' must be an integer"
-    elif expected == "number":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return f"'{path}' must be a number"
-    elif expected == "boolean":
-        if not isinstance(value, bool):
-            return f"'{path}' must be a boolean"
-    elif expected == "array":
-        if not isinstance(value, list):
-            return f"'{path}' must be an array"
-        items = schema.get("items")
-        if isinstance(items, dict):
-            for index, element in enumerate(value):
-                error = _validate_value(element, items, f"{path}[{index}]")
-                if error is not None:
-                    return error
-    elif expected == "object":
-        if not isinstance(value, dict):
-            return f"'{path}' must be an object"
-        return _validate_object(value, schema, path)
-    enum = schema.get("enum")
-    if enum is not None and value not in enum:
-        choices = ", ".join(repr(choice) for choice in enum)
-        return f"'{path}' must be one of {choices}"
-    return None
+@cache
+def _adapter(params: type) -> TypeAdapter:
+    return TypeAdapter(params)
 
 
-def _validate_object(value: dict, schema: dict, path: str = "") -> Optional[str]:
-    for key in schema.get("required") or []:
-        if key not in value:
-            where = f" in '{path}'" if path else ""
-            return f"missing required argument '{key}'{where}"
-    properties = schema.get("properties") or {}
-    for key, item in value.items():
-        subschema = properties.get(key)
-        if isinstance(subschema, dict):
-            error = _validate_value(item, subschema, f"{path}.{key}" if path else key)
-            if error is not None:
-                return error
-    return None
+def _untitled(schema: object) -> object:
+    """``schema`` without the class names pydantic records as titles."""
+    if isinstance(schema, list):
+        return [_untitled(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    # A property that happens to be called "title" maps to a schema, never to
+    # a string, so it is kept.
+    return {key: _untitled(value) for key, value in schema.items()
+            if not (key == "title" and isinstance(value, str))}
+
+
+@cache
+def _parameters(params: type) -> dict:
+    """The JSON schema of a tool's arguments, as the model is shown it."""
+    schema = _adapter(params).json_schema(schema_generator=GenerateToolJsonSchema)
+    # Inlined, as providers differ in whether they follow a $ref.
+    return _untitled(InlineDefsJsonSchemaTransformer(schema).walk())
+
+
+def _argument_path(loc: tuple) -> str:
+    path = ""
+    for step in loc:
+        path += f"[{step}]" if isinstance(step, int) else f".{step}" if path else str(step)
+    return path
 
 
 def validate_args(name: str, args: dict, toolset: dict) -> Optional[str]:
-    """Why ``args`` do not fit the tool's declared schema, or None when they do.
+    """Why ``args`` do not fit the tool's declared arguments, or None when they do.
 
     The one validation layer every ToolCallPart passes before gating or
     dispatch, agent-handled tools included, so a malformed argument becomes a
-    tool error result instead of an exception ending the turn. Covers exactly
-    the JSON-schema subset REGISTRY declares (types, required, enum, array
-    items); unknown extra arguments pass — models add stray keys, and
-    rejecting them costs more than ignoring them.
+    tool error result instead of an exception ending the turn. Strict, so a
+    value of the wrong type is reported rather than coerced: the executors
+    read the arguments as the model wrote them. Unknown extra arguments pass:
+    models add stray keys, and rejecting them costs more than ignoring them.
     """
     tool = toolset.get(name)
     if tool is None:
         return f"unknown tool {name!r}"
-    parameters = (tool.schema.get("function") or {}).get("parameters") or {}
-    return _validate_object(args, parameters)
+    try:
+        _adapter(tool.params).validate_python(args, strict=True)
+    except ValidationError as exc:
+        error = exc.errors(include_url=False)[0]
+        *parent, last = error["loc"]
+        if error["type"] == "missing":
+            where = f" in '{_argument_path(tuple(parent))}'" if parent else ""
+            return f"missing required argument '{last}'{where}"
+        problem = error["msg"].replace("Input should be", "must be", 1)
+        return f"'{_argument_path(error['loc'])}' {problem}"
+    return None
 
 
 def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
@@ -1736,112 +1734,182 @@ async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
     return result
 
 
+# What each tool takes, one TypedDict per tool: the model-facing parameter
+# schema and the argument validation both come from it. A field's docstring is
+# its description; NotRequired marks an optional one.
+_spec = with_config(ConfigDict(use_attribute_docstrings=True))
+
+
+@_spec
+class Todo(TypedDict):
+    content: str
+    """Short description of the task."""
+    status: Literal["pending", "in_progress", "completed"]
+
+
+@_spec
+class ReadFileArgs(TypedDict):
+    path: str
+    """File path, relative to the working directory or absolute."""
+    offset: NotRequired[int]
+    """1-indexed line to start from (optional)."""
+    limit: NotRequired[int]
+    """Maximum number of lines to read (optional)."""
+
+
+@_spec
+class WriteFileArgs(TypedDict):
+    path: str
+    content: str
+
+
+@_spec
+class EditFileArgs(TypedDict):
+    path: str
+    old_string: str
+    """Exact text to replace (must be unique in the file)."""
+    new_string: str
+    """Replacement text."""
+
+
+@_spec
+class GlobArgs(TypedDict):
+    pattern: str
+    """Glob pattern. Use '**' to match any number of directories."""
+    path: NotRequired[str]
+    """Base directory to search in (optional, defaults to the working directory)."""
+    include_ignored: NotRequired[bool]
+    """Search inside noise dirs like node_modules/.venv/.git too (optional, default false)."""
+
+
+@_spec
+class GrepArgs(TypedDict):
+    pattern: str
+    """Python regular expression, matched against each LF/CRLF-delimited line."""
+    path: NotRequired[str]
+    """File or directory to search (optional, defaults to the working directory)."""
+    glob: NotRequired[str]
+    """Only search files whose name matches this pattern, e.g. '*.py' (optional)."""
+    max_results: NotRequired[Annotated[int, Field(description=(
+        f"Maximum matching lines to return (optional, default {_GREP_DEFAULT_RESULTS}, "
+        f"maximum {_GREP_MAX_RESULTS})."))]]
+
+
+@_spec
+class WebSearchArgs(TypedDict):
+    query: str
+    """The search query."""
+    max_results: NotRequired[Annotated[int, Field(description=(
+        f"Maximum results to return (optional, default {websearch.DEFAULT_RESULTS}, "
+        f"maximum {websearch.MAX_RESULTS})."))]]
+
+
+@_spec
+class ShellArgs(TypedDict):
+    command: str
+
+
+@_spec
+class SearchHistoryArgs(TypedDict):
+    query: str
+    """Regular expression, matched case-insensitively. An invalid regex is searched as literal text."""
+    max_results: NotRequired[int]
+    """Maximum matches to return (optional, default 20, max 100)."""
+
+
+@_spec
+class ReadHistoryArgs(TypedDict):
+    seq: int
+    """Seq of the first record to read (from search_history results)."""
+    count: NotRequired[int]
+    """Number of consecutive records to read (optional, default 1, max 20)."""
+
+
+@_spec
+class WriteTodosArgs(TypedDict):
+    todos: list[Todo]
+    """The complete task list, in order."""
+
+
+@_spec
+class AskUserArgs(TypedDict):
+    question: str
+    """The question, self-contained and specific."""
+    options: NotRequired[list[str]]
+    """Choices to pick from, most likely first (optional, at most 9)."""
+
+
+@_spec
+class StartNewSessionArgs(TypedDict):
+    prompt: str
+    """The first user message for the new session; must be self-contained."""
+
+
+@_spec
+class SpawnAgentArgs(TypedDict):
+    prompt: str
+    """The new agent's only user message; must be self-contained."""
+    model: NotRequired[str]
+    """Model for this agent only (optional; defaults to the current one)."""
+
+
+@_spec
+class RunBackgroundArgs(TypedDict):
+    command: str
+    description: str
+    """A few words naming the job; it labels the tab."""
+
+
+@_spec
+class ReadJobArgs(TypedDict):
+    job_id: str
+    """The id of a background command you started."""
+    mode: NotRequired[Literal["new", "all"]]
+    """'new' (default) since your last read, or 'all'."""
+
+
+@_spec
+class StopJobArgs(TypedDict):
+    job_id: str
+    """The id of an agent or a background command you started."""
+
+
 REGISTRY: dict[str, Tool] = {
     "read_file": Tool(
         access="read",
         run=lambda args, cwd, mode, ctx: _read_file(args, cwd),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a text file and return its contents with line numbers.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path, relative to the working directory or absolute."},
-                        "offset": {"type": "integer", "description": "1-indexed line to start from (optional)."},
-                        "limit": {"type": "integer", "description": "Maximum number of lines to read (optional)."},
-                    },
-                    "required": ["path"],
-                },
-            },
-        },
+        description="Read a text file and return its contents with line numbers.",
+        params=ReadFileArgs,
     ),
     "write_file": Tool(
         access="write",
         run=lambda args, cwd, mode, ctx: _write_file(args, cwd),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Create or overwrite a file with the given content.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                    "required": ["path", "content"],
-                },
-            },
-        },
+        description="Create or overwrite a file with the given content.",
+        params=WriteFileArgs,
     ),
     "edit_file": Tool(
         access="write",
         run=lambda args, cwd, mode, ctx: _edit_file(args, cwd),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "Replace an exact substring in a file. old_string must appear exactly once.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "old_string": {"type": "string", "description": "Exact text to replace (must be unique in the file)."},
-                        "new_string": {"type": "string", "description": "Replacement text."},
-                    },
-                    "required": ["path", "old_string", "new_string"],
-                },
-            },
-        },
+        description="Replace an exact substring in a file. old_string must appear exactly once.",
+        params=EditFileArgs,
     ),
     "glob": Tool(
         access="read",
         run=lambda args, cwd, mode, ctx: _glob(args, cwd, sandboxed=mode != "yolo"),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "glob",
-                "description": "Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string", "description": "Glob pattern. Use '**' to match any number of directories."},
-                        "path": {"type": "string", "description": "Base directory to search in (optional, defaults to the working directory)."},
-                        "include_ignored": {"type": "boolean", "description": "Search inside noise dirs like node_modules/.venv/.git too (optional, default false)."},
-                    },
-                    "required": ["pattern"],
-                },
-            },
-        },
+        description="Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
+        params=GlobArgs,
     ),
     "grep": Tool(
         access="read",
         run=lambda args, cwd, mode, ctx: _grep_async(args, cwd, sandboxed=mode != "yolo"),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "grep",
-                "description": (
-                    "Search file contents for a regular expression and return matching "
-                    "lines as path:line:text, in file order. Directories are searched "
-                    "recursively in deterministic directory order, skipping VCS/dependency/build noise "
-                    "and binary files. Searches time out after 10 seconds. "
-                    "Prefer this over shell grep: it needs no confirmation."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string", "description": "Python regular expression, matched against each LF/CRLF-delimited line."},
-                        "path": {"type": "string", "description": "File or directory to search (optional, defaults to the working directory)."},
-                        "glob": {"type": "string", "description": "Only search files whose name matches this pattern, e.g. '*.py' (optional)."},
-                        "max_results": {"type": "integer", "description": f"Maximum matching lines to return (optional, default {_GREP_DEFAULT_RESULTS}, maximum {_GREP_MAX_RESULTS})."},
-                    },
-                    "required": ["pattern"],
-                },
-            },
-        },
+        description=(
+            "Search file contents for a regular expression and return matching "
+            "lines as path:line:text, in file order. Directories are searched "
+            "recursively in deterministic directory order, skipping VCS/dependency/build noise "
+            "and binary files. Searches time out after 10 seconds. "
+            "Prefer this over shell grep: it needs no confirmation."
+        ),
+        params=GrepArgs,
     ),
     # Not gated in any mode: a search changes nothing on this machine. The
     # query does leave it, for whichever public search engines ddgs picks, so
@@ -1849,50 +1917,25 @@ REGISTRY: dict[str, Tool] = {
     "web_search": Tool(
         access="none",
         run=lambda args, cwd, mode, ctx: websearch.search(args),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": (
-                    "Search the web and return a numbered list of results, each with its "
-                    "title, URL and a short snippet. Use it for anything that may have "
-                    "changed since your training data: current library versions, API "
-                    "documentation, error messages. It returns snippets, not whole pages."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query."},
-                        "max_results": {"type": "integer", "description": f"Maximum results to return (optional, default {websearch.DEFAULT_RESULTS}, maximum {websearch.MAX_RESULTS})."},
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
+        description=(
+            "Search the web and return a numbered list of results, each with its "
+            "title, URL and a short snippet. Use it for anything that may have "
+            "changed since your training data: current library versions, API "
+            "documentation, error messages. It returns snippets, not whole pages."
+        ),
+        params=WebSearchArgs,
     ),
     "shell": Tool(
         access="execute",
         run=lambda args, cwd, mode, ctx: _shell(args, cwd, ctx),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "shell",
-                "description": (
-                    "Run a shell command in the working directory and return its combined "
-                    "stdout/stderr. Use this for git, running tests and anything the other "
-                    "tools do not cover. Output is truncated to the last 2000 lines or ~28KB, whichever "
-                    "comes first; when that happens the full output is written to a file and its "
-                    "path is included in the result, so you can read the earlier part back."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                    },
-                    "required": ["command"],
-                },
-            },
-        },
+        description=(
+            "Run a shell command in the working directory and return its combined "
+            "stdout/stderr. Use this for git, running tests and anything the other "
+            "tools do not cover. Output is truncated to the last 2000 lines or ~28KB, whichever "
+            "comes first; when that happens the full output is written to a file and its "
+            "path is included in the result, so you can read the earlier part back."
+        ),
+        params=ShellArgs,
     ),
     # "read" because these only read the agent's own session log, never a user
     # file: with no path argument the gate resolves to cwd and always allows,
@@ -1901,160 +1944,67 @@ REGISTRY: dict[str, Tool] = {
     "search_history": Tool(
         access="read",
         run=lambda args, cwd, mode, ctx: _search_history(args, ctx),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "search_history",
-                "description": (
-                    "Search this session's full history log on disk. The log keeps every "
-                    "user message, assistant reply, tool call and tool result of this "
-                    "session, including everything that context compaction has since "
-                    "summarized away — use it to recover exact details (file paths, "
-                    "command output, earlier decisions) instead of guessing from a "
-                    "compaction summary. Returns one line per matching part, prefixed "
-                    "with a seq number to pass to read_history for the full record."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Regular expression, matched case-insensitively. An invalid regex is searched as literal text.",
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum matches to return (optional, default 20, max 100).",
-                        },
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
+        description=(
+            "Search this session's full history log on disk. The log keeps every "
+            "user message, assistant reply, tool call and tool result of this "
+            "session, including everything that context compaction has since "
+            "summarized away — use it to recover exact details (file paths, "
+            "command output, earlier decisions) instead of guessing from a "
+            "compaction summary. Returns one line per matching part, prefixed "
+            "with a seq number to pass to read_history for the full record."
+        ),
+        params=SearchHistoryArgs,
     ),
     "read_history": Tool(
         access="read",
         run=lambda args, cwd, mode, ctx: _read_history(args, ctx),
-        schema={
-            "type": "function",
-            "function": {
-                "name": "read_history",
-                "description": (
-                    "Read full records from this session's history log by seq number, "
-                    "as returned by search_history. Use it to see the complete content "
-                    "behind a match: the whole user message, tool output or assistant "
-                    "reply, even when it predates a context compaction."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "seq": {
-                            "type": "integer",
-                            "description": "Seq of the first record to read (from search_history results).",
-                        },
-                        "count": {
-                            "type": "integer",
-                            "description": "Number of consecutive records to read (optional, default 1, max 20).",
-                        },
-                    },
-                    "required": ["seq"],
-                },
-            },
-        },
+        description=(
+            "Read full records from this session's history log by seq number, "
+            "as returned by search_history. Use it to see the complete content "
+            "behind a match: the whole user message, tool output or assistant "
+            "reply, even when it predates a context compaction."
+        ),
+        params=ReadHistoryArgs,
     ),
     # Stateful: mutates agent-held state, so the agent loop runs it itself.
     "write_todos": Tool(
         run=None,
-        schema={
-            "type": "function",
-            "function": {
-                "name": "write_todos",
-                "description": (
-                    "Create or update the task list for a multi-step task. Always pass the COMPLETE list; "
-                    "it overwrites the previous one. Use it to plan work and show progress on tasks with 3+ "
-                    "steps; skip it for trivial single-step requests. Keep exactly one task in_progress at a time, "
-                    "and mark a task completed as soon as it is done."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "todos": {
-                            "type": "array",
-                            "description": "The complete task list, in order.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "content": {"type": "string", "description": "Short description of the task."},
-                                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-                                },
-                                "required": ["content", "status"],
-                            },
-                        },
-                    },
-                    "required": ["todos"],
-                },
-            },
-        },
+        description=(
+            "Create or update the task list for a multi-step task. Always pass the COMPLETE list; "
+            "it overwrites the previous one. Use it to plan work and show progress on tasks with 3+ "
+            "steps; skip it for trivial single-step requests. Keep exactly one task in_progress at a time, "
+            "and mark a task completed as soon as it is done."
+        ),
+        params=WriteTodosArgs,
     ),
     # Needs the user at the keyboard, so the agent loop puts it to the UI itself.
     "ask_user": Tool(
         run=None,
-        schema={
-            "type": "function",
-            "function": {
-                "name": "ask_user",
-                "description": (
-                    "Ask the user one question and wait for the answer. Use it only when "
-                    "different answers would lead to materially different work and neither "
-                    "the request nor the code settles it; otherwise make the routine call "
-                    "yourself and say what you assumed. Pass options when the answer is a "
-                    "choice; the user can always type something else instead. Ask one "
-                    "question per call."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string", "description": "The question, self-contained and specific."},
-                        "options": {
-                            "type": "array",
-                            "description": "Choices to pick from, most likely first (optional, at most 9).",
-                            "items": {"type": "string"},
-                        },
-                    },
-                    "required": ["question"],
-                },
-            },
-        },
+        description=(
+            "Ask the user one question and wait for the answer. Use it only when "
+            "different answers would lead to materially different work and neither "
+            "the request nor the code settles it; otherwise make the routine call "
+            "yourself and say what you assumed. Pass options when the answer is a "
+            "choice; the user can always type something else instead. Ask one "
+            "question per call."
+        ),
+        params=AskUserArgs,
     ),
     # Stateful: ends the session, so the agent loop handles it.
     "start_new_session": Tool(
         run=None,
         access="always",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "start_new_session",
-                "description": (
-                    "Hand off to a fresh session: end this one and start a new empty session "
-                    "whose first user message is your prompt. Use when most of the conversation "
-                    "so far is irrelevant to the next phase of work — a focused handoff prompt "
-                    "beats carrying a long history forward. The prompt must be self-contained: "
-                    "state the goal, key file paths, decisions already made, and current status; "
-                    "the new session has no memory of this one. Requires explicit user "
-                    "confirmation and only works in the interactive UI (always denied in "
-                    "non-interactive runs)."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "The first user message for the new session; must be self-contained.",
-                        },
-                    },
-                    "required": ["prompt"],
-                },
-            },
-        },
+        description=(
+            "Hand off to a fresh session: end this one and start a new empty session "
+            "whose first user message is your prompt. Use when most of the conversation "
+            "so far is irrelevant to the next phase of work — a focused handoff prompt "
+            "beats carrying a long history forward. The prompt must be self-contained: "
+            "state the goal, key file paths, decisions already made, and current status; "
+            "the new session has no memory of this one. Requires explicit user "
+            "confirmation and only works in the interactive UI (always denied in "
+            "non-interactive runs)."
+        ),
+        params=StartNewSessionArgs,
     ),
     # The rest of the registry is stateful in the same way: each of them acts
     # on the jobs the calling agent started, which the agent itself holds, so
@@ -2069,38 +2019,19 @@ REGISTRY: dict[str, Tool] = {
     "spawn_agent": Tool(
         run=None,
         access="none",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "spawn_agent",
-                "description": (
-                    "Start another agent working in parallel, in the same working "
-                    "directory and with the same tools, and return its id at once. Use it "
-                    "for work that is independent of what you are doing right now, and "
-                    "keep the number small. The prompt must be self-contained: state the "
-                    "goal, the key file paths, the decisions already made and what to "
-                    "report back, because the new agent has no memory of this "
-                    "conversation, cannot ask you anything and cannot be sent a follow-up. "
-                    "Do not wait for it: its final answer is delivered to you as a message "
-                    "when it finishes, clipped if long, so ask for a short report. It "
-                    "cannot start agents of its own."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "The new agent's only user message; must be self-contained.",
-                        },
-                        "model": {
-                            "type": "string",
-                            "description": "Model for this agent only (optional; defaults to the current one).",
-                        },
-                    },
-                    "required": ["prompt"],
-                },
-            },
-        },
+        description=(
+            "Start another agent working in parallel, in the same working "
+            "directory and with the same tools, and return its id at once. Use it "
+            "for work that is independent of what you are doing right now, and "
+            "keep the number small. The prompt must be self-contained: state the "
+            "goal, the key file paths, the decisions already made and what to "
+            "report back, because the new agent has no memory of this "
+            "conversation, cannot ask you anything and cannot be sent a follow-up. "
+            "Do not wait for it: its final answer is delivered to you as a message "
+            "when it finishes, clipped if long, so ask for a short report. It "
+            "cannot start agents of its own."
+        ),
+        params=SpawnAgentArgs,
     ),
     # Starting a background command is the one job tool that reaches outside
     # the process, so it is the one with an access class of its own:
@@ -2110,90 +2041,39 @@ REGISTRY: dict[str, Tool] = {
     "run_background": Tool(
         run=None,
         access="background",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "run_background",
-                "description": (
-                    "Start a long-running command in its own tab and return a job id, "
-                    "instead of waiting for it like the shell tool does. Use it for things "
-                    "that are meant to keep running \u2014 a dev server, a file watcher, a long "
-                    "build or test suite \u2014 and use shell for anything that finishes on its "
-                    "own within a couple of minutes. The command gets no terminal and no "
-                    "input, so it must be non-interactive; output may arrive in blocks "
-                    "rather than line by line, because a pipe is not a terminal. You are "
-                    "told when it exits; call read_job for its output and stop_job when "
-                    "you are done with it."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                        "description": {
-                            "type": "string",
-                            "description": "A few words naming the job; it labels the tab.",
-                        },
-                    },
-                    "required": ["command", "description"],
-                },
-            },
-        },
+        description=(
+            "Start a long-running command in its own tab and return a job id, "
+            "instead of waiting for it like the shell tool does. Use it for things "
+            "that are meant to keep running \u2014 a dev server, a file watcher, a long "
+            "build or test suite \u2014 and use shell for anything that finishes on its "
+            "own within a couple of minutes. The command gets no terminal and no "
+            "input, so it must be non-interactive; output may arrive in blocks "
+            "rather than line by line, because a pipe is not a terminal. You are "
+            "told when it exits; call read_job for its output and stop_job when "
+            "you are done with it."
+        ),
+        params=RunBackgroundArgs,
     ),
     "read_job": Tool(
         run=None,
         access="none",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "read_job",
-                "description": (
-                    "Read the tail of what a background command you started has printed "
-                    "since you last read it (mode 'new', the default) or in total (mode "
-                    "'all'), with its state and, once it has stopped, its exit code."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "The id of a background command you started.",
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["new", "all"],
-                            "description": "'new' (default) since your last read, or 'all'.",
-                        },
-                    },
-                    "required": ["job_id"],
-                },
-            },
-        },
+        description=(
+            "Read the tail of what a background command you started has printed "
+            "since you last read it (mode 'new', the default) or in total (mode "
+            "'all'), with its state and, once it has stopped, its exit code."
+        ),
+        params=ReadJobArgs,
     ),
     "stop_job": Tool(
         run=None,
         access="none",
-        schema={
-            "type": "function",
-            "function": {
-                "name": "stop_job",
-                "description": (
-                    "Stop an agent or a background command you started. A stopped agent "
-                    "reports nothing back; a stopped command's output stays readable. "
-                    "Stop what you no longer need: an agent going the wrong way keeps "
-                    "spending tokens, and a background command keeps running."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "The id of an agent or a background command you started.",
-                        },
-                    },
-                    "required": ["job_id"],
-                },
-            },
-        },
+        description=(
+            "Stop an agent or a background command you started. A stopped agent "
+            "reports nothing back; a stopped command's output stays readable. "
+            "Stop what you no longer need: an agent going the wrong way keeps "
+            "spending tokens, and a background command keeps running."
+        ),
+        params=StopJobArgs,
     ),
 }
 
@@ -2235,16 +2115,18 @@ def without(registry: dict[str, Tool], names) -> dict[str, Tool]:
 
 def schemas(registry: dict[str, Tool]) -> list[dict]:
     """The OpenAI-style schema list for a registry, in registry order."""
-    return [tool.schema for tool in registry.values()]
+    return [
+        {"type": "function",
+         "function": {"name": name, "description": tool.description,
+                      "parameters": _parameters(tool.params)}}
+        for name, tool in registry.items()
+    ]
 
 
 def definitions(registry: dict[str, Tool]) -> list[ToolDefinition]:
     """The same schemas as pydantic-ai tool definitions."""
     return [
-        ToolDefinition(
-            name=tool.schema["function"]["name"],
-            description=tool.schema["function"]["description"],
-            parameters_json_schema=tool.schema["function"]["parameters"],
-        )
-        for tool in registry.values()
+        ToolDefinition(name=name, description=tool.description,
+                       parameters_json_schema=_parameters(tool.params))
+        for name, tool in registry.items()
     ]

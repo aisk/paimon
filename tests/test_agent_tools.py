@@ -193,14 +193,14 @@ class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse([e for e in events if isinstance(e, TodosUpdate)])
             end = next(e for e in events if isinstance(e, ToolEnd))
-            self.assertIn("must be an array", end.result)
+            self.assertIn("must be a valid list", end.result)
             self.assertEqual(agent.todos, [], "the bad list is not adopted")
             self.assertTrue([e for e in events if isinstance(e, TurnEnd)],
                             "the model gets the error and finishes the turn")
             # ...and a resume of that session shows the same failed call.
             replayed = replay_events(session.messages())
             self.assertFalse([e for e in replayed if isinstance(e, TodosUpdate)])
-            self.assertIn("must be an array",
+            self.assertIn("must be a valid list",
                           next(e for e in replayed if isinstance(e, ToolEnd)).result)
 
 
