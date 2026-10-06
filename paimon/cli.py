@@ -9,6 +9,7 @@ from . import commands
 from . import headless as headless_mode
 from . import herdr
 from . import telemetry
+from . import textual_debug
 from . import tools
 from .agent import Agent
 from .app import PaimonApp
@@ -31,6 +32,8 @@ def _resume_flags(args: argparse.Namespace) -> tuple[str, ...]:
         flags.append("--no-web-search")
     if args.no_skills:
         flags.append("--no-skills")
+    if getattr(args, "textual_debug", False):
+        flags.append("--textual-debug")
     for skill in args.skills:
         flags += ["--skill", skill]
     return tuple(flags)
@@ -95,6 +98,8 @@ def main() -> None:
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
                         help="port for --web (default: 8000)")
+    parser.add_argument("--textual-debug", action="store_true",
+                        help="give the agent powerful tools to inspect and modify its live Textual UI")
     # Set when the UI is launched with a stdin that is not a terminal, which
     # would otherwise be read as "run headless" (textual-serve pipes stdin).
     parser.add_argument("--tui", action="store_true", help=argparse.SUPPRESS)
@@ -150,6 +155,8 @@ def main() -> None:
             flags += ["--strict"]
         if args.no_web_search:
             flags += ["--no-web-search"]
+        if args.textual_debug:
+            flags += ["--textual-debug"]
         if args.model:
             flags += ["--model", args.model]
         if args.profile:
@@ -161,6 +168,8 @@ def main() -> None:
 
     piped_stdin = not args.tui and not sys.stdin.isatty()
     headless = args.prompt is not None or piped_stdin
+    if args.textual_debug and headless:
+        parser.error("--textual-debug only applies to the Textual UI")
     if args.output_format != "text" and not headless:
         parser.error("--output-format only applies to --print")
     for flag, value in (("--timeout", args.timeout), ("--max-tool-calls", args.max_tool_calls)):
@@ -208,8 +217,11 @@ def main() -> None:
     # The --tui relaunch under --web was already counted by the server.
     if not args.tui:
         telemetry.record_launch("tui", model=config.model)
+    debug_bridge = textual_debug.TextualDebugBridge() if args.textual_debug else None
+    toolset = {**tools.REGISTRY, **debug_bridge.toolset()} if debug_bridge is not None else None
     try:
-        agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config)
+        agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config,
+                           toolset=toolset)
     except SessionError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -217,6 +229,8 @@ def main() -> None:
     reporter = None if args.tui else herdr.Reporter.from_env()
     app = PaimonApp(agent, resumed=resume_session is not None, pick_session=args.resume == "",
                     reporter=reporter, resume_flags=_resume_flags(args))
+    if debug_bridge is not None:
+        debug_bridge.attach(app)
     try:
         app.run()
     finally:

@@ -126,6 +126,39 @@ class WebForwardingTest(CliTestCase):
     def test_forwards_strict(self) -> None:
         self.assertIn("--strict", self._serve_command("--web", "--strict"))
 
+    def test_forwards_textual_debug(self) -> None:
+        self.assertIn("--textual-debug", self._serve_command("--web", "--textual-debug"))
+
+
+class TextualDebugCliTest(CliTestCase):
+    def test_debug_tools_are_off_by_default_and_added_only_by_flag(self) -> None:
+        agent = SimpleNamespace(session=SimpleNamespace(id="unused"), history=[])
+
+        class FakeApp:
+            sessions = []
+
+            def __init__(self, opened, **kwargs) -> None:
+                pass
+
+            def run(self) -> None:
+                pass
+
+        for argv, enabled in (([], False), (["--textual-debug"], True)):
+            with patch("sys.argv", ["paimon", *argv]), \
+                    patch("paimon.cli.Agent.open", return_value=agent) as opened, \
+                    patch("paimon.cli.PaimonApp", FakeApp):
+                cli.main()
+            toolset = opened.call_args.kwargs["toolset"]
+            self.assertEqual(toolset is not None, enabled)
+            if enabled:
+                self.assertIn("textual_exec", toolset)
+                self.assertIn("textual_inspect", toolset)
+
+    def test_textual_debug_is_rejected_headless(self) -> None:
+        code, stderr = self._main_exit("--textual-debug", "-p", "hi")
+        self.assertEqual(code, 2)
+        self.assertIn("only applies to the Textual UI", stderr)
+
 
 class TuiExitTest(CliTestCase):
     """The UI also has to tell the user how to get the conversation back."""

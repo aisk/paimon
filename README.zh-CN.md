@@ -102,6 +102,17 @@ paimon --profile work               # 单独配置的另一个账号
 
 `-p` 不会停下来询问，配合默认的 `yolo` 模式，它已经可以修改文件和执行命令。加 `--output-format result` 会输出一个包含结果的 JSON 对象，调用方程序读这个就够了。其余选项见 `paimon --help`。
 
+### 调试 Textual UI
+
+需要让 Paimon 排查自己的布局或样式时，用 `paimon --textual-debug` 启动（也可与 `--web` 一起使用）。默认不启用；开启后模型会多出五个只作用于当前 UI 进程的工具：
+
+- `textual_inspect`：按 CSS selector 查看 DOM、geometry、pseudo-classes、焦点和 computed CSS；
+- `textual_eval` / `textual_exec`：在 UI 进程里运行 Python，支持 private API、持久变量和 top-level `await`；
+- `textual_apply_css`：动态叠加 CSS 并立即重新布局；
+- `textual_screenshot`：把当前渲染结果导出成 SVG。
+
+例如可以直接让它“检查 `#prompt` 为什么比预期窄，动态试一个修复并截图”。`textual_exec` 有意提供完整的进程内 Python 能力，能修改任意 Textual/Paimon 状态；这个选项只适合开发调试，不应对不受信任的 prompt 开启。动态修改只保留到进程退出，确定修复后仍需让 Paimon编辑源码。
+
 ## 配置
 
 每个 profile 的模型设置保存在 `~/.config/paimon/<name>/config.json`，由首次启动或 `paimon login` 写入。也可以用 ChatGPT 订阅代替 API key，`paimon login --model chatgpt:gpt-5.5` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。

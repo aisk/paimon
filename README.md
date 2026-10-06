@@ -104,6 +104,17 @@ paimon --profile work               # a separately configured account
 
 Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume command to Herdr on its own, with nothing to install.
 
+### Debugging the Textual UI
+
+Start with `paimon --textual-debug` (also works with `--web`) when Paimon needs to diagnose its own layout or styling. It is off by default. When enabled, the model receives five tools scoped to the live UI process:
+
+- `textual_inspect` queries the DOM by CSS selector and reports geometry, pseudo-classes, focus and computed CSS;
+- `textual_eval` / `textual_exec` run Python in the UI process, including private APIs, persistent variables and top-level `await`;
+- `textual_apply_css` layers on CSS and relayouts immediately;
+- `textual_screenshot` exports the current render to SVG.
+
+You can ask it, for example, to “find why `#prompt` is narrower than expected, try a live fix, and take a screenshot.” `textual_exec` deliberately provides unrestricted in-process Python and can change any Textual or Paimon state. Use this development option only with trusted prompts. Live changes last only until exit; after confirming a fix, ask Paimon to edit the source.
+
 ## Configuration
 
 Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. A ChatGPT plan works in place of an API key: `paimon login --model chatgpt:gpt-5.5` signs in through the browser. Sessions live in `~/.local/share/paimon/sessions/`.
