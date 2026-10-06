@@ -605,9 +605,10 @@ class Agent:
         return self._cached_model[1]
 
     def _review_model(self) -> Model:
-        """The model auto mode reviews with: the config's own choice, else this agent's."""
-        name = self.config.review_model
-        if not name:
+        """The model auto mode reviews with: the config's own choice, else the
+        one paired with this agent's model, else this agent's model itself."""
+        name = self.config.review_model or review.default_model(self.model_name or "")
+        if not name or name == self.model_name:
             return self._model()
         self._cached_review_model = self._built(name, self._cached_review_model)
         return self._cached_review_model[1]

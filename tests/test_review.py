@@ -27,7 +27,8 @@ HISTORY = [
 class ParseTest(unittest.TestCase):
     def test_the_two_verdicts(self) -> None:
         self.assertEqual(review._parse("ALLOW"), Verdict(True))
-        self.assertEqual(review._parse("  allow.\n"), Verdict(True))
+        self.assertEqual(review._parse("  ALLOW.\n"), Verdict(True))
+        self.assertEqual(review._parse("ALLOW — it is what the user asked for"), Verdict(True))
         self.assertEqual(review._parse("BLOCK: pushes to a remote nobody named"),
                          Verdict(False, "pushes to a remote nobody named"))
         self.assertEqual(review._parse("**BLOCK**"), Verdict(False, "no reason given"))
@@ -36,9 +37,20 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(review._parse("Let me think.\nBLOCK: no\nALLOW"), Verdict(False, "no"))
 
     def test_anything_else_is_no_verdict(self) -> None:
-        for reply in ("", "Sure, that looks fine.", "ALLOWED probably"):
+        for reply in ("", "Sure, that looks fine.", "ALLOWED probably", "Allow me to think."):
             with self.assertRaises(ReviewUnavailable):
                 review._parse(reply)
+
+
+class DefaultModelTest(unittest.TestCase):
+    def test_a_known_model_gets_its_sibling_from_the_same_provider(self) -> None:
+        self.assertEqual(review.default_model("chatgpt:gpt-5.6-sol"), "chatgpt:gpt-5.6-luna")
+        self.assertEqual(review.default_model("openai:gpt-5.6-sol"), "openai:gpt-5.6-luna")
+        self.assertEqual(review.default_model("zai/glm-5.2"), "zai:glm-5.3-flash")
+
+    def test_anything_else_has_none(self) -> None:
+        for model in ("zai:glm-4.7", "test:stub", "unqualified", ""):
+            self.assertIsNone(review.default_model(model))
 
 
 class JudgeTest(unittest.IsolatedAsyncioTestCase):

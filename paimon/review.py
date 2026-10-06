@@ -12,8 +12,10 @@ boundary: the reviewer is a model and can be wrong in both directions.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from pydantic_ai.messages import (
     ModelMessage,
@@ -25,7 +27,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model
 
 from .errors import PaimonError
-from .llm import ask_once
+from .llm import ask_once, split_model_string
 
 # Seconds one review may take before it counts as unavailable.
 TIMEOUT = 60.0
@@ -78,6 +80,31 @@ Reply with exactly one line: ALLOW, or BLOCK: followed by one sentence saying \
 why."""
 
 
+# The verdict word leading a line, whatever punctuation a model wraps it in
+# ("**BLOCK**: ...", "ALLOW — ..."), and the rest of the line.
+_VERDICT = re.compile(r"\W*(ALLOW|BLOCK)\b\W*(.*)")
+
+# The reviewer for a model nobody chose one for: a faster sibling from the same
+# provider, so it runs on the account already logged in. Kept to pairs that
+# have been tried; anything else reviews with the model doing the work.
+DEFAULT_REVIEWERS = {
+    "gpt-5.6-sol": "gpt-5.6-luna",
+    "gpt-5.6-terra": "gpt-5.6-luna",
+    "glm-5.2": "glm-5.3-flash",
+    "glm-5.3": "glm-5.3-flash",
+}
+
+
+def default_model(model: str) -> Optional[str]:
+    """The reviewer DEFAULT_REVIEWERS pairs with ``model``, as "provider:name"."""
+    try:
+        provider, name = split_model_string(model)
+    except ValueError:
+        return None
+    reviewer = DEFAULT_REVIEWERS.get(name)
+    return f"{provider}:{reviewer}" if reviewer else None
+
+
 class ReviewUnavailable(PaimonError):
     """No verdict came back: the caller falls back to asking a person."""
 
@@ -107,12 +134,13 @@ def _transcript(history: list[ModelMessage]) -> str:
 
 def _parse(reply: str) -> Verdict:
     for line in reply.splitlines():
-        word, _, rest = line.strip().partition(":")
-        word = word.strip(" .*`").upper()
-        if word == "ALLOW":
+        # Capitals only: "Allow me to think" is not a verdict.
+        match = _VERDICT.match(line)
+        if match is None:
+            continue
+        if match[1] == "ALLOW":
             return Verdict(True)
-        if word == "BLOCK":
-            return Verdict(False, rest.strip() or "no reason given")
+        return Verdict(False, match[2].strip() or "no reason given")
     raise ReviewUnavailable("the reviewer's reply was neither ALLOW nor BLOCK")
 
 

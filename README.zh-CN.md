@@ -106,7 +106,7 @@ paimon --profile work               # 单独配置的另一个账号
 
 每个 profile 的模型设置保存在 `~/.config/paimon/<name>/config.json`，由首次启动或 `paimon login` 写入。也可以用 ChatGPT 订阅代替 API key，`paimon login --model chatgpt:gpt-5.5` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
 
-read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉，Windows 上命令由 cmd.exe 执行，一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。在配置里写 `"review_model": "provider:name"` 可以让审批用另一个模型。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
+read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉，Windows 上命令由 cmd.exe 执行，一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。少数模型默认用同系列里更快的那个来审批（`gpt-5.6-sol` 和 `gpt-5.6-terra` 用 `gpt-5.6-luna`，`glm-5.2` 和 `glm-5.3` 用 `glm-5.3-flash`），其余模型自己审自己，在配置里写 `"review_model": "provider:name"` 可以自行指定。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
 ## 架构
 

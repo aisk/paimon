@@ -230,7 +230,8 @@ class Config:
     # read/auto modes. A guardrail toggle, not a security boundary.
     safe_commands: bool = True
     # The model auto mode reviews held tool calls with, as "provider:name".
-    # None reviews with the model doing the work. Edited by hand.
+    # None takes the reviewer paired with the working model in
+    # review.DEFAULT_REVIEWERS, or the working model itself. Edited by hand.
     review_model: Optional[str] = None
     # Offer a short recap once a turn that did some work is followed by this
     # many idle seconds. Seconds rather than a count so a test can turn the

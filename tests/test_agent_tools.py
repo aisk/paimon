@@ -188,6 +188,24 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("test:reviewer", built)
 
+    async def test_an_unconfigured_reviewer_comes_from_the_default_pairs(self) -> None:
+        agent = open_agent(self._cwd(), mode="auto")
+        agent.config.model = "test:gpt-5.6-sol"
+        built = []
+
+        def build(name, *rest):
+            built.append(name)
+            return stub_model("write_file", self.HELD)
+
+        agent._cached_model = None
+        with (patch("paimon.agent.build_model", side_effect=build),
+              patch("paimon.review.judge", AsyncMock(return_value=Verdict(True)))):
+            [event async for event in agent.run("go")]
+            self.assertEqual(built, ["test:gpt-5.6-sol", "test:gpt-5.6-luna"])
+
+            agent.config.review_model = "test:gpt-5.6-sol"  # the way to opt out of the pairing
+            self.assertIs(agent._review_model(), agent._model())
+
 
 class TodosEventShapeTest(unittest.IsolatedAsyncioTestCase):
     async def test_write_todos_yields_only_a_todos_update(self) -> None:
