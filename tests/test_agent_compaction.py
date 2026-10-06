@@ -45,7 +45,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
 
             result = compaction.CompactionResult("checkpoint", [recent], 100, 0)
             with (
-                patch("paimon.agent.Agent._model", return_value=object()),
+                patch("paimon.agent.Agent._model", return_value=stub_model()),
                 patch("paimon.compaction.compact", new=AsyncMock(return_value=result)) as compact,
             ):
                 self.assertIsNone(await agent._maybe_compact())
@@ -72,7 +72,7 @@ class CompactionTokenCountTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_unknown_window_counts_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            # "test:stub" matches no entry in the window table and there is no
+            # "test:stub" is not a model anyone has a window on record for and there is no
             # override, so auto-compaction is off and counting is wasted work.
             agent = self._agent(Path(directory), model="test:stub")
             with patch("paimon.compaction.count_tokens") as count:

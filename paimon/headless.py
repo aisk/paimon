@@ -46,7 +46,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
-from . import compaction, tools
+from . import tools
 from .agent import (
     Agent,
     JobNotice,
@@ -518,8 +518,7 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Sess
     # Auto-compaction silently doing nothing looks exactly like it working —
     # until the context overflows. An unattended run deserves the warning up
     # front; stderr, so the stdout protocols are untouched.
-    if (config.compaction_enabled and compaction.context_window(
-            agent.model_name, config.compaction_context_window) is None):
+    if config.compaction_enabled and agent.context_window() is None:
         _write(sys.stderr,
                f"paimon: context window unknown for {agent.model_name}; auto-compaction "
                "is off (set compaction.context_window in the config to enable it)\n")

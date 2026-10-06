@@ -137,7 +137,6 @@ flowchart TD
         ToolsMod["tools.py<br/>工具注册表"]
         SessionMod["session.py<br/>JSONL 持久化"]
         Compaction["compaction.py"]
-        ModelWindows["model_windows.py<br/>各模型上下文窗口大小"]
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path 展开"]
         Jobs["turns.py<br/>回合驱动"]
@@ -181,7 +180,6 @@ flowchart TD
     AgentLoop -. "run_background" .-> CommandPane
 
     PromptMod --> Skills
-    Compaction --> ModelWindows
 
     Jobs --> AgentLoop
 
