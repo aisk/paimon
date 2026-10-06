@@ -84,18 +84,23 @@ why."""
 # ("**BLOCK**: ...", "ALLOW — ..."), and the rest of the line.
 _VERDICT = re.compile(r"\W*(ALLOW|BLOCK)\b\W*(.*)")
 
-# The reviewer for a model nobody chose one for: a faster sibling from the same
-# provider, so it runs on the account already logged in. Kept to pairs that
-# have been tried; anything else reviews with the model doing the work.
-DEFAULT_REVIEWERS = {
-    "gpt-6.1-sol": "gpt-6-luna",
-    "gpt-6-sol": "gpt-6-luna",
-    "gpt-6-astra": "gpt-6-luna",
-    "gpt-5.6-sol": "gpt-5.6-luna",
-    "gpt-5.6-terra": "gpt-5.6-luna",
-    "glm-5.2": "glm-5.3-flash",
-    "glm-5.3": "glm-5.3-flash",
+# The reviewer for a model nobody chose one for: the fast, cheap tier of the
+# same provider, so it runs on the account already logged in. Keyed by that
+# reviewer, then turned around; a model no row names reviews itself.
+_REVIEWED_BY = {
+    "gpt-6-luna": ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"),
+    "gpt-5.6-luna": ("gpt-5.6-sol", "gpt-5.6-terra"),
+    "openai.gpt-5.6-luna": ("openai.gpt-5.6-sol", "openai.gpt-5.6-terra"),
+    "openai-gpt-5-6-luna": ("openai-gpt-5-6-sol", "openai-gpt-5-6-terra"),
+    "claude-haiku-4-5": ("claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
+                         "claude-sonnet-5-5", "claude-sonnet-5"),
+    "claude-4-5-haiku": ("claude-opus-4-6", "claude-4-6-sonnet"),
+    "glm-5.3-flash": ("glm-5.3", "glm-5.2", "glm-5-turbo", "glm-5v-turbo"),
+    "deepseek-v4-flash": ("deepseek-v4-pro",),
+    "deepseek-ai/Deepseek-V4-Flash": ("deepseek-ai/DeepSeek-V4-Pro",),
+    "kimi-k2.7-code": ("kimi-k3",),
 }
+DEFAULT_REVIEWERS = {name: reviewer for reviewer, names in _REVIEWED_BY.items() for name in names}
 
 
 def default_model(model: str) -> Optional[str]:

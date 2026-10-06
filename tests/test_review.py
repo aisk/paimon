@@ -11,7 +11,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import FunctionModel
 
-from paimon import review
+from paimon import login, review
 from paimon.review import ReviewUnavailable, Verdict
 
 HISTORY = [
@@ -47,6 +47,13 @@ class DefaultModelTest(unittest.TestCase):
         self.assertEqual(review.default_model("chatgpt:gpt-5.6-sol"), "chatgpt:gpt-5.6-luna")
         self.assertEqual(review.default_model("openai:gpt-5.6-sol"), "openai:gpt-5.6-luna")
         self.assertEqual(review.default_model("openai:gpt-6.1-sol"), "openai:gpt-6-luna")
+        self.assertEqual(review.default_model("anthropic:claude-opus-5-5"),
+                         "anthropic:claude-haiku-4-5")
+
+    def test_every_reviewer_is_a_model_its_provider_lists(self) -> None:
+        known = {name.partition(":")[2] for name in login._known_models()}
+        self.assertLessEqual(set(review.DEFAULT_REVIEWERS.values()), known)
+        self.assertLessEqual(set(review.DEFAULT_REVIEWERS), known)
         self.assertEqual(review.default_model("zai/glm-5.2"), "zai:glm-5.3-flash")
 
     def test_anything_else_has_none(self) -> None:
