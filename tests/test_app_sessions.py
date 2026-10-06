@@ -11,13 +11,13 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.turns import TurnDriver, Outcome
-from paimon.login import LoginScreen, PickerScreen
+from paimon.login import ChatGPTLoginScreen, LoginScreen, PickerScreen
 from paimon.pane import _session_label
 from paimon.ui import (
     AssistantMessage,
@@ -279,6 +279,50 @@ class ProfileSwitchTest(AppTestCase):
             # LoginScreen immediately pushes its provider picker on top, so
             # look down the stack rather than at the active screen.
             self.assertEqual(len(self._login_screens(app)), 1)
+
+    async def test_chatgpt_login_asks_for_no_key_and_saves_the_model(self) -> None:
+        pasted: list[str] = []
+
+        async def sign_in(profile, show_url, redirect) -> None:
+            show_url("https://auth.example/authorize")
+            pasted.append(await redirect)
+
+        app = self.make_app()
+        with patch("paimon.chatgpt.login", sign_in), patch("paimon.chatgpt.open_browser") as opened:
+            async with app.run_test() as pilot:
+                app.action_login()
+                await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+                app.screen.dismiss("chatgpt")
+                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
+                app.screen.dismiss("gpt-5.5")
+                await self._wait_for(pilot, lambda: isinstance(app.screen, ChatGPTLoginScreen))
+                await self._wait_for(pilot, lambda: opened.called)
+                opened.assert_called_once_with("https://auth.example/authorize")
+                self.assertEqual(app.config.model, "test-model", "nothing is saved before the sign-in")
+
+                app.screen.query_one(Input).value = "http://127.0.0.1:1455/auth/callback?code=x"
+                await pilot.press("enter")
+                await self._wait_for(pilot, lambda: self._login_screens(app) == [])
+                self.assertEqual(pasted, ["http://127.0.0.1:1455/auth/callback?code=x"])
+                self.assertEqual(app.config.model, "chatgpt:gpt-5.5")
+                self.assertEqual(app.config.providers, {})
+
+    async def test_a_cancelled_chatgpt_login_keeps_the_model(self) -> None:
+        async def sign_in(profile, show_url, redirect) -> None:
+            await redirect
+
+        app = self.make_app()
+        with patch("paimon.chatgpt.login", sign_in):
+            async with app.run_test() as pilot:
+                app.action_login()
+                await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+                app.screen.dismiss("chatgpt")
+                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
+                app.screen.dismiss("gpt-5.5")
+                await self._wait_for(pilot, lambda: isinstance(app.screen, ChatGPTLoginScreen))
+                await pilot.press("escape")
+                await self._wait_for(pilot, lambda: self._login_screens(app) == [])
+                self.assertEqual(app.config.model, "test-model")
 
     @staticmethod
     def _login_screens(app: PaimonApp) -> list[LoginScreen]:

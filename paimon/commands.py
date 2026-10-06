@@ -22,7 +22,7 @@ from typing import Optional
 
 from .config import UNSET, Config, config_path, validate_profile
 from .errors import PaimonError
-from .llm import build_model, is_provider_available, split_model_string
+from .llm import CHATGPT_PROVIDER, build_model, is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
 from .tools import render_record, superseded_seqs
 
@@ -79,7 +79,7 @@ def _ready_error(config: Config) -> Optional[str]:
     """
     api_base, api_key = config.provider_auth()
     try:
-        build_model(config.model, api_base=api_base, api_key=api_key)
+        build_model(config.model, api_base=api_base, api_key=api_key, profile=config.profile)
     except Exception as exc:
         return str(exc)
     return None
@@ -123,7 +123,10 @@ def status(argv: list) -> int:
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
     elif configured:
-        key_note = "api key set" if api_key else "no api key stored"
+        if config.model.replace("/", ":", 1).startswith(CHATGPT_PROVIDER + ":"):
+            key_note = "ChatGPT plan"
+        else:
+            key_note = "api key set" if api_key else "no api key stored"
         print(f"paimon {version()}")
         print(f"model: {config.model} ({key_note})")
         if api_base:
@@ -160,6 +163,41 @@ def _read_api_key(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
+def _chatgpt_login(profile: str) -> None:
+    """Sign in with ChatGPT from a terminal: print the address, wait for the
+    browser to come back, or for the redirect URL pasted on stdin."""
+    import asyncio
+    import threading
+
+    from . import chatgpt
+
+    def show_url(url: str) -> None:
+        print(f"Open this address to sign in with ChatGPT:\n\n{url}\n", file=sys.stderr)
+        if sys.stdin.isatty():
+            print(f"If the browser cannot reach this machine, paste the final "
+                  f"redirect URL ({chatgpt.REDIRECT_URI}...) here.", file=sys.stderr)
+        chatgpt.open_browser(url)
+
+    async def run() -> None:
+        pasted = None
+        if sys.stdin.isatty():
+            loop = asyncio.get_running_loop()
+            pasted = loop.create_future()
+
+            def read_line() -> None:
+                line = sys.stdin.readline()
+                if line.strip():
+                    loop.call_soon_threadsafe(
+                        lambda: pasted.done() or pasted.set_result(line))
+
+            # A daemon thread: a read still blocked on stdin when the browser
+            # callback wins must not keep the process alive.
+            threading.Thread(target=read_line, daemon=True).start()
+        await chatgpt.login(profile, show_url, pasted)
+
+    asyncio.run(run())
+
+
 def login(argv: list) -> int:
     """Persist model settings from flags instead of the interactive flow.
 
@@ -191,6 +229,8 @@ def login(argv: list) -> int:
         if not is_provider_available(provider):
             raise ValueError(f"provider {provider!r} needs a dependency Paimon does not ship")
         api_key = _read_api_key(args)
+        if provider == CHATGPT_PROVIDER and (args.api_base is not None or api_key is not None):
+            raise ValueError(f"{CHATGPT_PROVIDER} signs in through the browser and takes no api base or key")
     except ValueError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
@@ -209,6 +249,8 @@ def login(argv: list) -> int:
         config_path(profile).unlink(missing_ok=True)
         config = Config(profile=profile)
     try:
+        if provider == CHATGPT_PROVIDER:
+            _chatgpt_login(profile)
         config.save(
             model=args.model,
             # An absent flag keeps the stored value; only an explicit '' clears it.

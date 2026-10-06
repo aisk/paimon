@@ -24,6 +24,10 @@ from pydantic_ai.providers import infer_provider_class
 
 from .errors import PaimonError
 
+# The pseudo-provider served by paimon.chatgpt, which is imported on demand
+# like the provider SDKs are.
+CHATGPT_PROVIDER = "chatgpt"
+
 
 class NoModelError(PaimonError):
     """No model is configured, so nothing can be asked of one."""
@@ -51,6 +55,8 @@ def provider_class(provider_name: str):
 
 def is_provider_available(provider_name: str) -> bool:
     """Whether this provider can be constructed with the installed dependencies."""
+    if provider_name == CHATGPT_PROVIDER:
+        return True
     try:
         infer_provider_class(provider_name)
     except (ImportError, ValueError):
@@ -85,8 +91,15 @@ def _provider_resolved_key(provider_cls) -> str:
         return "unset"
 
 
-def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None) -> Model:
+def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None,
+                profile: Optional[str] = None) -> Model:
+    """``profile`` only matters to providers whose credential is a login kept
+    in the profile directory rather than a key in the config."""
     provider_name, model_name = split_model_string(model)
+    if provider_name == CHATGPT_PROVIDER:
+        from . import chatgpt
+
+        return chatgpt.build_model(model_name, profile)
     provider_cls = provider_class(provider_name)
     parameters = inspect.signature(provider_cls.__init__).parameters
 

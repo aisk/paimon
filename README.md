@@ -106,7 +106,7 @@ Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume com
 
 ## Configuration
 
-Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. Sessions live in `~/.local/share/paimon/sessions/`.
+Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. A ChatGPT plan works in place of an API key: `paimon login --model chatgpt:gpt-5.5` signs in through the browser. Sessions live in `~/.local/share/paimon/sessions/`.
 
 Read and edit modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) without asking; `--strict` turns that off. On Windows, where cmd.exe runs the commands, every command asks. **This is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
 

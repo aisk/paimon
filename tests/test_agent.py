@@ -278,8 +278,8 @@ class ModelOverrideTest(unittest.TestCase):
             self.assertEqual(config.model, "test:stub")
 
             with patch("paimon.agent.build_model", side_effect=lambda *key: key) as build:
-                self.assertEqual(plain._model(), ("test:stub", "https://example/v1", "k"))
-                self.assertEqual(overridden._model(), ("test:other", "https://example/v1", "k"))
+                self.assertEqual(plain._model(), ("test:stub", "https://example/v1", "k", "default"))
+                self.assertEqual(overridden._model(), ("test:other", "https://example/v1", "k", "default"))
             self.assertEqual(build.call_count, 2)
 
     def test_the_override_picks_its_own_context_window(self) -> None:

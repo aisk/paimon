@@ -173,7 +173,7 @@ def _replace(tmp: Path, path: Path) -> None:
             time.sleep(0.05)
 
 
-def _write_atomic(path: Path, payload: str) -> None:
+def write_atomic(path: Path, payload: str) -> None:
     """Replace path's contents in one step. Call only under the profile lock.
 
     The new bytes go to a sibling temp file that is fsynced and renamed over
@@ -368,7 +368,7 @@ class Config:
                         data["providers"] = providers
                     else:
                         data.pop("providers", None)
-                _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+                write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
             finally:
                 lockfile.release(lock)
 

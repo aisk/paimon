@@ -27,7 +27,7 @@ from textual.widgets.option_list import Option
 from textual.content import Content
 
 from paimon.errors import PaimonError
-from paimon.llm import is_provider_available
+from paimon.llm import CHATGPT_PROVIDER, is_provider_available
 
 
 def _known_models() -> list[str]:
@@ -36,10 +36,13 @@ def _known_models() -> list[str]:
 
 def _providers() -> list[str]:
     names = {name.split(":", 1)[0] for name in _known_models() if ":" in name}
-    return sorted(name for name in names if is_provider_available(name))
+    return sorted(name for name in names | {CHATGPT_PROVIDER} if is_provider_available(name))
 
 
 def _models(provider: str) -> list[str]:
+    if provider == CHATGPT_PROVIDER:
+        # A ChatGPT plan serves OpenAI's own models; which ones depends on the plan.
+        return [name for name in _models("openai") if name.startswith("gpt-5")]
     prefix = provider + ":"
     return [name.removeprefix(prefix) for name in _known_models() if name.startswith(prefix)]
 
@@ -163,6 +166,61 @@ class PromptScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class ChatGPTLoginScreen(ModalScreen[bool]):
+    """Browser sign-in for the ChatGPT plan. Returns True once the credential
+    is stored, False when cancelled or refused."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, profile: str) -> None:
+        super().__init__()
+        self._profile = profile
+        self._pasted: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="prompt-screen-box"):
+            yield Static("Sign in with ChatGPT", id="prompt-screen-title")
+            yield Static("Opening the browser…", id="chatgpt-login-status")
+            yield Input(placeholder="or paste the final redirect URL here", id="prompt-screen-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#prompt-screen-input", Input).focus()
+        self._flow()
+
+    def _show_url(self, url: str) -> None:
+        from paimon import chatgpt
+
+        lead = ("Finish signing in in the browser. If it did not open, visit:"
+                if chatgpt.open_browser(url) else "Open this address in a browser to sign in:")
+        self.query_one("#chatgpt-login-status", Static).update(
+            Content.from_markup("$lead\n\n$url", lead=lead, url=url))
+
+    @work
+    async def _flow(self) -> None:
+        from paimon import chatgpt
+
+        try:
+            await chatgpt.login(self._profile, self._show_url, self._pasted)
+        except PaimonError as exc:
+            self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
+                "[$text-error b]ChatGPT sign-in failed:[/] $body", body=str(exc)))
+            self.dismiss(False)
+            return
+        self.dismiss(True)
+
+    @on(Input.Submitted)
+    def _on_submit(self, event: Input.Submitted) -> None:
+        event.prevent_default()
+        event.stop()
+        if event.value.strip() and not self._pasted.done():
+            self._pasted.set_result(event.value)
+
+    def action_cancel(self) -> None:
+        # Dismissing unmounts the screen, which cancels the login worker and
+        # with it the callback server.
+        self.dismiss(False)
+
+
 class LoginScreen(ModalScreen[bool]):
     """Multi-step login. Returns True on completion, False if cancelled anywhere."""
 
@@ -187,29 +245,33 @@ class LoginScreen(ModalScreen[bool]):
             self.dismiss(False)
             return
 
-        api_base = await self.app.push_screen_wait(
-            PromptScreen(
-                "API base (leave blank for provider default)",
-                placeholder="https://api.example.com/v1",
-            )
-        )
-        if api_base is None:
-            self.dismiss(False)
-            return
-
-        api_key = await self.app.push_screen_wait(
-            PromptScreen("API key", password=True, placeholder="sk-…")
-        )
-        if api_key is None:
-            self.dismiss(False)
-            return
-
         config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
-        fields = {
-            "model": f"{provider}:{model}",
-            "api_base": api_base.strip() or None,
-            "api_key": api_key.strip() or None,
-        }
+        fields: dict = {"model": f"{provider}:{model}"}
+        if provider == CHATGPT_PROVIDER:
+            # The plan's credential is a browser login kept beside the config,
+            # so there is no endpoint or key to ask for.
+            if not await self.app.push_screen_wait(ChatGPTLoginScreen(config.profile)):
+                self.dismiss(False)
+                return
+        else:
+            api_base = await self.app.push_screen_wait(
+                PromptScreen(
+                    "API base (leave blank for provider default)",
+                    placeholder="https://api.example.com/v1",
+                )
+            )
+            if api_base is None:
+                self.dismiss(False)
+                return
+
+            api_key = await self.app.push_screen_wait(
+                PromptScreen("API key", password=True, placeholder="sk-…")
+            )
+            if api_key is None:
+                self.dismiss(False)
+                return
+            fields["api_base"] = api_base.strip() or None
+            fields["api_key"] = api_key.strip() or None
         try:
             # On a thread: save() can wait on the cross-process config lock.
             await asyncio.to_thread(config.save, **fields)
@@ -219,6 +281,8 @@ class LoginScreen(ModalScreen[bool]):
             config.model = fields["model"]
             entry = config.providers.setdefault(provider, {})
             for key in ("api_base", "api_key"):
+                if key not in fields:
+                    continue
                 if fields[key] is None:
                     entry.pop(key, None)
                 else:

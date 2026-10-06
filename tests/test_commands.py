@@ -212,6 +212,39 @@ class LoginTest(CommandTestCase):
         self.assertEqual(data["providers"]["openai"], {"api_key": "sk-openai"})
 
 
+    def test_chatgpt_login_signs_in_through_the_browser_and_stores_no_key(self) -> None:
+        with patch("paimon.commands._chatgpt_login") as sign_in:
+            code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5")
+        self.assertEqual(code, 0)
+        sign_in.assert_called_once_with("default")
+        self.assertEqual(json.loads(config_path().read_text()), {"model": "chatgpt:gpt-5.5"})
+
+    def test_chatgpt_login_refuses_an_api_key(self) -> None:
+        with patch.dict("os.environ", {"MY_KEY": "sk-openai"}), \
+                patch("paimon.commands._chatgpt_login") as sign_in:
+            code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5", "--api-key-env", "MY_KEY")
+        self.assertEqual(code, 1)
+        self.assertIn("signs in through the browser", err)
+        sign_in.assert_not_called()
+
+    def test_a_failed_chatgpt_sign_in_leaves_the_model_unchanged(self) -> None:
+        self._write_config(model="zai:glm-4.7")
+        from paimon.chatgpt import ChatGPTAuthError
+
+        with patch("paimon.commands._chatgpt_login", side_effect=ChatGPTAuthError("port 1455 is in use")):
+            code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5")
+        self.assertEqual(code, 1)
+        self.assertIn("port 1455 is in use", err)
+        self.assertEqual(json.loads(config_path().read_text())["model"], "zai:glm-4.7")
+
+    def test_status_of_a_chatgpt_model_without_a_login_is_not_ready(self) -> None:
+        self._write_config(model="chatgpt:gpt-5.5")
+        code, out, err = self._run("status")
+        self.assertEqual(code, 1)
+        self.assertIn("ChatGPT plan", out)
+        self.assertIn("not signed in to ChatGPT", out)
+
+
 class ProfileTest(CommandTestCase):
     def test_login_and_status_share_a_profile(self) -> None:
         with patch.dict("os.environ", {"WORK_KEY": "sk-work"}):
