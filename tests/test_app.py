@@ -181,7 +181,7 @@ class PaneAttentionTest(AppTestCase):
 
 
 class TabDrawingTest(AppTestCase):
-    """The frames the tabs draw for themselves."""
+    """The compact separator and labels the tabs draw for themselves."""
 
     async def _strip(self, app, pilot, panes: int = 2) -> list:
         for _ in range(panes - 1):
@@ -190,18 +190,16 @@ class TabDrawingTest(AppTestCase):
         return [str(app.query_one(f"#tab-{pane.id}", PaneTab).render()).splitlines()
                 for pane in app.panes]
 
-    async def test_the_current_tab_is_framed_and_meets_the_rule(self) -> None:
+    async def test_the_current_tab_has_a_heavy_segment_in_the_rule(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             first, second = await self._strip(app, pilot)
-            self.assertEqual(len(first), 3)
-            self.assertEqual(len(second), 3)
-            # The second pane is the current one. Its frame opens downwards
-            # from the rule the idle tabs carry.
-            self.assertTrue(second[0].startswith("┬") and second[0].endswith("┬"))
-            self.assertTrue(second[2].startswith("╰") and second[2].endswith("╯"))
-            self.assertEqual(first[0], "─" * len(first[0]),
-                             "an idle tab contributes plain rule")
+            self.assertEqual(len(first), 2)
+            self.assertEqual(len(second), 2)
+            # The second pane is current: its part of the separator is heavier,
+            # while an idle tab contributes the plain rule.
+            self.assertEqual(first[0], "─" * len(first[0]))
+            self.assertEqual(second[0], "━" * len(second[0]))
             self.assertEqual(len(first[0]), len(second[0]),
                              "every tab is the same width, so the rule lines up")
 

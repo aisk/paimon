@@ -73,10 +73,10 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _tab_text(app, pane: SessionPane) -> str:
-        """A tab's drawn text with its frame and padding taken back out."""
+        """A tab's drawn text with its separator and padding taken back out."""
         tab = app.query_one(f"#tab-{pane.id}", PaneTab)
         lines = str(tab.render()).splitlines()
-        return " ".join(line.strip("╭╮╰╯┬┴│─ ") for line in lines).strip()
+        return " ".join(line.strip("─━ ") for line in lines).strip()
 
     @staticmethod
     def _log_text(pane: SessionPane) -> str:

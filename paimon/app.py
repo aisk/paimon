@@ -192,7 +192,7 @@ class PaimonApp(App):
         self._tabs.sync(self._panes, self._current)
         # A visible strip opens with a rule, which is all the separation the
         # status bar needs; the bar drops its own bottom margin so the tabs
-        # cost three rows rather than four.
+        # cost two rows rather than three.
         if self.is_mounted:
             self.screen.set_class(self._tabs.display, "-tabs-bottom")
         self.refresh_statusbar()

@@ -9,20 +9,19 @@ SessionPane { height: 1fr; margin: 1 2 0 2; }
 
 /* ---- pane tabs ---- */
 
-/* A row of tabs along the bottom edge, hidden entirely while a single pane is
-   open. The tabs draw their own frames (paimon/tabs.py), so there are no
-   borders here, only the room to draw in. */
-#pane-tabs { dock: bottom; layout: horizontal; height: 3; padding: 0 2; }
-#pane-tabs-fill { width: 1fr; height: 3; color: $text-muted; }
+/* A compact strip along the bottom edge, hidden entirely while a single pane
+   is open. Its first row is a separator; the second carries the labels. */
+#pane-tabs { dock: bottom; layout: horizontal; height: 2; padding: 0 2; }
+#pane-tabs-fill { width: 1fr; height: 2; color: $text-muted; }
 .pane-tab {
     width: auto;
-    height: auto;
+    height: 2;
     color: $text-muted;
     text-wrap: nowrap;
 }
-.pane-tab:hover { color: $text; }
-.pane-tab.-attention { color: $warning; }
+.pane-tab:hover { color: $text; background: $primary 6%; }
 .pane-tab.-active { color: $text; text-style: bold; }
+.pane-tab.-attention { color: $warning; }
 
 /* The strip opens with a rule, so the status bar's own breathing room below
    would only hold the two apart for nothing. Spelled in full: a single-edge

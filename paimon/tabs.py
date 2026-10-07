@@ -10,11 +10,10 @@ an underline and a set of bindings this strip does not want, and it prefixes
 every tab ID, which a mix of session and background-task panes would have to
 undo.
 
-Each tab draws its own frame instead of leaning on a CSS border: the line
-separating the strip from the conversation has to run unbroken across the whole
-strip and meet the current tab's frame in a junction glyph, and per-widget
-borders never join up like that. So the box drawing lives here and the
-stylesheet only supplies colours and sizes.
+The strip stays deliberately light: one separator row and one label row. Each
+tab contributes its part of the separator, with a heavier primary-colour segment
+marking the active pane; the fill carries the thin rule to the right edge. The
+box drawing lives here because adjacent widget borders do not join cleanly.
 """
 
 from rich.cells import cell_len, set_cell_size
@@ -29,17 +28,16 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _SPINNER_INTERVAL = 0.12
 
 # All narrow, so labels stay aligned on terminals that render ambiguous-width
-# glyphs double-wide. Idle is a space rather than a bullet: the marker keeps a
-# fixed slot so a tab never changes width when a turn starts or ends, and the
-# frame already does the separating a bullet used to do.
+# glyphs double-wide. The marker keeps a fixed slot so a tab never changes width
+# when a turn starts or ends.
 _IDLE = " "
 _ATTENTION = "!"
 
-# A tab's interior, in cells. Tabs share the strip evenly between these bounds:
-# the maximum keeps two panes from each taking half the terminal, the minimum
-# (index plus marker, no title) is what lets all eight still fit.
-_TAB_MAX = 30
-_TAB_MIN = 6
+# A whole tab, in cells. Tabs share the strip evenly between these bounds: the
+# maximum keeps two panes from each taking half the terminal, while the minimum
+# (index plus marker, no title) lets all eight still fit.
+_TAB_MAX = 32
+_TAB_MIN = 8
 
 
 def _fit(text: str, width: int) -> str:
@@ -65,17 +63,15 @@ class PaneTab(Static):
         self.post_message(PaneTabs.Selected(self.pane))
 
     def draw(self, label: str, marker: str, active: bool, width: int) -> None:
-        """Render this tab: the rule on top, the frame opening downwards."""
+        """Render a separator segment over one compact label row."""
         cell = _cell(label, marker, width)
         if active:
             self.update(Content.from_markup(
-                "[$primary]┬$bar┬[/]\n[$primary]│[/]$cell[$primary]│[/]\n[$primary]╰$bar╯[/]",
-                bar="─" * width, cell=cell))
+                "[$primary]$bar[/]\n$cell", bar="━" * width, cell=cell))
             return
         # The rule carries no markup style: $text-muted is an "auto" colour and
         # only resolves against the background when the stylesheet applies it.
-        rule = "─" * (width + 2)
-        self.update(Content(f"{rule}\n {cell} \n{' ' * (width + 2)}"))
+        self.update(Content(f"{'─' * width}\n{cell}"))
 
 
 class _StripFill(Static):
@@ -91,7 +87,7 @@ class _StripFill(Static):
         width, height = self.size.width, self.size.height
         if width <= 0 or height <= 0:
             return Content("")
-        return Content(f"{'─' * width}\n\n")
+        return Content(f"{'─' * width}\n")
 
 
 class PaneTabs(Container):
@@ -126,7 +122,7 @@ class PaneTabs(Container):
         """Mirror the pane list, then redraw every label.
 
         The strip is hidden while a single pane is open: one tab says nothing
-        and would cost three rows of the conversation.
+        and would cost two rows of the conversation.
         """
         self.display = len(panes) > 1
         keep = set(panes)
@@ -168,8 +164,7 @@ class PaneTabs(Container):
         available = self.container_size.width
         if not available or not self._panes:
             return _TAB_MAX
-        # Two of every tab's columns go to its frame, not to the interior.
-        share = available // len(self._panes) - 2
+        share = available // len(self._panes)
         return max(_TAB_MIN, min(_TAB_MAX, share))
 
     def _redraw(self) -> None:
