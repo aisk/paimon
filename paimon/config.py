@@ -5,7 +5,9 @@ profile, each fully independent — model, keys, theme, everything. The profile
 named "default" is used unless another one is activated. Credentials are
 scoped per provider ("providers": {"zai": {"api_base": ..., "api_key": ...}}),
 so one profile holds an account per provider and switching models never
-borrows another provider's key. The stored model plus its provider's
+borrows another provider's key. A provider that signs in through the browser
+keeps its tokens in the same map (see paimon.chatgpt). The stored model plus
+its provider's
 credentials are turned into a pydantic-ai model by paimon.llm; provider
 environment variables are the fallback when unset.
 """
@@ -17,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import lockfile
 from .errors import PaimonError
@@ -206,6 +208,71 @@ def write_atomic(path: Path, payload: str) -> None:
     _sync_directory(path.parent)
 
 
+def _update_file(path: Path, change: Callable[[dict], None]) -> dict:
+    """Apply change to the stored object and write it back. Returns what was
+    written.
+
+    Writers serialize on a sidecar lock, re-read inside it and replace the
+    file atomically, so two Paimons sharing a profile cannot lose each
+    other's fields and a reader never sees a half-written config.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = _lock_path(path)
+    with _SAVE_MUTEX:
+        if not lockfile.acquire(lock, _SAVE_LOCK_TIMEOUT):
+            raise ConfigError(
+                f"another Paimon held {lock} for over {_SAVE_LOCK_TIMEOUT:.0f}s, "
+                "nothing was written")
+        try:
+            data = _read_file_config(path)
+            change(data)
+            write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+            return data
+        finally:
+            lockfile.release(lock)
+
+
+def _merge_provider(data: dict, provider: str, fields: dict) -> None:
+    """Merge fields into one provider's stored entry; None or "" removes a
+    field, and an entry or map left empty is dropped."""
+    providers = data.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    entry = providers.get(provider)
+    if not isinstance(entry, dict):
+        entry = {}
+    for key, value in fields.items():
+        if value is None or value == "":
+            entry.pop(key, None)
+        else:
+            entry[key] = value
+    if entry:
+        providers[provider] = entry
+    else:
+        providers.pop(provider, None)
+    if providers:
+        data["providers"] = providers
+    else:
+        data.pop("providers", None)
+
+
+def read_provider(profile: str, provider: str) -> dict:
+    """One provider's entry exactly as stored, {} when there is none.
+
+    Config.providers only carries api_base and api_key. This is for the
+    providers that keep more than that, and need it fresh from the file.
+    """
+    providers = _read_file_config(config_path(profile)).get("providers")
+    entry = providers.get(provider) if isinstance(providers, dict) else None
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def update_provider(profile: str, provider: str, fields: dict) -> dict:
+    """Merge fields into one provider's stored entry and return the entry."""
+    data = _update_file(config_path(profile), lambda data: _merge_provider(data, provider, fields))
+    return dict(data.get("providers", {}).get(provider, {}))
+
+
 @dataclass
 class Config:
     """Settings owned by whoever constructed them — no module-level state.
@@ -311,10 +378,6 @@ class Config:
         api_key are stored under the provider of the model being saved (the
         model argument, else the configured model), so every provider keeps
         its own credentials.
-
-        Writers serialize on a sidecar lock and replace the file atomically,
-        so two Paimons sharing a profile cannot lose each other's fields and
-        a reader never sees a half-written config.
         """
         auth_passed = [(key, value) for key, value in (
             ("api_base", api_base), ("api_key", api_key),
@@ -330,52 +393,23 @@ class Config:
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
 
-        path = config_path(self.profile)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock = _lock_path(path)
-        with _SAVE_MUTEX:
-            if not lockfile.acquire(lock, _SAVE_LOCK_TIMEOUT):
-                raise ConfigError(
-                    f"another Paimon held {lock} for over {_SAVE_LOCK_TIMEOUT:.0f}s, "
-                    "nothing was written")
-            try:
-                # Re-read inside the lock: whatever another process saved since
-                # this instance was loaded is merged, not overwritten.
-                data = _read_file_config(path)
-                passed = [(key, value) for key, value in (
-                    ("model", model),
-                    ("theme", theme),
-                    ("show_reasoning", show_reasoning),
-                    ("recap_enabled", recap_enabled),
-                ) if value is not UNSET]
-                for key, value in passed:
-                    if value is None or value == "":
-                        data.pop(key, None)
-                    else:
-                        data[key] = value
-                if provider is not None:
-                    providers = data.get("providers")
-                    if not isinstance(providers, dict):
-                        providers = {}
-                    entry = providers.get(provider)
-                    if not isinstance(entry, dict):
-                        entry = {}
-                    for key, value in auth_passed:
-                        if value is None or value == "":
-                            entry.pop(key, None)
-                        else:
-                            entry[key] = value
-                    if entry:
-                        providers[provider] = entry
-                    else:
-                        providers.pop(provider, None)
-                    if providers:
-                        data["providers"] = providers
-                    else:
-                        data.pop("providers", None)
-                write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
-            finally:
-                lockfile.release(lock)
+        passed = [(key, value) for key, value in (
+            ("model", model),
+            ("theme", theme),
+            ("show_reasoning", show_reasoning),
+            ("recap_enabled", recap_enabled),
+        ) if value is not UNSET]
+
+        def change(data: dict) -> None:
+            for key, value in passed:
+                if value is None or value == "":
+                    data.pop(key, None)
+                else:
+                    data[key] = value
+            if provider is not None:
+                _merge_provider(data, provider, dict(auth_passed))
+
+        data = _update_file(config_path(self.profile), change)
 
         # Only the fields this call wrote are refreshed from the file. A
         # runtime override the caller set on the instance (paimon --model X

@@ -219,7 +219,7 @@ def login(argv: list) -> int:
     key_source.add_argument("--api-key-stdin", action="store_true",
                             help="read the API key from stdin")
     parser.add_argument("--force", action="store_true",
-                        help="discard an unreadable config and log in fresh")
+                        help="set an unreadable config aside and log in fresh")
     _profile_option(parser)
     args = parser.parse_args(argv)
     profile = _resolve_profile(parser, args)
@@ -243,10 +243,22 @@ def login(argv: list) -> int:
         # (deliberately) refuses to touch it.
         if not args.force:
             print(f"paimon: {exc}", file=sys.stderr)
-            print("paimon: pass --force to discard the unreadable config and log in fresh",
-                  file=sys.stderr)
+            print("paimon: pass --force to set the unreadable config aside and log in fresh. "
+                  "Every stored key and login goes with it", file=sys.stderr)
             return 1
-        config_path(profile).unlink(missing_ok=True)
+        # Kept rather than deleted: it holds every provider's key and the
+        # ChatGPT login, which a hand repair can still get back.
+        path = config_path(profile)
+        aside = path.with_name(path.name + ".broken")
+        try:
+            path.replace(aside)
+        except FileNotFoundError:
+            pass
+        except OSError as replace_exc:
+            print(f"paimon: cannot set {path} aside: {replace_exc}", file=sys.stderr)
+            return 1
+        else:
+            print(f"paimon: the unreadable config was kept as {aside}", file=sys.stderr)
         config = Config(profile=profile)
     try:
         if provider == CHATGPT_PROVIDER:

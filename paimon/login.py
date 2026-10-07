@@ -292,8 +292,8 @@ class LoginScreen(ModalScreen[bool]):
         config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
         fields: dict = {"model": f"{provider}:{model}"}
         if provider == CHATGPT_PROVIDER:
-            # The plan's credential is a browser login kept beside the config,
-            # so there is no endpoint or key to ask for.
+            # The plan's credential is a browser login the sign-in stores
+            # itself, so there is no endpoint or key to ask for.
             if not await self.app.push_screen_wait(ChatGPTLoginScreen(config.profile)):
                 self.dismiss(False)
                 return

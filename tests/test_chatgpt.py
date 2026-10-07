@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 import socket
+import threading
 import time
 import unittest
 import webbrowser
@@ -18,14 +19,17 @@ from pydantic_ai.messages import ModelRequest, SystemPromptPart, UserPromptPart
 from pydantic_ai.models import override_allow_model_requests
 
 from paimon import chatgpt
+from paimon.config import Config, ConfigError, config_path, read_provider, update_provider
 from paimon.llm import ask_once, build_model
 
 
 def _store(**fields) -> None:
-    path = chatgpt.credential_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"access": "at-1", "refresh": "rt-1", "client_id": "client-1",
-                                "expires": time.time() + 3600, **fields}))
+    update_provider("default", "chatgpt", {"access": "at-1", "refresh": "rt-1", "client_id": "client-1",
+                                           "expires": time.time() + 3600, **fields})
+
+
+def _stored() -> dict:
+    return read_provider("default", "chatgpt")
 
 
 def _token_response(access: str, refresh: str, scope: str = "openid chatgpt.tokens.use.direct") -> httpx.Response:
@@ -109,9 +113,45 @@ class CredentialsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(post.call_args.kwargs["data"], {
             "grant_type": "refresh_token", "client_id": "client-1", "refresh_token": "rt-1",
             "resource": "https://api.openai.com/v1"})
-        stored = json.loads(chatgpt.credential_path().read_text())
+        stored = _stored()
         self.assertEqual((stored["access"], stored["refresh"], stored["host_id"]),
                          ("at-2", "rt-2", "urn:uuid:host"))
+
+    async def test_the_credential_shares_config_json_with_the_other_settings(self) -> None:
+        Config.load().save(model="zai:glm-5.2", api_key="zai-key", theme="textual-dark")
+        _store(expires=time.time() - 1)
+        with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at-2", "rt-2")):
+            self.assertEqual(await chatgpt.Credentials()(), "at-2")
+        Config.load().save(model="chatgpt:gpt-5.5")
+
+        data = json.loads(config_path().read_text())
+        self.assertEqual((data["model"], data["theme"]), ("chatgpt:gpt-5.5", "textual-dark"))
+        self.assertEqual(data["providers"]["zai"], {"api_key": "zai-key"})
+        self.assertEqual(data["providers"]["chatgpt"]["refresh"], "rt-2")
+        self.assertEqual(Config.load().provider_auth(), (None, None))
+
+    async def test_a_rotation_the_config_would_not_take_is_written_again(self) -> None:
+        _store(expires=time.time() - 1)
+        update, failures = chatgpt.update_provider, [ConfigError("locked")]
+
+        def flaky(*args):
+            if failures:
+                raise failures.pop()
+            return update(*args)
+
+        with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at-2", "rt-2")) as post, \
+                patch("paimon.chatgpt.update_provider", flaky), patch("paimon.chatgpt._STORE_RETRY_SECONDS", 0):
+            self.assertEqual(await chatgpt.Credentials()(), "at-2")
+        post.assert_called_once()
+        self.assertEqual(_stored()["refresh"], "rt-2")
+
+    async def test_an_unreadable_config_spends_no_refresh_token(self) -> None:
+        _store(expires=time.time() - 1)
+        credentials = chatgpt.Credentials()
+        config_path().write_text("{")
+        with patch("paimon.chatgpt.httpx.post", side_effect=AssertionError("no refresh expected")):
+            with self.assertRaises(ConfigError):
+                await credentials()
 
     async def test_a_refresh_another_process_already_did_is_not_repeated(self) -> None:
         _store(expires=time.time() - 1)
@@ -170,7 +210,7 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
         form = post.call_args.kwargs["data"]
         self.assertEqual((form["grant_type"], form["code"], form["client_id"]),
                          ("authorization_code", "c0de", "issued-1"))
-        stored = json.loads(chatgpt.credential_path().read_text())
+        stored = _stored()
         self.assertEqual((stored["access"], stored["refresh"], stored["client_id"]),
                          ("at-1", "rt-1", "issued-1"))
         self.assertEqual(stored["host_id"], query["ext_agent_host_id"][0])
@@ -184,9 +224,33 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
 
         with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at-9", "rt-9")):
             await self._login(respond, pasted)
-        stored = json.loads(chatgpt.credential_path().read_text())
+        stored = _stored()
         self.assertEqual((stored["access"], stored["client_id"], stored["host_id"]),
                          ("at-9", "issued-2", "urn:uuid:kept"))
+
+    async def test_a_refresh_in_flight_cannot_mix_into_a_new_login(self) -> None:
+        _store(expires=time.time() - 1)
+        refreshing, release = threading.Event(), threading.Event()
+
+        def post(url, data, **kwargs) -> httpx.Response:
+            if data["grant_type"] == "refresh_token":
+                refreshing.set()
+                release.wait(5)
+                return _token_response("at-old", "rt-old")
+            return _token_response("at-new", "rt-new")
+
+        async def respond(query: dict) -> None:
+            await self._browser(f"code=c0de&client_id=issued-new&state={query['state'][0]}")
+            release.set()
+
+        with patch("paimon.chatgpt.httpx.post", side_effect=post):
+            refresh = asyncio.create_task(chatgpt.Credentials()())
+            await asyncio.to_thread(refreshing.wait, 5)
+            await self._login(respond)
+            await refresh
+        stored = _stored()
+        self.assertEqual((stored["client_id"], stored["access"], stored["refresh"]),
+                         ("issued-new", "at-new", "rt-new"))
 
     async def test_a_denied_authorization_fails_the_login(self) -> None:
         async def respond(query: dict) -> None:
@@ -194,7 +258,7 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(chatgpt.ChatGPTAuthError, "access_denied"):
             await self._login(respond)
-        self.assertFalse(chatgpt.credential_path().exists())
+        self.assertEqual(_stored(), {})
 
     async def test_a_plan_that_cannot_be_shared_is_refused(self) -> None:
         async def respond(query: dict) -> None:
@@ -203,7 +267,7 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
         with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at", "rt", scope="openid")):
             with self.assertRaisesRegex(chatgpt.ChatGPTAuthError, "did not grant"):
                 await self._login(respond)
-        self.assertFalse(chatgpt.credential_path().exists())
+        self.assertEqual(_stored(), {})
 
     async def test_a_taken_callback_port_is_reported(self) -> None:
         with socket.socket() as holder:

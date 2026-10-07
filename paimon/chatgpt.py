@@ -7,21 +7,22 @@ the regular API accepts, so ChatGPTModel shapes every request to fit.
 
 Open-source, locally run apps need no registration: each login asks OpenAI for
 a fresh client ID (https://developers.openai.com/siwc/token-sharing-open-source).
-The credential lives next to the profile's config.json, in its own file
-because the refresh token rotates on every use.
+The credential lives in the profile's config.json, under
+"providers": {"chatgpt": ...}, and is rewritten whenever the refresh token
+rotates.
 """
 
 import asyncio
 import base64
 import hashlib
-import json
 import secrets
 import threading
 import time
 import uuid
 import webbrowser
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Iterator, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -33,7 +34,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
 from . import lockfile
-from .config import DEFAULT_PROFILE, config_dir, write_atomic
+from .config import DEFAULT_PROFILE, ConfigError, config_dir, read_provider, update_provider
 from .errors import PaimonError
 from .llm import CHATGPT_PROVIDER
 
@@ -54,8 +55,10 @@ _SCOPE = f"openid profile email offline_access resource.invoke {_DIRECT_TOKEN_SC
 # Refresh this long before the real expiry, so no request starts on a token
 # about to lapse.
 _EXPIRY_MARGIN = 180.0
-_REFRESH_LOCK_TIMEOUT = 60.0
+_REFRESH_LOCK_TIMEOUT = 90.0
 _TOKEN_TIMEOUT = 30.0
+_STORE_ATTEMPTS = 3
+_STORE_RETRY_SECONDS = 1.0
 
 # The sidecar lock keeps processes apart but is reentrant within one, and
 # every Agent builds its own model, so threads need their own exclusion. Two
@@ -96,16 +99,8 @@ class ChatGPTAuthError(PaimonError):
     """The ChatGPT login is missing, was refused, or can no longer be renewed."""
 
 
-def credential_path(profile: Optional[str] = None) -> Path:
-    return config_dir(profile or DEFAULT_PROFILE) / "chatgpt.json"
-
-
-def _read(path: Path) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+def _read(profile: str) -> dict:
+    return read_provider(profile, CHATGPT_PROVIDER)
 
 
 def _signed_in(stored: dict) -> bool:
@@ -144,32 +139,64 @@ def _request_token(form: dict) -> dict:
     return fields
 
 
-def _renewed(path: Path) -> dict:
+@contextmanager
+def _credential_lock(profile: str) -> Iterator[None]:
+    """Held by whoever replaces the stored tokens, a refresh or a login.
+
+    Not the config's own lock: this one is held across a network call, and an
+    unrelated save (a theme change) must not wait that out.
+    """
+    lock = config_dir(profile) / "chatgpt.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with _REFRESH_MUTEX:
+        if not lockfile.acquire(lock, _REFRESH_LOCK_TIMEOUT):
+            raise ChatGPTAuthError(f"another Paimon held {lock} for over {_REFRESH_LOCK_TIMEOUT:.0f}s")
+        try:
+            yield
+        finally:
+            lockfile.release(lock)
+
+
+def _store_rotation(profile: str, fields: dict) -> dict:
+    """Write freshly rotated tokens, trying again if the config cannot be
+    written. The old refresh token is already dead, so a write given up on
+    is a login lost."""
+    for attempt in range(_STORE_ATTEMPTS):
+        try:
+            return update_provider(profile, CHATGPT_PROVIDER, fields)
+        except ConfigError:
+            if attempt == _STORE_ATTEMPTS - 1:
+                raise
+            time.sleep(_STORE_RETRY_SECONDS)
+    raise AssertionError("unreachable")
+
+
+def _renewed(profile: str) -> dict:
     """The stored credential, refreshed first if it has expired.
 
     Synchronous and run on a thread: a turn cancelled mid-refresh must still
     get the rotated refresh token onto disk, or the login is lost.
     """
-    lock = path.with_name(path.name + ".lock")
-    with _REFRESH_MUTEX:
-        if not lockfile.acquire(lock, _REFRESH_LOCK_TIMEOUT):
-            raise ChatGPTAuthError(f"another Paimon held {lock} for over {_REFRESH_LOCK_TIMEOUT:.0f}s")
-        try:
-            # Re-read inside the lock: another process may have refreshed.
-            stored = _read(path)
-            if not _signed_in(stored):
-                raise ChatGPTAuthError("not signed in to ChatGPT, log in again")
-            if _expired(stored):
-                stored.update(_request_token({
-                    "grant_type": "refresh_token",
-                    "client_id": stored["client_id"],
-                    "refresh_token": stored["refresh"],
-                    "resource": _RESOURCE,
-                }))
-                write_atomic(path, json.dumps(stored, indent=2))
-            return stored
-        finally:
-            lockfile.release(lock)
+    with _credential_lock(profile):
+        # Re-read inside the lock: another process may have refreshed.
+        stored = _read(profile)
+        if not _signed_in(stored):
+            raise ChatGPTAuthError("not signed in to ChatGPT, log in again")
+        if _expired(stored):
+            stored = _store_rotation(profile, _request_token({
+                "grant_type": "refresh_token",
+                "client_id": stored["client_id"],
+                "refresh_token": stored["refresh"],
+                "resource": _RESOURCE,
+            }))
+        return stored
+
+
+def _store_login(profile: str, credential: dict) -> None:
+    # Under the lock, so a refresh still in flight for the previous login
+    # lands first and cannot mix its tokens into this client's entry.
+    with _credential_lock(profile):
+        update_provider(profile, CHATGPT_PROVIDER, credential)
 
 
 class Credentials:
@@ -177,15 +204,15 @@ class Credentials:
     before every request."""
 
     def __init__(self, profile: Optional[str] = None) -> None:
-        self.path = credential_path(profile)
-        self._stored = _read(self.path)
+        self.profile = profile or DEFAULT_PROFILE
+        self._stored = _read(self.profile)
         if not _signed_in(self._stored):
             raise ChatGPTAuthError(
                 f"not signed in to ChatGPT, run 'paimon login --model {CHATGPT_PROVIDER}:MODEL'")
 
     async def __call__(self) -> str:
         if _expired(self._stored):
-            self._stored = await asyncio.to_thread(_renewed, self.path)
+            self._stored = await asyncio.to_thread(_renewed, self.profile)
         return self._stored["access"]
 
 
@@ -256,8 +283,8 @@ async def login(profile: Optional[str], show_url: Callable[[str], None],
     loopback callback served here; where it cannot reach this machine,
     ``pasted`` may deliver the final redirect URL instead.
     """
-    path = credential_path(profile)
-    host_id = _host_id(_read(path))
+    profile = profile or DEFAULT_PROFILE
+    host_id = _host_id(_read(profile))
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -333,7 +360,5 @@ async def login(profile: Optional[str], show_url: Callable[[str], None],
         "redirect_uri": REDIRECT_URI,
         "resource": _RESOURCE,
     })
-    path.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(
-        write_atomic, path, json.dumps({"host_id": host_id, "client_id": client_id, **fields}, indent=2))
+    await asyncio.to_thread(_store_login, profile, {"host_id": host_id, "client_id": client_id, **fields})
 

@@ -93,8 +93,8 @@ def _provider_resolved_key(provider_cls) -> str:
 
 def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None,
                 profile: Optional[str] = None) -> Model:
-    """``profile`` only matters to providers whose credential is a login kept
-    in the profile directory rather than a key in the config."""
+    """``profile`` only matters to providers whose credential is a login they
+    read from the profile themselves, rather than a key passed in here."""
     provider_name, model_name = split_model_string(model)
     if provider_name == CHATGPT_PROVIDER:
         from . import chatgpt

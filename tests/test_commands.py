@@ -183,6 +183,7 @@ class LoginTest(CommandTestCase):
         code, out, err = self._run("login", "--model", "openai:gpt-5")
         self.assertEqual(code, 1)
         self.assertIn("--force", err)
+        self.assertIn("key and login", err)
         self.assertEqual(path.read_text(), '{"model": "zai:glm')
 
     def test_force_replaces_a_corrupt_config(self) -> None:
@@ -192,6 +193,9 @@ class LoginTest(CommandTestCase):
         code, out, err = self._run("login", "--model", "openai:gpt-5", "--force")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(path.read_text()), {"model": "openai:gpt-5"})
+        aside = path.with_name("config.json.broken")
+        self.assertEqual(aside.read_text(), '{"model": "zai:glm')
+        self.assertIn(str(aside), err)
 
     def test_empty_api_base_clears_the_stored_override(self) -> None:
         self._write_config(model="zai:glm-4.7",
