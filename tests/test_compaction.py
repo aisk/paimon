@@ -28,8 +28,11 @@ def _assistant(content: str) -> ModelResponse:
 class ContextWindowTest(unittest.TestCase):
     """Windows come from pydantic-ai's model profile, which genai-prices fills."""
 
-    def test_override_beats_the_record(self) -> None:
-        self.assertEqual(compaction.context_window(build_model("zai:glm-5.2", api_key="k"), 42_000), 42_000)
+    def test_the_fallback_only_stands_in_for_an_unknown_model(self) -> None:
+        known = build_model("zai:glm-5.2", api_key="k")
+        mystery = build_model("openai:mystery-1", api_base="http://localhost:8080/v1", api_key="k")
+        self.assertEqual(compaction.context_window(known, 42_000), known.context_window)
+        self.assertEqual(compaction.context_window(mystery, 42_000), 42_000)
         self.assertEqual(compaction.context_window(None, 42_000), 42_000)
 
     def test_a_known_model_answers_from_its_profile(self) -> None:
@@ -43,7 +46,7 @@ class ContextWindowTest(unittest.TestCase):
         self.assertEqual(compaction.context_window(proxied),
                          build_model("zai:glm-5.2", api_key="k").context_window)
 
-    def test_unknown_model_and_no_override_disable_compaction(self) -> None:
+    def test_unknown_model_and_no_fallback_disable_compaction(self) -> None:
         mystery = build_model("openai:mystery-1", api_base="http://localhost:8080/v1", api_key="k")
         self.assertIsNone(compaction.context_window(mystery))
         self.assertIsNone(compaction.context_window(None))

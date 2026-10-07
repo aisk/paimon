@@ -624,14 +624,11 @@ class Agent:
 
     def context_window(self) -> Optional[int]:
         """The context window compaction works against, None when unknown."""
-        override = self.config.compaction_context_window
-        if override and override > 0:
-            return override
         try:
             model = self._model()
         except Exception:  # noqa: BLE001 - the request itself reports an unusable model
-            return None
-        return compaction.context_window(model)
+            model = None
+        return compaction.context_window(model, self.config.compaction_context_window)
 
     # The two methods below are the only paths that write conversation state.
     # They keep the invariant that ``self.history`` always equals what

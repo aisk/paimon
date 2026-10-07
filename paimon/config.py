@@ -308,7 +308,7 @@ class Config:
     compaction_enabled: bool = True
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
-    # Overrides the built-in window table, for model names it does not know.
+    # Stands in for the built-in window table on model names it does not know.
     compaction_context_window: Optional[int] = None
     # Extra skill files or directories, on top of the default locations.
     # Edited by hand (or extended by --skill for one run); never written back.

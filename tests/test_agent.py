@@ -291,6 +291,17 @@ class ModelOverrideTest(unittest.TestCase):
             self.assertEqual(agent.context_window(),
                              build_model("zai:glm-5.2", api_key="k").context_window)
 
+    def test_the_configured_window_does_not_reach_a_known_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(model="test:stub", providers={"zai": {"api_key": "k"}},
+                            compaction_context_window=42_000)
+            session = make_session(Path(directory))
+            parent = Agent(session, "snapshot", config=config)
+            child = Agent(session, "snapshot", config=config, model_override="zai:glm-5.2")
+            self.assertEqual(parent.context_window(), 42_000)
+            self.assertEqual(child.context_window(),
+                             build_model("zai:glm-5.2", api_key="k").context_window)
+
     def test_a_model_that_cannot_be_built_has_no_context_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent = Agent(make_session(Path(directory)), "snapshot",

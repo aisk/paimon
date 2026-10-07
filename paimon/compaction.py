@@ -88,19 +88,20 @@ def _window_by_name(model_name: str) -> Optional[int]:
     return info.context_window
 
 
-def context_window(model: Optional[Model], override: Optional[int] = None) -> Optional[int]:
-    """The window to compact against: the override, else what is on record.
+def context_window(model: Optional[Model], fallback: Optional[int] = None) -> Optional[int]:
+    """The window to compact against: what is on record, else the fallback.
 
     The record is pydantic-ai's own profile for the model, filled from
-    genai-prices.  None means the window is unknown, which disables
-    auto-compaction; callers surface that state rather than let it look like
-    compaction is working.
+    genai-prices.  The fallback is one number for the whole config, so it
+    only stands in for a model the record does not know: agents on different
+    models share a config, and a known model must keep its own window.  None
+    means the window is unknown, which disables auto-compaction; callers
+    surface that state rather than let it look like compaction is working.
     """
-    if override and override > 0:
-        return override
-    if model is None:
-        return None
-    return model.context_window or _window_by_name(model.model_name)
+    known = model is not None and (model.context_window or _window_by_name(model.model_name))
+    if known:
+        return known
+    return fallback if fallback and fallback > 0 else None
 
 
 def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None,
