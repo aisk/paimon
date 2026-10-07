@@ -1,7 +1,10 @@
 """Reusable UI components for the Paimon TUI."""
 
 import asyncio
+import difflib
 import json
+import re
+from collections import Counter
 from pathlib import Path
 
 from rich.console import Group, RenderableType
@@ -127,38 +130,42 @@ class FoldedText(Static):
 class ToolResult(FoldedText):
     """Tool output folded to a line-count stub; click expands the full text."""
 
-    def __init__(self, result: str, *, label: str = "", denied: bool = False) -> None:
+    def __init__(self, result: str, *, label: str = "", denied: bool = False,
+                 expanded: bool = False) -> None:
         super().__init__(
             result or "(no output)",
             classes="tool-result denied" if denied else "tool-result",
             label=label,
+            expanded=expanded,
         )
 
 
 class ToolCall(FoldedText):
     """A tool invocation line; multi-line detail folds down to its first line."""
 
-    def __init__(self, name: str, detail: str) -> None:
-        self._name = name
-        super().__init__(detail, classes="tool-call")
+    def __init__(self, name: str, detail: str, *, expanded: bool = False) -> None:
+        # DOMNode owns ``_name`` internally, so keep the tool name separate or
+        # a later update after mounting would redraw it as None.
+        self._tool_name = name
+        super().__init__(detail, classes="tool-call", expanded=expanded)
 
     def _body(self) -> Content:
         if not self._foldable:
             return Content.from_markup(
                 "[$text-accent b]$name[/]  [$text-muted]$detail[/]",
-                name=self._name,
+                name=self._tool_name,
                 detail=self._full,
             )
         if self._expanded:
             return Content.from_markup(
                 "[$text-accent b]$name[/]  [$text-muted]$detail[/]\n[i]click to collapse[/]",
-                name=self._name,
+                name=self._tool_name,
                 detail=self._full,
             )
         lines = self._full.splitlines()
         return Content.from_markup(
             "[$text-accent b]$name[/]  [$text-muted]$first[/] [i]… +$more lines — click to expand[/]",
-            name=self._name,
+            name=self._tool_name,
             first=lines[0],
             more=str(len(lines) - 1),
         )
@@ -214,6 +221,224 @@ class EditCall(Vertical):
         self._expanded = not self._expanded
         self.query_one(".edit-call-diff", Static).display = self._expanded
         self.query_one(".edit-call-header", Static).update(self._header())
+
+
+_TOOL_LABELS = {
+    "read_file": "read",
+    "write_file": "write",
+    "edit_file": "edit",
+    "web_search": "search",
+    "run_background": "background",
+    "textual_inspect": "inspect",
+    "textual_screenshot": "screenshot",
+    "textual_apply_css": "css",
+    "textual_eval": "eval",
+    "textual_exec": "exec",
+}
+
+
+def _one_line(value: object, limit: int = 90) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def tool_call_summary(name: str, args: dict) -> str:
+    """A compact human summary, never a raw fallback JSON object."""
+    path = _one_line(args.get("path"))
+    if name == "read_file":
+        parts = [path or "(path missing)"]
+        if args.get("offset") is not None:
+            parts.append(f"from line {args['offset']}")
+        if args.get("limit") is not None:
+            parts.append(f"up to {args['limit']} lines")
+        return " · ".join(parts)
+    if name == "write_file":
+        lines = len(str(args.get("content") or "").splitlines())
+        return f"{path or '(path missing)'} · {lines} lines"
+    if name == "edit_file":
+        old = str(args.get("old_string") or "").splitlines()
+        new = str(args.get("new_string") or "").splitlines()
+        added = removed = 0
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new).get_opcodes():
+            if tag in ("replace", "delete"):
+                removed += i2 - i1
+            if tag in ("replace", "insert"):
+                added += j2 - j1
+        return f"{path or '(path missing)'} · +{added} −{removed}"
+    if name in ("shell", "run_background"):
+        return _one_line(args.get("command")) or "(empty command)"
+    if name == "grep":
+        pattern = _one_line(args.get("pattern"))
+        return f"{pattern} in {path}" if path and path != "." else pattern
+    if name == "glob":
+        pattern = _one_line(args.get("pattern"))
+        return f"{pattern} in {path}" if path and path != "." else pattern
+    if name == "web_search":
+        return _one_line(args.get("query"))
+    if name == "textual_inspect":
+        return _one_line(args.get("selector")) or "active screen"
+    for key in ("question", "prompt", "expression", "code", "job_id"):
+        if args.get(key):
+            return _one_line(args[key])
+    if path:
+        return path
+    count = len(args)
+    return f"{count} argument{'s' if count != 1 else ''}"
+
+
+def _result_summary(result: str, denied: bool) -> tuple[str, str]:
+    """Return (status word, CSS class) for a finished entry."""
+    if denied:
+        return "denied", "-denied"
+    match = re.search(r"\(exit code (-?\d+)\)\s*$", result)
+    if match:
+        code = int(match.group(1))
+        return ("✓", "-done") if code == 0 else (f"exit {code}", "-failed")
+    if result.lstrip().lower().startswith(("error", "failed")):
+        return "failed", "-failed"
+    lines = len(result.splitlines())
+    if lines > 1:
+        return f"{lines} lines", "-done"
+    return "✓", "-done"
+
+
+class _ToggleLine(Static, can_focus=True):
+    """A one-line disclosure control used by groups and their entries."""
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.parent.toggle()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in ("enter", "space"):
+            event.stop()
+            event.prevent_default()
+            self.parent.toggle()
+
+
+class ToolEntry(Vertical):
+    """One tool call: a summary row with raw arguments/output one click away."""
+
+    def __init__(self, name: str, args: dict, reasoning: FoldedText | None = None,
+                 cwd: Path | None = None) -> None:
+        self.tool_name = name
+        self.cwd = cwd
+        self.args = args
+        self.summary = tool_call_summary(name, args)
+        self._reasoning = reasoning
+        self._expanded = False
+        self._status = "running…"
+        self._status_class = "-running"
+        super().__init__(classes="tool-entry -running")
+
+    def compose(self) -> ComposeResult:
+        yield _ToggleLine(self._header(), classes="tool-entry-header")
+        children: list = []
+        if self._reasoning is not None:
+            children.append(self._reasoning)
+        if self.tool_name == "edit_file":
+            path = str(self.args.get("path") or "")
+            old = str(self.args.get("old_string") or "")
+            new = str(self.args.get("new_string") or "")
+            children.append(EditCall(
+                path, old, new,
+                start_line=locate_line(path, old, new, cwd=self.cwd),
+            ))
+        else:
+            detail = json.dumps(self.args, ensure_ascii=False, indent=2, default=str)
+            children.append(ToolCall(self.tool_name, detail, expanded=True))
+        body = Vertical(*children, classes="tool-entry-detail")
+        body.display = False
+        yield body
+
+    def _header(self) -> Content:
+        arrow = "▼" if self._expanded else "›"
+        label = _TOOL_LABELS.get(self.tool_name, self.tool_name)
+        return Content.from_markup(
+            "[$text-muted]$arrow[/] [$text-accent]$name[/]  $summary  [$status]$status[/]",
+            arrow=arrow,
+            name=label,
+            summary=self.summary,
+            status=self._status,
+        )
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        self.query_one(".tool-entry-detail", Vertical).display = self._expanded
+        self.query_one(".tool-entry-header", Static).update(self._header())
+
+    async def finish(self, result: str, *, label: str = "", denied: bool = False) -> None:
+        self.remove_class(self._status_class)
+        self._status, self._status_class = _result_summary(result, denied)
+        self.add_class(self._status_class)
+        await self.query_one(".tool-entry-detail", Vertical).mount(
+            ToolResult(result, label=label, denied=denied, expanded=True)
+        )
+        self.query_one(".tool-entry-header", Static).update(self._header())
+
+
+class ToolGroup(Vertical):
+    """A consecutive burst of tool calls collapsed to one activity line."""
+
+    def __init__(self, cwd: Path | None = None) -> None:
+        self.cwd = cwd
+        self.entries: list[ToolEntry] = []
+        self._expanded = False
+        super().__init__(classes="tool-group")
+
+    def compose(self) -> ComposeResult:
+        yield _ToggleLine(self._header(), classes="tool-group-header")
+        body = Vertical(classes="tool-group-body")
+        body.display = False
+        yield body
+
+    def _header(self) -> Content:
+        arrow = "▼" if self._expanded else "▶"
+        counts = Counter(_TOOL_LABELS.get(entry.tool_name, entry.tool_name) for entry in self.entries)
+        parts = [f"{name} ×{count}" if count > 1 else name for name, count in counts.items()]
+        if len(parts) > 4:
+            parts = [*parts[:4], f"+{len(parts) - 4} kinds"]
+        running = sum(entry.has_class("-running") for entry in self.entries)
+        failed = sum(entry.has_class("-failed") for entry in self.entries)
+        denied = sum(entry.has_class("-denied") for entry in self.entries)
+        if running:
+            status = "running…"
+            style = "$text-accent"
+        elif failed or denied:
+            details = []
+            if failed:
+                details.append(f"{failed} failed")
+            if denied:
+                details.append(f"{denied} denied")
+            status = " · ".join(details)
+            style = "$warning"
+        else:
+            status = "✓"
+            style = "$success"
+        summary = " · ".join(parts)
+        return Content.from_markup(
+            "[$text-muted]$arrow[/] [$text-accent b]Tools[/]  $count calls"
+            f"[$text-muted] · $summary[/]  [{style}]$status[/]",
+            arrow=arrow,
+            count=str(len(self.entries)),
+            summary=summary,
+            status=status,
+        )
+
+    async def add_call(self, name: str, args: dict, reasoning: FoldedText | None = None) -> ToolEntry:
+        entry = ToolEntry(name, args, reasoning, self.cwd)
+        self.entries.append(entry)
+        await self.query_one(".tool-group-body", Vertical).mount(entry)
+        self.query_one(".tool-group-header", Static).update(self._header())
+        return entry
+
+    def refresh_header(self) -> None:
+        self.query_one(".tool-group-header", Static).update(self._header())
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        self.query_one(".tool-group-body", Vertical).display = self._expanded
+        self.query_one(".tool-group-header", Static).update(self._header())
 
 
 class PromptInput(TextArea):

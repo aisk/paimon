@@ -49,9 +49,34 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .assistant { padding: 0 1; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-disabled; }
-/* One step: the reasoning that led to a tool call, the call and its result,
-   held in one box instead of reading as separate same-looking paragraphs. */
-.tool-step { height: auto; padding: 0 1; border-left: solid $surface-lighten-2; }
+/* Consecutive agent tool calls collapse to one activity line. Expanding the
+   group reveals summary rows; only expanding a row reveals arguments/output. */
+.tool-group {
+    height: auto;
+    padding: 0 1;
+    border-left: solid $surface-lighten-2;
+}
+.tool-group-header, .tool-entry-header {
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+.tool-group-header:hover, .tool-group-header:focus,
+.tool-entry-header:hover, .tool-entry-header:focus {
+    background: $primary 8%;
+}
+.tool-group-body { height: auto; margin-top: 1; }
+.tool-entry { height: auto; }
+.tool-entry-header { padding-left: 1; color: $text-muted; }
+.tool-entry.-failed > .tool-entry-header,
+.tool-entry.-denied > .tool-entry-header { color: $warning; }
+.tool-entry-detail {
+    height: auto;
+    margin: 0 0 1 2;
+    padding-left: 1;
+    border-left: solid $surface-lighten-2;
+}
+.tool-entry-detail > .tool-result { padding-left: 1; }
 /* A "!" command the user ran themselves: the same box as a step, told apart
    by its rule, since nothing the model did led to it. */
 .shell-step { height: auto; padding: 0 1; border-left: solid $accent; }

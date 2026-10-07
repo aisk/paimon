@@ -80,9 +80,8 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _log_text(pane: SessionPane) -> str:
-        # Not just direct children: a tool call and its result now nest one
-        # level deeper, inside the step box that groups them with the
-        # reasoning that led to the call.
+        # Not just direct children: tool calls and results sit inside collapsed
+        # activity groups and per-call detail containers.
         return " ".join(str(widget.render())
                          for widget in pane.query_one("#log").walk_children())
 

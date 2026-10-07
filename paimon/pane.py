@@ -41,7 +41,6 @@ from .agent import (
     UserInput,
     replay_events,
 )
-from .diff import locate_line
 from .turns import TurnDriver, Outcome, Result, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint, shell_message
@@ -51,11 +50,12 @@ from .ui import (
     BlockingPanel,
     ConfirmPanel,
     QuestionPanel,
-    EditCall,
     FoldedText,
     PromptInput,
     RecapMessage,
     ToolCall,
+    ToolEntry,
+    ToolGroup,
     ToolResult,
     UserMessage,
 )
@@ -121,12 +121,10 @@ class _EventRenderer:
         self._reasoning: FoldedText | None = None
         self._reasoning_buf = ""
         self._first_text_block = True
-        self._call_labels: dict[str, str] = {}
-        # The reasoning-and-tool-call that make up the step in progress, held
-        # in one box so the log reads in units instead of a flat stack of
-        # same-looking blocks. Open from ToolStart to its matching ToolEnd —
-        # tools run serially, so at most one is ever open.
-        self._step: Vertical | None = None
+        # Consecutive calls between prose blocks share one collapsed activity
+        # group. Entries stay addressable by call id until their result arrives.
+        self._tool_group: ToolGroup | None = None
+        self._tool_entries: dict[str, ToolEntry] = {}
 
     async def handle(self, ev: object) -> None:
         if isinstance(ev, UserInput):
@@ -173,6 +171,8 @@ class _EventRenderer:
 
         elif isinstance(ev, TextDelta):
             if self._stream is None:
+                await self._close_content()
+                self._finish_tool_group()
                 widget = AssistantMessage("", heading=self._first_text_block)
                 self._first_text_block = False
                 # Await the mount so the initial document (the Paimon heading)
@@ -182,27 +182,32 @@ class _EventRenderer:
             await self._stream.write(ev.text)
 
         elif isinstance(ev, ToolStart):
-            # The reasoning that led here (if any) moves into the step box
-            # with it; close() below would otherwise fold it loose in the log.
+            # Reasoning immediately before a call belongs in that call's hidden
+            # detail rather than taking another line in the conversation.
             reasoning = self._reasoning
-            await self.close()
-            step = await self._enter_step(reasoning)
-            self._call_labels[ev.id] = (
-                f"{ev.name} {tools.summarize_call(ev.name, ev.args, limit=40)}"
-            )
-            self._pane._add_tool_start(ev.name, ev.args, container=step)
+            await self._close_content()
+            if reasoning is not None:
+                await reasoning.remove()
+            group = await self._enter_tool_group()
+            self._tool_entries[ev.id] = await group.add_call(ev.name, ev.args, reasoning)
 
         elif isinstance(ev, TodosUpdate):
             await self.close()
             self._pane._show_todos(ev.todos)
 
         elif isinstance(ev, ToolEnd):
-            label = self._call_labels.pop(ev.id, ev.name)
-            self._pane._add_tool_result(ev.result, label=label, denied=ev.denied,
-                                         container=self._step)
-            self._step = None
+            entry = self._tool_entries.pop(ev.id, None)
+            if entry is None:
+                # Tolerate an incomplete/old log with a result but no call.
+                self._pane._add_tool_result(ev.result, label=ev.name, denied=ev.denied)
+            else:
+                label = f"{ev.name} {entry.summary}"
+                await entry.finish(ev.result, label=label, denied=ev.denied)
+                if self._tool_group is not None:
+                    self._tool_group.refresh_header()
 
         elif isinstance(ev, ContextCompacted):
+            await self.close()
             self._pane._add(
                 Content.from_markup(
                     "[$text-muted]Context compacted: $before → ~$after tokens[/]",
@@ -212,6 +217,7 @@ class _EventRenderer:
             )
 
         elif isinstance(ev, ContextCompactionFailed):
+            await self.close()
             self._pane._add(
                 Content.from_markup(
                     "[$text-warning]Context compaction failed; continuing without it: $error[/]",
@@ -220,6 +226,7 @@ class _EventRenderer:
             )
 
         elif isinstance(ev, ModelRetry):
+            await self.close()
             self._pane._add(
                 Content.from_markup(
                     "[$text-warning]$error — retrying in $delay s ($attempt/$total)[/]",
@@ -230,32 +237,30 @@ class _EventRenderer:
                 )
             )
 
-    async def _enter_step(self, reasoning: FoldedText | None) -> Vertical:
-        """The box the tool call about to start belongs in.
+    async def _enter_tool_group(self) -> ToolGroup:
+        if self._tool_group is None:
+            self._tool_group = ToolGroup(self._pane.cwd)
+            await self._pane.query_one("#log", VerticalScroll).mount(self._tool_group)
+        return self._tool_group
 
-        Reused across a burst of calls with nothing in between (ToolEnd
-        clears ``_step`` first), so only a call preceded by its own reasoning
-        gets one to itself.
-        """
-        step = Vertical(classes="tool-step")
-        await self._pane.query_one("#log", VerticalScroll).mount(step)
-        if reasoning is not None:
-            await reasoning.remove()
-            await step.mount(reasoning)
-        self._step = step
-        return step
+    def _finish_tool_group(self) -> None:
+        self._tool_group = None
 
-    async def close(self) -> None:
-        """End the current text/reasoning blocks so the next output starts fresh."""
+    async def _close_content(self) -> None:
         if self._stream is not None:
             await self._stream.stop()
             self._stream = None
         if self._reasoning is not None and self._pane.config.show_reasoning:
-            # fold the live stream now that the block is over; blocks the user
-            # clicked open themselves are left alone
+            # Fold the live stream now that the block is over; blocks the user
+            # clicked open themselves are left alone.
             self._reasoning.collapse()
         self._reasoning = None
         self._reasoning_buf = ""
+
+    async def close(self) -> None:
+        """End current content and make the next call start a fresh group."""
+        await self._close_content()
+        self._finish_tool_group()
 
 
 class Pane(Vertical):
@@ -756,21 +761,6 @@ class SessionPane(Pane):
         status.display = visible
         if visible and label:
             status.query_one(".status-label", Static).update(label)
-
-    def _add_tool_start(self, name: str, args: dict, *, container: Widget | None = None) -> Widget:
-        log = container if container is not None else self.query_one("#log", VerticalScroll)
-        if name == "edit_file":
-            path = str(args.get("path") or "")
-            old = str(args.get("old_string") or "")
-            new = str(args.get("new_string") or "")
-            widget: Widget = EditCall(
-                path, old, new,
-                start_line=locate_line(path, old, new, cwd=self.cwd),
-            )
-        else:
-            widget = ToolCall(name, tools.summarize_call(name, args))
-        log.mount(widget)
-        return widget
 
     def _add_tool_result(
         self, result: str, *, label: str = "", denied: bool = False,

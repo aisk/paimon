@@ -11,7 +11,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 
 from paimon import skills
-from paimon.agent import ReasoningDelta, RequestStats, ToolEnd, ToolStart
+from paimon.agent import ReasoningDelta, RequestStats, TextDelta, ToolEnd, ToolStart
 from paimon.config import Config
 from paimon.pane import _EventRenderer, _session_label
 from paimon.session import (
@@ -21,6 +21,8 @@ from paimon.ui import (
     EditCall,
     PromptInput,
     ToolCall,
+    ToolEntry,
+    ToolGroup,
     ToolResult,
     UserMessage,
 )
@@ -160,61 +162,92 @@ class EventCoverageTest(AppTestCase):
 
 
 class ToolRenderingTest(AppTestCase):
-    async def test_multiline_command_folds_to_its_first_line(self) -> None:
+    async def test_consecutive_calls_share_one_collapsed_group(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             renderer = _EventRenderer(app.pane)
-            await renderer.handle(ToolStart("c1", "shell", {"command": "echo one\necho two"}))
+            await renderer.handle(ToolStart("c1", "read_file", {"path": "a.py", "limit": 20}))
+            await renderer.handle(ToolEnd("c1", "read_file", "one\ntwo"))
+            await renderer.handle(ToolStart("c2", "shell", {"command": "pytest -q"}))
+            await renderer.handle(ToolEnd("c2", "shell", "ok\n(exit code 0)"))
             await pilot.pause()
-            widget = app.query(ToolCall).first()
-            body = str(widget.render())
-            self.assertIn("echo one", body)
-            self.assertNotIn("echo two", body)
-            self.assertIn("+1 lines", body)
-            widget.on_click()
-            body = str(widget.render())
-            self.assertIn("echo two", body)
-            self.assertIn("click to collapse", body)
 
-    async def test_single_line_command_has_no_fold(self) -> None:
+            groups = app.query(ToolGroup)
+            self.assertEqual(len(groups), 1)
+            group = groups.first()
+            header = str(group.query_one(".tool-group-header", Static).render())
+            self.assertIn("2 calls", header)
+            self.assertIn("read", header)
+            self.assertIn("shell", header)
+            self.assertNotIn("a.py", header, "arguments stay out of the collapsed group")
+            self.assertFalse(group.query_one(".tool-group-body").display)
+
+    async def test_group_and_row_are_two_disclosure_levels(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             renderer = _EventRenderer(app.pane)
-            await renderer.handle(ToolStart("c1", "shell", {"command": "ls"}))
+            args = {"command": "echo one\necho two", "extra": {"large": "json"}}
+            await renderer.handle(ToolStart("c1", "shell", args))
+            await renderer.handle(ToolEnd("c1", "shell", "line one\nline two"))
             await pilot.pause()
-            body = str(app.query(ToolCall).first().render())
-            self.assertIn("ls", body)
-            self.assertNotIn("click to expand", body)
 
-    async def test_edit_call_shows_diff_expanded_by_default(self) -> None:
+            group = app.query_one(ToolGroup)
+            entry = app.query_one(ToolEntry)
+            detail = entry.query_one(".tool-entry-detail")
+            self.assertFalse(group.query_one(".tool-group-body").display)
+            self.assertFalse(detail.display)
+
+            group.toggle()
+            self.assertTrue(group.query_one(".tool-group-body").display)
+            row = str(entry.query_one(".tool-entry-header", Static).render())
+            self.assertIn("echo one echo two", row)
+            self.assertIn("2 lines", row)
+            self.assertNotIn("large", row)
+
+            entry.toggle()
+            self.assertTrue(detail.display)
+            self.assertIn("echo two", str(entry.query_one(ToolCall).render()))
+            self.assertIn("line one", str(entry.query_one(ToolResult).render()))
+
+    async def test_prose_starts_a_new_group(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = _EventRenderer(app.pane)
+            await renderer.handle(ToolStart("c1", "shell", {"command": "one"}))
+            await renderer.handle(ToolEnd("c1", "shell", "ok"))
+            await renderer.handle(TextDelta("between"))
+            await renderer.handle(ToolStart("c2", "shell", {"command": "two"}))
+            await pilot.pause()
+            self.assertEqual(len(app.query(ToolGroup)), 2)
+
+    async def test_edit_diff_is_hidden_until_its_row_opens(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             renderer = _EventRenderer(app.pane)
             await renderer.handle(ToolStart("c1", "edit_file", {
                 "path": "a.py", "old_string": "x = 1", "new_string": "x = 2"}))
             await pilot.pause()
-            widget = app.query(EditCall).first()
-            header = widget.query_one(".edit-call-header", Static)
-            diff = widget.query_one(".edit-call-diff", Static)
-            self.assertIn("a.py", str(header.render()))
-            self.assertTrue(diff.display)
-            widget.on_click()
-            self.assertFalse(diff.display)
-            self.assertIn("click to expand", str(header.render()))
-            widget.on_click()
-            self.assertTrue(diff.display)
+            group = app.query_one(ToolGroup)
+            entry = app.query_one(ToolEntry)
+            diff = app.query_one(EditCall).query_one(".edit-call-diff", Static)
+            self.assertFalse(group.query_one(".tool-group-body").display)
+            self.assertFalse(entry.query_one(".tool-entry-detail").display)
+            self.assertTrue(diff.display, "the diff is ready but hidden with its detail container")
+            group.toggle()
+            entry.toggle()
+            self.assertTrue(entry.query_one(".tool-entry-detail").display)
 
-    async def test_folded_result_names_its_call(self) -> None:
+    async def test_failure_is_visible_without_showing_output(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
             renderer = _EventRenderer(app.pane)
-            await renderer.handle(ToolStart("c1", "shell", {"command": "ls src"}))
-            await renderer.handle(ToolEnd("c1", "shell", "a.py\nb.py\nc.py"))
+            await renderer.handle(ToolStart("c1", "shell", {"command": "pytest"}))
+            await renderer.handle(ToolEnd("c1", "shell", "traceback\n(exit code 1)"))
             await pilot.pause()
-            body = str(app.query(ToolResult).first().render())
-            self.assertIn("shell ls src", body)
-            self.assertIn("3 lines", body)
-            self.assertNotIn("a.py", body)
+            group = app.query_one(ToolGroup)
+            self.assertIn("1 failed", str(group.query_one(".tool-group-header", Static).render()))
+            self.assertIn("exit 1", str(app.query_one(".tool-entry-header", Static).render()))
+            self.assertFalse(group.query_one(".tool-group-body").display)
 
 
 class ReasoningDisplayTest(AppTestCase):
