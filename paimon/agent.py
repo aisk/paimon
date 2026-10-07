@@ -33,7 +33,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import compaction, retry, review, tools
 from .config import Config
-from .llm import NoModelError, ask_once, build_model, user_agent
+from .llm import NoModelError, ask_once, build_model, request_settings
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -737,7 +737,8 @@ class Agent:
         model = self._model()
         question = ModelRequest(parts=[UserPromptPart(content=RECAP_PROMPT)])
         answer = await ask_once(model, [*self._context(model), question],
-                                max_tokens=_RECAP_MAX_TOKENS, tools=self._tool_definitions)
+                                max_tokens=_RECAP_MAX_TOKENS, tools=self._tool_definitions,
+                                cache_key=self.session.id)
         return answer.strip()
 
     # ---- Commands the user runs themselves ---------------------------------
@@ -1255,7 +1256,7 @@ class Agent:
                     async with model_request_stream(
                         model,
                         request_messages,
-                        model_settings={"extra_headers": {"User-Agent": user_agent()}},
+                        model_settings=request_settings(model, self.session.id),
                         model_request_parameters=parameters,
                     ) as stream:
                         async for event in stream:

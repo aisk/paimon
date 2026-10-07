@@ -199,6 +199,11 @@ class ChatGPTModel(OpenAIResponsesModel):
         allowed = {key: value for key, value in (settings or {}).items()
                    if key not in _REJECTED_SETTINGS}
         allowed["openai_store"] = False
+        # The endpoint keeps a conversation on the machine holding its prompt
+        # cache by this header. The cache key alone does not route here, and
+        # most requests then miss the cache and are charged in full.
+        if session := allowed.get("openai_prompt_cache_key"):
+            allowed["extra_headers"] = {**(allowed.get("extra_headers") or {}), "session_id": session}
         return allowed, parameters  # type: ignore[return-value]
 
     async def request(

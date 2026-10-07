@@ -73,7 +73,7 @@ class RequestShapeTest(unittest.IsolatedAsyncioTestCase):
             model = build_model("chatgpt:gpt-5.5")
         messages = [ModelRequest(parts=[SystemPromptPart(content="be brief"), UserPromptPart(content="hi")])]
         with override_allow_model_requests(True):
-            answer = await ask_once(model, messages, max_tokens=64)
+            answer = await ask_once(model, messages, max_tokens=64, cache_key="session-1")
 
         self.assertEqual(answer, "hello")
         request = requests[0]
@@ -82,6 +82,8 @@ class RequestShapeTest(unittest.IsolatedAsyncioTestCase):
         body = json.loads(request.content)
         self.assertIs(body["stream"], True)
         self.assertIs(body["store"], False)
+        self.assertEqual(body["prompt_cache_key"], "session-1")
+        self.assertEqual(request.headers["session_id"], "session-1")
         self.assertNotIn("max_output_tokens", body)
         self.assertIsInstance(body["input"], list)
         self.assertEqual([item["role"] for item in body["input"]], ["developer", "user"])

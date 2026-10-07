@@ -123,8 +123,22 @@ def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[st
     return infer_model(f"{provider_name}:{model_name}", provider_factory=lambda _: provider)
 
 
+def request_settings(model: Model, cache_key: Optional[str] = None) -> dict:
+    """The settings every request carries.
+
+    ``cache_key`` names the conversation the request belongs to. OpenAI
+    spreads requests over machines that each keep their own prompt cache, and
+    without a key to route by, a request often lands where its prefix was
+    never seen and is billed in full.
+    """
+    settings: dict = {"extra_headers": {"User-Agent": user_agent()}}
+    if cache_key and model.system == "openai":
+        settings["openai_prompt_cache_key"] = cache_key
+    return settings
+
+
 async def ask_once(model: Model, messages: list[ModelMessage], *, max_tokens: int,
-                   tools: Sequence = ()) -> str:
+                   tools: Sequence = (), cache_key: Optional[str] = None) -> str:
     """One request outside the turn loop, answered as plain text.
 
     Not streamed and not retried: the callers are a checkpoint summary and a
@@ -135,8 +149,7 @@ async def ask_once(model: Model, messages: list[ModelMessage], *, max_tokens: in
     response = await model_request(
         model,
         messages,
-        model_settings={"max_tokens": max_tokens,
-                        "extra_headers": {"User-Agent": user_agent()}},
+        model_settings={"max_tokens": max_tokens, **request_settings(model, cache_key)},
         model_request_parameters=ModelRequestParameters(
             function_tools=list(tools), allow_text_output=True),
     )
