@@ -11,7 +11,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import FunctionModel
 
-from paimon import login, review
+from paimon import llm, review
 from paimon.review import ReviewUnavailable, Verdict
 
 HISTORY = [
@@ -51,7 +51,7 @@ class DefaultModelTest(unittest.TestCase):
                          "anthropic:claude-haiku-4-5")
 
     def test_every_reviewer_is_a_model_its_provider_lists(self) -> None:
-        known = {name.partition(":")[2] for name in login._known_models()}
+        known = {name.partition(":")[2] for name in llm.known_models()}
         self.assertLessEqual(set(review.DEFAULT_REVIEWERS.values()), known)
         self.assertLessEqual(set(review.DEFAULT_REVIEWERS), known)
         self.assertEqual(review.default_model("zai/glm-5.2"), "zai:glm-5.3-flash")

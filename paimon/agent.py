@@ -33,7 +33,8 @@ from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import compaction, retry, review, tools
 from .config import Config
-from .llm import NoModelError, ask_once, build_model, request_settings
+from .llm import (CHATGPT_PROVIDER, NoModelError, ask_once, build_model, models_for,
+                  request_settings, split_model_string)
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -913,12 +914,24 @@ class Agent:
                 return "Error: prompt is required."
             if (full := self._no_room()) is not None:
                 return full
+            model = str(args.get("model") or "").strip() or None
+            if model:
+                # Built here only to be thrown away: the child would not find
+                # out before its first request, a turn too late to pick again.
+                try:
+                    self._built(model, None)
+                except Exception as exc:  # noqa: BLE001 — unknown provider, no credential
+                    return (f"Error: cannot start an agent on {model!r}: {exc} "
+                            "Call list_models for the ones available.")
             try:
-                job_id = self._spawn(prompt, str(args.get("model") or "") or None)
+                job_id = self._spawn(prompt, model)
             except Exception as exc:  # noqa: BLE001 — a session that would not open
                 return f"Error: could not start an agent: {exc}"
             return (f"Started agent {job_id}; it is running now. Its answer is delivered "
                     "to you when it finishes, so carry on or end your turn.")
+
+        if name == "list_models":
+            return self._list_models()
 
         if name == "run_background":
             command = str(args.get("command") or "").strip()
@@ -970,6 +983,38 @@ class Agent:
             return f"Stopped {job_id}. What it printed is still readable with read_job."
 
         return f"Error: unknown tool {name!r}"
+
+    def _list_models(self) -> str:
+        """The models an agent can be started on, one qualified name per line.
+
+        Read from the config on every call rather than baked into a prompt, so
+        a provider signed in to mid-session is offered from the next call on.
+        Only providers with a stored credential are listed, plus this agent's
+        own: one that works off an environment variable alone is not known to
+        work until it is tried.
+        """
+        providers = []
+        if self.model_name:
+            try:
+                providers.append(split_model_string(self.model_name)[0])
+            except ValueError:
+                pass
+        providers.extend(self.config.providers)
+        try:
+            from . import chatgpt
+
+            if chatgpt.signed_in(self.config.profile):
+                providers.append(CHATGPT_PROVIDER)
+        except Exception:  # noqa: BLE001 — an unreadable login is a provider not offered
+            pass
+        lines = [f"{provider}:{name}"
+                 for provider in dict.fromkeys(providers)
+                 for name in models_for(provider)]
+        if not lines:
+            return "No models are available; the user has to log in first."
+        return (f"You are running on {self.model_name}. An agent can be started on:\n"
+                + "\n".join(lines)
+                + "\nOther models of the same providers work too, when named exactly.")
 
     def _no_room(self) -> Optional[str]:
         """The refusal for a job that would exceed the cap, or None when there is room."""
@@ -1105,6 +1150,7 @@ class Agent:
         "ask_user": _run_ask_user,
         "start_new_session": _run_start_new_session,
         "spawn_agent": _run_job_tool,
+        "list_models": _run_job_tool,
         "run_background": _run_job_tool,
         "read_job": _run_job_tool,
         "stop_job": _run_job_tool,

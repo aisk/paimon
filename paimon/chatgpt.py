@@ -108,6 +108,11 @@ def _signed_in(stored: dict) -> bool:
                for key in ("access", "refresh", "client_id"))
 
 
+def signed_in(profile: str) -> bool:
+    """Whether the profile holds a ChatGPT login to build a model from."""
+    return _signed_in(_read(profile))
+
+
 def _expired(stored: dict) -> bool:
     expires = stored.get("expires")
     return not isinstance(expires, (int, float)) or time.time() >= expires

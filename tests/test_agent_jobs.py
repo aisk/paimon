@@ -114,7 +114,7 @@ class SpawnAgentTest(JobsTestCase):
                 patch.object(agent_module.Agent, "open", side_effect=spy):
             await self.turn(agent)
             (child,) = opened
-            for name in ("spawn_agent", "stop_job", "run_background", "read_job",
+            for name in ("spawn_agent", "list_models", "stop_job", "run_background", "read_job",
                          "ask_user", "start_new_session"):
                 self.assertNotIn(name, child.toolset)
             self.assertIn("shell", child.toolset)
@@ -200,6 +200,46 @@ class SpawnAgentTest(JobsTestCase):
             [event async for event in agent.run("go", max_tool_calls=7)]
             await self.until(lambda: bool(agent.notices))
         self.assertIn(("check", 7), seen)
+
+
+class ListModelsTest(JobsTestCase):
+    CATALOG = ["openai:gpt-6.1-sol", "test:stub", "zai:glm-5.3"]
+
+    async def test_it_lists_every_signed_in_provider_under_qualified_names(self) -> None:
+        agent = self.agent()
+        agent.config.providers = {"zai": {"api_key": "k"}}
+        with patch("paimon.llm.known_models", return_value=self.CATALOG):
+            listing = await agent._job_tool("list_models", {})
+        self.assertIn("running on test:stub", listing)
+        self.assertEqual(listing.splitlines()[1:3], ["test:stub", "zai:glm-5.3"])
+        self.assertNotIn("openai:", listing, "no credential, not offered")
+
+    async def test_a_provider_signed_in_to_later_shows_up_on_the_next_call(self) -> None:
+        agent = self.agent()
+        with patch("paimon.llm.known_models", return_value=self.CATALOG):
+            self.assertNotIn("zai:glm-5.3", await agent._job_tool("list_models", {}))
+            agent.config.providers = {"zai": {"api_key": "k"}}
+            self.assertIn("zai:glm-5.3", await agent._job_tool("list_models", {}))
+            with patch("paimon.chatgpt.signed_in", return_value=True):
+                self.assertIn("chatgpt:gpt-6.1-sol", await agent._job_tool("list_models", {}))
+
+    async def test_an_agent_is_started_on_the_model_asked_for(self) -> None:
+        agent = self.agent()
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model", return_value=spawning_model([], gate=gate)):
+            await agent._job_tool("spawn_agent", {"prompt": "go", "model": "zai:glm-5.3"})
+            (job,) = agent.jobs.values()
+            self.assertEqual(job.agent.model_name, "zai:glm-5.3")
+            job.task.cancel()
+            await settle()
+
+    async def test_a_model_that_cannot_be_built_starts_nothing(self) -> None:
+        agent = self.agent()
+        with patch("paimon.agent.build_model", side_effect=ValueError("Unknown provider: nope.")):
+            answer = await agent._job_tool("spawn_agent", {"prompt": "go", "model": "nope:x"})
+        self.assertIn("cannot start an agent on 'nope:x': Unknown provider: nope.", answer)
+        self.assertIn("list_models", answer)
+        self.assertEqual(agent.jobs, {})
 
 
 class StopTest(JobsTestCase):

@@ -1887,7 +1887,12 @@ class SpawnAgentArgs(TypedDict):
     prompt: str
     """The new agent's only user message; must be self-contained."""
     model: NotRequired[str]
-    """Model for this agent only (optional; defaults to the current one)."""
+    """Model for this agent only, as 'provider:name' from list_models (optional; defaults to the current one)."""
+
+
+@_spec
+class ListModelsArgs(TypedDict):
+    pass
 
 
 @_spec
@@ -2070,6 +2075,18 @@ REGISTRY: dict[str, Tool] = {
         ),
         params=SpawnAgentArgs,
     ),
+    "list_models": Tool(
+        run=None,
+        access="none",
+        description=(
+            "List the models spawn_agent can start an agent on, across every "
+            "provider this profile is signed in to. Call it before giving an "
+            "agent a model other than your own, for a second opinion from a "
+            "different model or a cheaper one for simple work. The list is read "
+            "fresh on each call."
+        ),
+        params=ListModelsArgs,
+    ),
     # Starting a background command is the one job tool that reaches outside
     # the process, so it is the one with an access class of its own:
     # "background" rather than "execute" so the safe_command allowance can
@@ -2137,7 +2154,7 @@ INTERACTIVE_TOOLS = ("ask_user", "start_new_session")
 # The question, because a subagent works for the agent that started it, not
 # for the user: what it cannot settle belongs in its report, where the parent
 # can decide or ask on its behalf.
-SUBAGENT_DENIED = (*INTERACTIVE_TOOLS, *BACKGROUND_TOOLS, "spawn_agent", "stop_job")
+SUBAGENT_DENIED = (*INTERACTIVE_TOOLS, *BACKGROUND_TOOLS, "spawn_agent", "list_models", "stop_job")
 
 
 def without(registry: dict[str, Tool], names) -> dict[str, Tool]:

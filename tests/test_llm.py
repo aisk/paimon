@@ -82,7 +82,7 @@ class ProviderAvailabilityTest(unittest.TestCase):
     def test_login_only_offers_available_providers(self) -> None:
         from paimon.login import _providers
 
-        with patch("paimon.login._known_models", return_value=[
+        with patch("paimon.llm.known_models", return_value=[
             "zai:model", "anthropic:one", "bedrock:model", "anthropic:two", "unqualified",
         ]), patch("paimon.login.is_provider_available", side_effect=lambda name: name != "bedrock"):
             self.assertEqual(_providers(), ["anthropic", "chatgpt", "zai"])
