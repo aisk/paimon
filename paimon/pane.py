@@ -375,6 +375,7 @@ class SessionPane(Pane):
         self._cache_hit: float | None = None
         self._cache_reads = 0
         self._cache_inputs = 0
+        self._cache_reported = False
 
     @property
     def config(self):
@@ -601,6 +602,7 @@ class SessionPane(Pane):
         self._cache_hit = None
         self._cache_reads = 0
         self._cache_inputs = 0
+        self._cache_reported = False
 
     def new_session(self) -> None:
         if self.is_busy:
@@ -1110,11 +1112,14 @@ class SessionPane(Pane):
             self._set_state(None if self.config.show_reasoning else "thinking")
         elif isinstance(ev, RequestStats):
             self._tps = ev.output_tokens / ev.seconds
-            # Zero on both cache fields means the provider does not report
-            # caching, so no rate is shown rather than a misleading 0%.
-            if (ev.cache_read_tokens or ev.cache_write_tokens) and ev.input_tokens:
-                self._cache_reads += ev.cache_read_tokens
-                self._cache_inputs += ev.input_tokens
+            # A request that missed the cache entirely still counts against
+            # the rate. Only a session with no cache tokens at all, from a
+            # provider that reports none, shows no rate instead of 0%.
+            self._cache_reads += ev.cache_read_tokens
+            self._cache_inputs += ev.input_tokens
+            self._cache_reported = self._cache_reported or bool(
+                ev.cache_read_tokens or ev.cache_write_tokens)
+            if self._cache_reported and self._cache_inputs:
                 self._cache_hit = self._cache_reads / self._cache_inputs
             self._sync_statusbar(tokens=True)
         elif isinstance(ev, SessionHandoff):

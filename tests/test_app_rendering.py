@@ -74,6 +74,14 @@ class CacheHitStatusTest(AppTestCase):
             await pilot.pause()
             self.assertIn("cache hit 62%", str(app.query_one("#statusbar", Static).render()))
 
+    async def test_a_request_that_missed_the_cache_lowers_the_rate(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await app.pane._on_event(RequestStats(120, 2.5, 2000, 1600))
+            await app.pane._on_event(RequestStats(100, 2.0, 2000))
+            await pilot.pause()
+            self.assertIn("cache hit 40%", str(app.query_one("#statusbar", Static).render()))
+
     async def test_a_new_session_starts_a_fresh_count(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
