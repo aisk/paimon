@@ -28,7 +28,7 @@ The first launch asks for a provider, model, API base and key. Then just type wh
 
 While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** only reads, **auto** edits inside the working directory and has a second model call approve everything else, **yolo** checks nothing and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
 
-`Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can work in parallel: ask for two independent things and it starts a second agent in the background, whose answer comes back into the conversation when it is done. It can also leave a command running in a tab of its own, a dev server or a watcher, instead of holding up a turn.
+`Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. Paimon can work in parallel: ask for two independent things and it starts a second agent in a tab of its own, where you can watch it work and answer what it asks, and whose answer comes back into the conversation when it is done. Closing the tab stops it. It can also leave a command running in a tab, a dev server or a watcher, instead of holding up a turn.
 
 ## Web search
 
@@ -123,7 +123,7 @@ Read and auto modes run a small set of clearly read-only commands (`ls`, `cat`, 
 
 ## Architecture
 
-`Agent.run` is a UI-agnostic stream of events; the TUI, `--web` and headless mode are three renderers over that one stream. An agent holds the subagents and background commands it starts. A subagent is another `Agent` running as a task in the same process, and its answer is delivered to its parent as a message.
+`Agent.run` is a UI-agnostic stream of events; the TUI, `--web` and headless mode are three renderers over that one stream. An agent holds the subagents and background commands it starts. A subagent is another `Agent` running as a task in the same process, and its answer is delivered to its parent as a message. A UI that wants to show a job hooks `Agent.open_job`, which is how the TUI gives each one a pane.
 
 ```mermaid
 flowchart TD
@@ -136,7 +136,9 @@ flowchart TD
 
     subgraph tui["TUI widgets"]
         Pane["pane.py<br/>SessionPane"]
+        AgentPane["agentpane.py<br/>subagent pane"]
         CommandPane["commandpane.py<br/>background command pane"]
+        Transcript["transcript.py<br/>conversation log, event renderer"]
         Tabs["tabs.py<br/>pane strip"]
         Login["login.py<br/>provider / model / key"]
         UIWidgets["ui.py<br/>prompt input, confirmations"]
@@ -169,6 +171,7 @@ flowchart TD
     Headless --> Mentions
 
     App --> Pane
+    App --> AgentPane
     App --> CommandPane
     App --> Tabs
     App --> Login
@@ -177,9 +180,13 @@ flowchart TD
     Pane --> Jobs
     Pane --> AgentLoop
     Pane --> Diff
+    Pane --> Transcript
     Pane --> UIWidgets
     Pane --> LLM
+    AgentPane --> Pane
+    AgentPane --> Transcript
     CommandPane --> Pane
+    Transcript --> UIWidgets
     UIWidgets --> Diff
 
     AgentLoop --> LLM
@@ -190,6 +197,7 @@ flowchart TD
     AgentLoop --> Retry
     AgentLoop --> Mentions
     AgentLoop -. "spawn_agent" .-> AgentLoop
+    AgentLoop -. "spawn_agent" .-> AgentPane
     AgentLoop -. "run_background" .-> CommandPane
 
     PromptMod --> Skills

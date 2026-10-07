@@ -2,8 +2,9 @@
 
 The app is a container for panes: it owns the config, the theme, the command
 palette, the global bindings and the status bar. Everything belonging to one
-conversation lives in ``SessionPane``, and everything belonging to one
-background command in ``CommandPane``.
+conversation lives in ``SessionPane``, everything belonging to an agent one
+of them started in ``AgentPane``, and everything belonging to one background
+command in ``CommandPane``.
 """
 
 from functools import partial
@@ -15,7 +16,8 @@ from textual.content import Content
 from textual.widgets import ContentSwitcher, Static
 
 from . import herdr
-from .agent import Agent
+from .agent import Agent, Job
+from .agentpane import AgentPane
 from .config import DEFAULT_PROFILE, Config, list_profiles
 from .errors import PaimonError
 from .login import LoginScreen, PickerScreen, PromptScreen
@@ -90,28 +92,8 @@ class PaimonApp(App):
             SystemCommand("New pane", "Open another session alongside this one",
                           self.action_new_pane),
             SystemCommand("Close pane", "Close this session's pane", self.action_close_pane),
-            *self._agent_commands(),
             *self._skill_commands(),
         ]
-
-    def _agent_commands(self) -> list[SystemCommand]:
-        """One palette entry per agent the current conversation has running.
-
-        An agent has no tab to close, so this is the user's way to stop one.
-        """
-        pane = self._session()
-        if pane is None:
-            return []
-        return [
-            SystemCommand(f"Stop agent {job_id}", " ".join(job.label.split()),
-                          partial(self.action_stop_agent, job_id))
-            for job_id, job in pane.agent.jobs.items()
-            if job.kind == "agent" and job.running
-        ]
-
-    def action_stop_agent(self, job_id: str) -> None:
-        if (pane := self._session()) is not None:
-            pane.agent.stop_job(job_id, by_user=True)
 
     def _skill_commands(self) -> list[SystemCommand]:
         """One palette entry per skill the current conversation knows.
@@ -208,7 +190,7 @@ class PaimonApp(App):
         if self._herdr is None:
             return
         sessions = self.sessions
-        if any(pane.needs_confirm for pane in sessions):
+        if any(pane.needs_confirm for pane in self._panes):
             state = herdr.BLOCKED
         elif any(pane.is_busy or any(job.agent is not None and job.running
                                      for job in pane.agent.jobs.values()) for pane in sessions):
@@ -322,19 +304,21 @@ class PaimonApp(App):
             return
         await self._switcher.add_content(self._make_pane(agent))
 
-    # ---- background commands ------------------------------------------------
+    # ---- background jobs ----------------------------------------------------
 
-    async def open_command(self, owner: SessionPane, job_id: str, command,
-                           description: str) -> None:
-        """Open a background pane for a command ``owner``'s agent started.
+    async def open_job(self, owner: SessionPane, job_id: str, job: Job) -> None:
+        """Open a background pane for an agent or a command ``owner``'s agent started.
 
-        It is mounted hidden and never focused: the user asked for a command,
-        not for their keyboard to move.
+        It is mounted hidden and never focused: the user asked for work to be
+        done, not for their keyboard to move.
         """
         if len(self._panes) >= MAX_PANES:
             raise PaneLimitError(f"all {MAX_PANES} panes are in use; close one first")
-        pane = CommandPane(job_id, command, description, cwd=owner.cwd, mode=owner.mode,
-                           id=f"pane-{self._next_pane}")
+        pane_id = f"pane-{self._next_pane}"
+        if job.kind == "agent":
+            pane = AgentPane(owner.agent, job_id, job, id=pane_id)
+        else:
+            pane = CommandPane(job_id, job, cwd=owner.cwd, mode=owner.mode, id=pane_id)
         self._next_pane += 1
         self._panes.append(pane)
         try:
@@ -360,8 +344,7 @@ class PaimonApp(App):
 
         A background pane waiting for permission blocks whoever is waiting on
         it, so there has to be one key that always lands on it. The current
-        pane comes last: a confirmation for an agent it started sits above
-        the prompt without the keyboard, and this is how the user turns to it.
+        pane comes last, for a panel there that lost the keyboard to a click.
         """
         index = self._panes.index(self._current)
         rotated = self._panes[index + 1:] + self._panes[:index + 1]
@@ -433,8 +416,8 @@ class PaimonApp(App):
     # The palette and the key bindings live on the app, but every one of these
     # acts on a single conversation, so they only route to the current pane.
 
-    # A command's pane has no session, no mode and no turn, so each of these
-    # is routed to a conversation rather than to whatever is on screen.
+    # A pane showing an agent or a command is nobody's to steer, so each of
+    # these is routed to a conversation rather than to whatever is on screen.
 
     def action_new_session(self) -> None:
         if (pane := self._session()) is not None:
@@ -492,9 +475,7 @@ class PaimonApp(App):
         mid-turn silently swaps providers between two tool calls. Both refuse
         while any pane is running a turn.
         """
-        return any(pane.is_busy for pane in self.panes) or any(
-            job.agent is not None and job.running
-            for pane in self.sessions for job in pane.agent.jobs.values())
+        return any(pane.is_busy for pane in self.panes)
 
     def action_login(self) -> None:
         if self._config_is_busy():
@@ -581,6 +562,10 @@ class PaimonApp(App):
         pane = self.pane
         if isinstance(pane, SessionPane):
             parts = self._session_status(pane, tokens)
+        elif isinstance(pane, AgentPane):
+            agent = pane.job.agent
+            parts = [f"agent {pane.job_id}", f"{pane.mode} mode", agent.model_name or "no model",
+                     f"session {agent.session.id[:8]}"]
         else:
             parts = [f"command {pane.job_id}", pane.status_text, pane.command.command]
         # A pane blocked on a confirmation the user cannot see blocks whatever

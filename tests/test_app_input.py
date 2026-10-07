@@ -15,7 +15,7 @@ from textual.worker import WorkerCancelled
 from paimon.agent import replay_events
 from paimon.app import PaimonApp
 from paimon.turns import Outcome
-from paimon.pane import _EventRenderer
+from paimon.transcript import EventRenderer
 from paimon.session import (
     is_shell_message,
     shell_message,
@@ -520,7 +520,7 @@ class UserCommandTest(AppTestCase):
     async def test_replayed_history_shows_the_run_again(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             for event in replay_events([shell_message("echo hi", "hi")]):
                 await renderer.handle(event)
             await pilot.pause()

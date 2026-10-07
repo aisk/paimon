@@ -535,16 +535,15 @@ class PromptInput(TextArea):
 
 
 class BlockingPanel(Vertical, can_focus=True):
-    """A panel something is waiting on, shown above or in place of the prompt.
+    """A panel a turn is waiting on, shown in its pane until it is answered.
 
-    What the confirm and question panels have in common for the pane. One the
-    conversation itself raised hides the prompt and takes the keyboard; one
-    raised by an agent it started leaves both alone until the user turns to it.
+    What the confirm and question panels have in common for the pane. In a
+    conversation it takes the prompt's place, and the keyboard with it.
     """
 
 
 class ConfirmPanel(BlockingPanel):
-    """Inline confirmation for a dangerous tool call, shown in place of the prompt.
+    """Inline confirmation for a dangerous tool call, shown in the asking agent's pane.
 
     Resolves its future with "allow" or "deny". Shows what would actually
     run/change, not just a path: the detail scrolls, and content too large to
@@ -560,7 +559,7 @@ class ConfirmPanel(BlockingPanel):
     ]
 
     def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]",
-                 cwd: Path | None = None, source: str = "") -> None:
+                 cwd: Path | None = None) -> None:
         # No ID: several panes can have a panel up at once, and a shared ID
         # would make an app-wide query resolve to whichever one is first.
         super().__init__(classes="blocking-panel confirm-panel")
@@ -571,22 +570,13 @@ class ConfirmPanel(BlockingPanel):
         self._cwd = cwd
         self._future = future
         self._selected = 0
-        # Who is asking, when it is not the conversation on screen: an agent
-        # it started. Such a panel sits above the prompt without taking the
-        # keyboard, so the heading also says how to reach it.
-        self._source = source
 
     def compose(self) -> ComposeResult:
-        if self._source:
-            yield Static(Content.from_markup(
-                "[b]$source needs permission![/]  [$text-warning b]$tool[/]"
-                "  [$text-muted]ctrl+g to answer[/]", source=self._source, tool=self.tool_name))
-        else:
-            yield Static(
-                Content.from_markup(
-                    "[b]Paimon needs permission![/]  [$text-warning b]$tool[/]", tool=self.tool_name
-                )
+        yield Static(
+            Content.from_markup(
+                "[b]Paimon needs permission![/]  [$text-warning b]$tool[/]", tool=self.tool_name
             )
+        )
         with VerticalScroll(id="confirm-detail"):
             yield Static(self._detail())
         yield Static(id="confirm-options")

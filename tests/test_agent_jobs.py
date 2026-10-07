@@ -14,7 +14,7 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from paimon import agent as agent_module
 from paimon import headless, lockfile
-from paimon.agent import Agent, JobNotice, ToolEnd
+from paimon.agent import Agent, JobNotice, TextDelta, ToolEnd, UserInput
 from paimon.config import Config
 from paimon.session import Session, is_job_message, job_text
 from tests.support.agent import make_session, spawning_model, stub_model
@@ -167,13 +167,58 @@ class SpawnAgentTest(JobsTestCase):
     async def test_the_cap_refuses_one_more(self) -> None:
         agent = self.agent()
         gate = asyncio.Event()
-        prompts = [f"task {index}" for index in range(agent_module.MAX_JOBS + 1)]
+        prompts = [f"task {index}" for index in range(agent_module.MAX_AGENTS + 1)]
         with patch("paimon.agent.build_model", return_value=spawning_model(prompts, gate=gate)):
             events = await self.turn(agent)
             results = [event.result for event in events if isinstance(event, ToolEnd)]
-            self.assertEqual(len(agent.jobs), agent_module.MAX_JOBS)
+            self.assertEqual(len(agent.jobs), agent_module.MAX_AGENTS)
+            self.assertIn(f"limit {agent_module.MAX_AGENTS}", results[-1])
             self.assertIn("stop one before starting another", results[-1])
             gate.set()
+
+    async def test_a_ui_showing_the_child_gets_every_event_and_hears_the_end(self) -> None:
+        agent = self.agent()
+        shown: list = []
+        seen: list = []
+        ended: list = []
+
+        async def open_job(job_id: str, job) -> None:
+            shown.append((job_id, job.kind, job.label, job.running))
+
+            async def sink(event) -> None:
+                seen.append(event)
+
+            job.sink = sink
+            job.on_done = lambda: ended.append(job_id)
+
+        agent.open_job = open_job
+        await self.turn(agent, model=spawning_model(["check the parser"], answer="fine"))
+        await self.until(lambda: bool(agent.notices))
+
+        (job_id, kind, label, running), = shown
+        self.assertEqual((kind, label), ("agent", "check the parser"))
+        self.assertTrue(running, "it is on screen before its first step, and counts as live")
+        self.assertIsInstance(seen[0], UserInput)
+        self.assertEqual(seen[0].text, "check the parser", "its prompt opens the transcript")
+        self.assertEqual("".join(event.text for event in seen if isinstance(event, TextDelta)),
+                         "fine")
+        self.assertEqual(ended, [job_id])
+
+    async def test_a_child_that_cannot_be_shown_is_not_started(self) -> None:
+        agent = self.agent()
+        before = {session.path for session in Session.list(self.cwd, include_children=True)}
+
+        async def open_job(job_id: str, job) -> None:
+            raise RuntimeError("all 8 panes are in use")
+
+        agent.open_job = open_job
+        answer = await agent._job_tool("spawn_agent", {"prompt": "check the parser"})
+
+        self.assertIn("could not start an agent: all 8 panes are in use", answer)
+        self.assertEqual(agent.jobs, {})
+        for session in Session.list(self.cwd, include_children=True):
+            if session.path not in before:
+                self.assertFalse(lockfile.held(session.path), "its session is released")
 
     async def test_a_running_child_follows_its_parents_mode(self) -> None:
         agent = self.agent(mode="yolo")
@@ -281,7 +326,7 @@ class StopTest(JobsTestCase):
 
     async def test_a_child_stopped_before_its_first_step_is_still_released(self) -> None:
         agent = self.agent()
-        job_id = agent._spawn("check the parser", None)
+        job_id = await agent._spawn("check the parser", None)
         child = agent.jobs[job_id].agent
         self.assertTrue(lockfile.held(child.session.path))
 
@@ -310,7 +355,7 @@ class StopTest(JobsTestCase):
 
 
 class ChildConfirmTest(JobsTestCase):
-    """A child has no screen: what it has to ask goes through its parent."""
+    """A child asks where it is shown, and through its parent where it is not."""
 
     def setUp(self) -> None:
         # The project sits one level down, so the child's write lands outside
@@ -348,21 +393,29 @@ class ChildConfirmTest(JobsTestCase):
             await self.turn(agent)
             await self.until(lambda: bool(agent.notices))
 
-    async def test_the_ui_is_asked_with_the_childs_id(self) -> None:
-        agent = self.agent(mode="auto")
+    async def test_a_ui_showing_the_child_is_the_one_asked(self) -> None:
         asked: list = []
 
-        async def confirm_child(job_id: str, name: str, args: dict) -> bool:
-            asked.append((job_id in agent.jobs, name, args["path"]))
-            return True
+        async def parent_confirm(name: str, args: dict) -> bool:
+            asked.append("parent")
+            return False
 
-        agent.confirm_child = confirm_child
+        agent = self.agent(mode="auto", confirm=parent_confirm)
+
+        async def open_job(job_id: str, job) -> None:
+            async def confirm(name: str, args: dict) -> bool:
+                asked.append((name, args["path"]))
+                return True
+
+            job.agent.confirm = confirm
+
+        agent.open_job = open_job
         await self._child_writes(agent)
 
-        self.assertEqual(asked, [(True, "write_file", "../out.txt")])
+        self.assertEqual(asked, [("write_file", "../out.txt")])
         self.assertEqual(self.out.read_text(), "hi")
 
-    async def test_without_that_hook_the_parents_own_confirm_answers(self) -> None:
+    async def test_a_child_nobody_shows_asks_through_its_parent(self) -> None:
         asked: list = []
 
         async def confirm(name: str, args: dict) -> bool:
@@ -387,16 +440,17 @@ class BackgroundCommandTest(JobsTestCase):
         command = FakeCommand("npm run dev")
         shown: list = []
 
-        async def open_command(job_id: str, running, description: str) -> None:
-            shown.append((job_id, running, description))
+        async def open_job(job_id: str, job) -> None:
+            shown.append((job_id, job.command, job.label))
 
-        agent.open_command = open_command
+        agent.open_job = open_job
         with patch("paimon.tools.start_background", return_value=command):
             answer = await agent._job_tool(
                 "run_background", {"command": "npm run dev", "description": "dev server"})
-        (job_id,) = agent.jobs
+        ((job_id, _, _),) = shown
         self.assertIn(f"Started background command {job_id}", answer)
         self.assertEqual(shown, [(job_id, command, "dev server")], "the UI puts it on screen")
+        self.assertIn(job_id, agent.jobs)
         return job_id, command
 
     async def test_output_is_read_incrementally(self) -> None:
@@ -443,10 +497,10 @@ class BackgroundCommandTest(JobsTestCase):
         agent = self.agent()
         command = FakeCommand()
 
-        async def open_command(job_id: str, running, description: str) -> None:
+        async def open_job(job_id: str, job) -> None:
             raise RuntimeError("all 8 panes are in use")
 
-        agent.open_command = open_command
+        agent.open_job = open_job
         with patch("paimon.tools.start_background", return_value=command):
             answer = await agent._job_tool(
                 "run_background", {"command": "npm run dev", "description": "dev"})
@@ -454,6 +508,17 @@ class BackgroundCommandTest(JobsTestCase):
         self.assertIn("could not start the command: all 8 panes are in use", answer)
         self.assertTrue(command.killed, "or it would outlive the app in its own group")
         self.assertEqual(agent.jobs, {})
+
+    async def test_agents_at_their_cap_leave_room_for_a_command(self) -> None:
+        agent = self.agent()
+        gate = asyncio.Event()
+        prompts = [f"task {index}" for index in range(agent_module.MAX_AGENTS)]
+        await self.turn(agent, model=spawning_model(prompts, gate=gate))
+        self.assertEqual(len(agent.jobs), agent_module.MAX_AGENTS)
+
+        job_id, _ = await self._start(agent)
+        self.assertEqual(agent.jobs[job_id].kind, "command")
+        gate.set()
 
     async def test_an_agent_has_no_output_to_read(self) -> None:
         agent = self.agent()

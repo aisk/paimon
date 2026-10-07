@@ -17,6 +17,7 @@ from textual.app import ComposeResult
 from textual.content import Content
 from textual.widgets import RichLog, Static
 
+from .agent import Job
 from .pane import Pane
 from .tools import decode_output
 
@@ -33,13 +34,13 @@ _MAX_LINES = 5_000
 class CommandPane(Pane):
     """A running command, streamed into a tab of its own."""
 
-    def __init__(self, job_id: str, command, description: str, *, cwd, mode: str,
+    def __init__(self, job_id: str, job: Job, *, cwd, mode: str,
                  id: str | None = None) -> None:
         super().__init__(id=id)
         # The id the agent that started it calls it by.
         self.job_id = job_id
-        self.command = command  # a tools.BackgroundCommand
-        self.description = description
+        self.job = job
+        self.command = job.command
         # Where the command runs and the mode it was started under. Neither
         # means anything to the pane itself; they are what the app inherits
         # from if this is the last pane left when it closes.
@@ -68,8 +69,7 @@ class CommandPane(Pane):
 
     @property
     def tab_title(self) -> str:
-        label = " ".join((self.description or self.command.command).split()) or "command"
-        return f"{self.job_id} {label}"
+        return f"{self.job_id} {' '.join(self.job.label.split()) or 'command'}"
 
     @property
     def status_text(self) -> str:

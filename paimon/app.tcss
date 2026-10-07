@@ -5,7 +5,7 @@ Screen { background: $background; }
    minus the widest sibling margins, and the status bar's own 0 2 margin would
    otherwise shave four dead columns off the right edge of every pane. */
 #panes { height: 1fr; width: 100%; }
-SessionPane { height: 1fr; margin: 1 2 0 2; }
+SessionPane, AgentPane { height: 1fr; margin: 1 2 0 2; }
 
 /* ---- pane tabs ---- */
 

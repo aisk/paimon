@@ -58,6 +58,11 @@ _MAX_COMPACTION_FAILURES = 3
 # not on how long it goes on, since a finished agent frees its slot.
 MAX_JOBS = 8
 
+# Of those, how many may be agents. Tighter than the cap they share with
+# commands: every agent running is another model context being paid for at the
+# same time, and a model left to fan out freely burns through a quota fast.
+MAX_AGENTS = 4
+
 # Chars of a child agent's answer delivered to its parent. The answer lands in
 # the parent's context without the parent having asked for it, so it is kept
 # to what a report needs; the child's session log has the rest.
@@ -340,20 +345,26 @@ class Job:
     """An agent or a background command another agent started."""
 
     kind: str  # "agent" or "command"
-    # What ends with the job: the child's one turn, or the wait for the
-    # command to exit. Cancelling it is how a job is stopped without a notice.
-    task: asyncio.Task
     label: str = ""
     agent: Optional["Agent"] = None
     command: Optional[tools.BackgroundCommand] = None
+    # What ends with the job: the child's one turn, or the wait for the
+    # command to exit. Cancelling it is how a job is stopped without a notice.
+    # None only until the job has been put on screen, which comes first.
+    task: Optional[asyncio.Task] = None
     # How much of the command's output read_job has already handed over.
     cursor: int = 0
+    # Set by whoever shows an agent. The sink is awaited with every event of
+    # its turn, so drawing them is what paces it; on_done is called once when
+    # its task is over, however it ended.
+    sink: Optional[Callable[[AgentEvent], Awaitable[None]]] = None
+    on_done: Optional[Callable[[], None]] = None
 
     @property
     def running(self) -> bool:
         if self.command is not None:
             return self.command.running and not self.command.killed
-        return not self.task.done()
+        return self.task is None or not self.task.done()
 
 
 def _answer(history: list[ModelMessage], session_id: str) -> str:
@@ -435,15 +446,10 @@ class Agent:
         # Set by the UI. Called whenever a job starts or ends or a notice
         # arrives, so it can redraw and wake an idle conversation.
         self.on_jobs_changed: Optional[Callable[[], None]] = None
-        # Set by the UI: how a confirmation asked by a child reaches the user,
-        # called with the child's id so the panel can say who is asking. None
-        # falls back to this agent's own confirm hook.
-        self.confirm_child: Optional[Callable[[str, str, dict], Awaitable[bool]]] = None
-        # Set by the UI: puts a started background command on screen, awaited
-        # with (job id, command, description). None where there is no tab to
-        # show it in, and run_background then refuses.
-        self.open_command: Optional[
-            Callable[[str, tools.BackgroundCommand, str], Awaitable[None]]] = None
+        # Set by the UI: puts a job on screen before it gets under way,
+        # awaited with (job id, job). None where there is no tab to show it
+        # in: an agent then runs unseen, and run_background refuses.
+        self.open_job: Optional[Callable[[str, Job], Awaitable[None]]] = None
         self._closed = False
         # The tool budget of the turn in flight, which the agents it starts
         # inherit: an unattended run bounded for one agent is bounded for all.
@@ -909,7 +915,7 @@ class Agent:
             prompt = str(args.get("prompt") or "").strip()
             if not prompt:
                 return "Error: prompt is required."
-            if (full := self._no_room()) is not None:
+            if (full := self._no_room("agent")) is not None:
                 return full
             model = str(args.get("model") or "").strip() or None
             if model:
@@ -921,8 +927,8 @@ class Agent:
                     return (f"Error: cannot start an agent on {model!r}: {exc} "
                             "Call list_models for the ones available.")
             try:
-                job_id = self._spawn(prompt, model)
-            except Exception as exc:  # noqa: BLE001 — a session that would not open
+                job_id = await self._spawn(prompt, model)
+            except Exception as exc:  # noqa: BLE001 — a session or a tab that would not open
                 return f"Error: could not start an agent: {exc}"
             return (f"Started agent {job_id}; it is running now. Its answer is delivered "
                     "to you when it finishes, so carry on or end your turn.")
@@ -934,10 +940,10 @@ class Agent:
             command = str(args.get("command") or "").strip()
             if not command:
                 return "Error: command is required."
-            if self.open_command is None:
+            if self.open_job is None:
                 return ("Error: background commands only work in the interactive UI; "
                         "use shell instead.")
-            if (full := self._no_room()) is not None:
+            if (full := self._no_room("command")) is not None:
                 return full
             try:
                 job_id = await self._start_command(
@@ -1013,13 +1019,17 @@ class Agent:
                 + "\n".join(lines)
                 + "\nOther models of the same providers work too, when named exactly.")
 
-    def _no_room(self) -> Optional[str]:
-        """The refusal for a job that would exceed the cap, or None when there is room."""
-        live = sum(1 for job in self.jobs.values() if job.running)
-        if live < MAX_JOBS:
-            return None
-        return (f"Error: {live} agents and commands are already running (limit "
-                f"{MAX_JOBS}); stop one before starting another.")
+    def _no_room(self, kind: str) -> Optional[str]:
+        """The refusal for a job that would exceed a cap, or None when there is room."""
+        live = [job for job in self.jobs.values() if job.running]
+        agents = sum(1 for job in live if job.kind == "agent")
+        if kind == "agent" and agents >= MAX_AGENTS:
+            return (f"Error: {agents} agents are already running (limit {MAX_AGENTS}); "
+                    "wait for one to finish or stop one before starting another.")
+        if len(live) >= MAX_JOBS:
+            return (f"Error: {len(live)} agents and commands are already running (limit "
+                    f"{MAX_JOBS}); stop one before starting another.")
+        return None
 
     def _new_job_id(self) -> str:
         """An id no job of this agent is using.
@@ -1042,17 +1052,16 @@ class Agent:
         if self.on_jobs_changed is not None:
             self.on_jobs_changed()
 
-    def _spawn(self, prompt: str, model: Optional[str]) -> str:
+    async def _spawn(self, prompt: str, model: Optional[str]) -> str:
         """Start a child agent on ``prompt`` as a task of its own; returns its id."""
         job_id = self._new_job_id()
 
         async def confirm(name: str, args: dict) -> bool:
-            # Through the parent, hooks looked up per call: the child has no
-            # screen of its own, and whoever shows this conversation is who
-            # can ask. With nobody to ask (headless) it is denied, exactly as
-            # it would be for the parent.
-            if self.confirm_child is not None:
-                return await self.confirm_child(job_id, name, args)
+            # For a child nothing put on screen; a UI that shows it asks there
+            # instead. Through the parent, its hook looked up per call: whoever
+            # can ask for this conversation answers for the child too, and
+            # with nobody to ask (headless) it is denied, exactly as it would
+            # be for the parent.
             return await self.confirm(name, args) if self.confirm else False
 
         child = Agent.open(
@@ -1064,25 +1073,44 @@ class Agent:
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
             parent_session_id=self.session.id)
-        task = asyncio.ensure_future(self._run_child(child, prompt))
-        self.jobs[job_id] = job = Job("agent", task, label=prompt, agent=child)
+        job = Job("agent", label=prompt, agent=child)
+        # On screen before its first step, so nothing it does goes unseen.
+        if self.open_job is not None:
+            try:
+                await self.open_job(job_id, job)
+            except BaseException:
+                child.close()
+                raise
+        job.task = asyncio.ensure_future(self._run_child(job, prompt))
+        self.jobs[job_id] = job
         # A callback rather than a finally in the task: one cancelled before
         # its first step never enters the coroutine, and its session lock
         # would be held for the life of the process.
-        task.add_done_callback(lambda _: self._child_done(job_id, job))
+        job.task.add_done_callback(lambda _: self._child_done(job_id, job))
         self._notify()
         return job_id
 
-    async def _run_child(self, child: "Agent", prompt: str) -> str:
+    async def _run_child(self, job: Job, prompt: str) -> str:
         """Drive a child through its one turn; returns what it answered."""
-        # Its events go nowhere: the answer is all the parent gets.
-        async for _ in child.run(prompt, max_tool_calls=self._max_tool_calls):
-            pass
+        child = job.agent
+
+        async def emit(event: AgentEvent) -> None:
+            # Shown where somebody is showing the child, dropped otherwise:
+            # the answer is all the parent gets either way.
+            if job.sink is not None:
+                await job.sink(event)
+
+        # The prompt is an event like any other, as in a turn the user starts.
+        await emit(UserInput(prompt))
+        async for event in child.run(prompt, max_tool_calls=self._max_tool_calls):
+            await emit(event)
         return _answer(child.history, child.session.id)
 
     def _child_done(self, job_id: str, job: Job) -> None:
         """A child's task is over, however it ended: release it and report."""
         job.agent.close()
+        if job.on_done is not None:
+            job.on_done()
         if self.jobs.get(job_id) is job:
             del self.jobs[job_id]
         notice = None
@@ -1100,15 +1128,16 @@ class Agent:
         """Start a background command and put it on screen; returns its id."""
         job_id = self._new_job_id()
         running = await tools.start_background(command, self.cwd)
+        job = Job("command", label=description or command, command=running)
         try:
-            await self.open_command(job_id, running, description)
+            await self.open_job(job_id, job)
         except BaseException:
             # Nothing would ever kill it: no tab holds it and no job names it,
             # and it is in its own process group, so it would outlive the app.
             running.kill()
             raise
-        task = asyncio.ensure_future(self._watch_command(job_id, running))
-        self.jobs[job_id] = Job("command", task, label=description or command, command=running)
+        job.task = asyncio.ensure_future(self._watch_command(job_id, running))
+        self.jobs[job_id] = job
         self._notify()
         return job_id
 

@@ -28,7 +28,7 @@ uvx paimon
 
 运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 只读，**auto** 放行工作目录内的编辑，其余操作交给另一次模型调用审批，**yolo** 不做任何检查，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
-`Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 也能并行干活：让它同时做两件互不相干的事，它会在后台起第二个 agent，做完后结果会回到当前会话里。它也能把一条命令留在单独的 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
+`Ctrl+T` 在新 pane 里打开另一个会话，`Ctrl+W` 关闭当前 pane，`Ctrl+PageUp` 和 `Ctrl+PageDown` 在 pane 之间切换，`Ctrl+G` 跳到正在等待授权的 pane。Paimon 也能并行干活：让它同时做两件互不相干的事，它会在单独的 tab 里起第二个 agent，你可以在那里看它干活、回答它的授权请求，做完后结果会回到当前会话里，关掉 tab 就是停掉它。它也能把一条命令留在 tab 里跑，比如开发服务器或者文件监视，不占着当前回合。
 
 ## 网页搜索
 
@@ -121,7 +121,7 @@ read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`
 
 ## 架构
 
-`Agent.run` 产出一串与 UI 无关的事件流，TUI、`--web` 和无头模式都是这条事件流的渲染器。agent 自己持有它启动的子 agent 和后台命令。子 agent 是同一进程里作为任务运行的另一个 `Agent`，它的结果会作为一条消息送回父 agent。
+`Agent.run` 产出一串与 UI 无关的事件流，TUI、`--web` 和无头模式都是这条事件流的渲染器。agent 自己持有它启动的子 agent 和后台命令。子 agent 是同一进程里作为任务运行的另一个 `Agent`，它的结果会作为一条消息送回父 agent。想把 job 显示出来的 UI 挂上 `Agent.open_job` 即可，TUI 就是这样给每个 job 开 pane 的。
 
 ```mermaid
 flowchart TD
@@ -134,7 +134,9 @@ flowchart TD
 
     subgraph tui["TUI 组件"]
         Pane["pane.py<br/>SessionPane"]
+        AgentPane["agentpane.py<br/>子 agent pane"]
         CommandPane["commandpane.py<br/>后台命令 pane"]
+        Transcript["transcript.py<br/>对话记录与事件渲染"]
         Tabs["tabs.py<br/>pane 标签栏"]
         Login["login.py<br/>provider / 模型 / key"]
         UIWidgets["ui.py<br/>输入框、确认面板"]
@@ -167,6 +169,7 @@ flowchart TD
     Headless --> Mentions
 
     App --> Pane
+    App --> AgentPane
     App --> CommandPane
     App --> Tabs
     App --> Login
@@ -175,9 +178,13 @@ flowchart TD
     Pane --> Jobs
     Pane --> AgentLoop
     Pane --> Diff
+    Pane --> Transcript
     Pane --> UIWidgets
     Pane --> LLM
+    AgentPane --> Pane
+    AgentPane --> Transcript
     CommandPane --> Pane
+    Transcript --> UIWidgets
     UIWidgets --> Diff
 
     AgentLoop --> LLM
@@ -188,6 +195,7 @@ flowchart TD
     AgentLoop --> Retry
     AgentLoop --> Mentions
     AgentLoop -. "spawn_agent" .-> AgentLoop
+    AgentLoop -. "spawn_agent" .-> AgentPane
     AgentLoop -. "run_background" .-> CommandPane
 
     PromptMod --> Skills

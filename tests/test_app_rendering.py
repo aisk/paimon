@@ -13,7 +13,8 @@ from textual.widgets import Static
 from paimon import skills
 from paimon.agent import ReasoningDelta, RequestStats, TextDelta, ToolEnd, ToolStart
 from paimon.config import Config
-from paimon.pane import _EventRenderer, _session_label
+from paimon.pane import _session_label
+from paimon.transcript import EventRenderer
 from paimon.session import (
     Session,
 )
@@ -112,15 +113,15 @@ class TodoPanelTest(AppTestCase):
         app = self.make_app()
         async with app.run_test() as pilot:
             log = app.query_one("#log", VerticalScroll)
-            app.pane._show_todos(self._plan("in_progress", "pending"))
-            app.pane._show_todos(self._plan("completed", "in_progress"))
+            app.pane.transcript.show_todos(self._plan("in_progress", "pending"))
+            app.pane.transcript.show_todos(self._plan("completed", "in_progress"))
             await pilot.pause()
             panels = app.query(".todos")
             self.assertEqual(len(panels), 1, "consecutive revisions share one panel")
             self.assertIn("1/2", str(panels.first().render()))
 
-            app.pane._add_tool_result("output")
-            app.pane._show_todos(self._plan("completed", "completed"))
+            app.pane.transcript.add_tool_result("output")
+            app.pane.transcript.show_todos(self._plan("completed", "completed"))
             await pilot.pause()
             panels = app.query(".todos")
             self.assertEqual(len(panels), 2, "the earlier plan is left as a snapshot")
@@ -131,11 +132,11 @@ class TodoPanelTest(AppTestCase):
     async def test_clearing_removes_the_panel(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            app.pane._show_todos(self._plan("pending"))
-            app.pane._show_todos([])
+            app.pane.transcript.show_todos(self._plan("pending"))
+            app.pane.transcript.show_todos([])
             await pilot.pause()
             self.assertEqual(len(app.query(".todos")), 0)
-            self.assertIsNone(app.pane._todo_panel)
+            self.assertIsNone(app.pane.transcript._todo_panel)
 
 
 class EventCoverageTest(AppTestCase):
@@ -148,7 +149,7 @@ class EventCoverageTest(AppTestCase):
     async def test_every_event_puts_something_in_the_log(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             log = app.query_one("#log", VerticalScroll)
             for event in agent_events():
                 name = type(event).__name__
@@ -165,7 +166,7 @@ class ToolRenderingTest(AppTestCase):
     async def test_consecutive_calls_share_one_collapsed_group(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ToolStart("c1", "read_file", {"path": "a.py", "limit": 20}))
             await renderer.handle(ToolEnd("c1", "read_file", "one\ntwo"))
             await renderer.handle(ToolStart("c2", "shell", {"command": "pytest -q"}))
@@ -185,7 +186,7 @@ class ToolRenderingTest(AppTestCase):
     async def test_group_and_row_are_two_disclosure_levels(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             args = {"command": "echo one\necho two", "extra": {"large": "json"}}
             await renderer.handle(ToolStart("c1", "shell", args))
             await renderer.handle(ToolEnd("c1", "shell", "line one\nline two"))
@@ -212,7 +213,7 @@ class ToolRenderingTest(AppTestCase):
     async def test_prose_starts_a_new_group(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ToolStart("c1", "shell", {"command": "one"}))
             await renderer.handle(ToolEnd("c1", "shell", "ok"))
             await renderer.handle(TextDelta("between"))
@@ -223,7 +224,7 @@ class ToolRenderingTest(AppTestCase):
     async def test_edit_diff_is_hidden_until_its_row_opens(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ToolStart("c1", "edit_file", {
                 "path": "a.py", "old_string": "x = 1", "new_string": "x = 2"}))
             await pilot.pause()
@@ -240,7 +241,7 @@ class ToolRenderingTest(AppTestCase):
     async def test_failure_is_visible_without_showing_output(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ToolStart("c1", "shell", {"command": "pytest"}))
             await renderer.handle(ToolEnd("c1", "shell", "traceback\n(exit code 1)"))
             await pilot.pause()
@@ -254,7 +255,7 @@ class ReasoningDisplayTest(AppTestCase):
     async def test_reasoning_rendered_when_enabled(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ReasoningDelta("thinking hard"))
             await pilot.pause()
             widgets = app.query(".reasoning")
@@ -264,7 +265,7 @@ class ReasoningDisplayTest(AppTestCase):
     async def test_reasoning_folded_by_default(self) -> None:
         app = self.make_app()
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ReasoningDelta("line one\nline two\nline three"))
             await pilot.pause()
             body = str(app.query(".reasoning").first().render())
@@ -275,7 +276,7 @@ class ReasoningDisplayTest(AppTestCase):
     async def test_live_reasoning_folds_when_the_block_ends(self) -> None:
         app = self.make_app(config=Config(model="test-model", show_reasoning=True))
         async with app.run_test() as pilot:
-            renderer = _EventRenderer(app.pane)
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ReasoningDelta("line one\nline two"))
             await pilot.pause()
             widget = app.query(".reasoning").first()
@@ -332,7 +333,7 @@ class SkillPaletteTest(AppTestCase):
             self.assertEqual(app.pane.query_one(PromptInput).text, "/skill:demo ")
 
             body = skills.expand_skill_command("/skill:demo and more", app.pane.agent.skills)
-            app.pane._add_user(body)
+            app.pane.transcript.add_user(body)
             await pilot.pause()
             folded = app.pane.query(".skill-invocation")
             self.assertEqual(len(folded), 1)

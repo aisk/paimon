@@ -7,6 +7,7 @@ from pydantic_ai.models.function import FunctionModel
 from textual.widgets import RichLog, Static
 
 from paimon import lockfile
+from paimon.agentpane import AgentPane
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.commandpane import CommandPane
 from paimon.session import Session, is_job_message
@@ -22,7 +23,7 @@ from tests.support.turns import FakeCommand
 
 
 class SpawnAgentTest(AppTestCase):
-    """spawn_agent in the UI: work in the background, reported in this pane."""
+    """spawn_agent in the UI: work in a tab of its own, reported to its parent."""
 
     async def _spawn(self, app: PaimonApp, pilot) -> str:
         app.pane.handle_submit(PromptInput.Submitted("go"))
@@ -30,7 +31,7 @@ class SpawnAgentTest(AppTestCase):
             [m for m in app.pane.agent.history if is_job_message(m)]))
         return next(iter(app.pane.agent.jobs), "")
 
-    async def test_an_agent_opens_no_pane_and_shows_in_the_status_bar(self) -> None:
+    async def test_an_agent_runs_in_a_background_tab_that_goes_when_it_does(self) -> None:
         app = self.make_app(mode="yolo")
         gate = asyncio.Event()
         with patch("paimon.agent.build_model",
@@ -40,16 +41,54 @@ class SpawnAgentTest(AppTestCase):
                 job_id = await self._spawn(app, pilot)
                 await self._wait_for(pilot, lambda: not parent.is_busy)
 
-                self.assertEqual(len(app.panes), 1, "an agent is not a tab")
-                self.assertIs(app.focused, parent.query_one(PromptInput))
+                self.assertEqual(len(app.panes), 2)
+                child = app.panes[1]
+                self.assertIsInstance(child, AgentPane)
+                self.assertIs(app.pane, parent, "starting an agent does not switch panes")
+                self.assertFalse(child.display)
+                self.assertIs(app.focused, parent.query_one(PromptInput),
+                              "a pane the user did not open takes no keys")
+                self.assertIn(f"{job_id} check the parser", self._tab_text(app, child))
+                self.assertTrue(child.is_running)
                 self.assertIn(job_id, self._log_text(parent),
                               "the parent is told the id it has to use")
                 self.assertIn("1 agent running",
                               str(app.query_one("#statusbar", Static).render()))
+                await self._wait_for(
+                    pilot, lambda: "check the parser" in self._log_text(child))
+
+                app._switch_to(child)
+                await pilot.pause()
+                bar = str(app.query_one("#statusbar", Static).render())
+                self.assertIn(f"agent {job_id}", bar)
+                self.assertIn(f"session {child.job.agent.session.id[:8]}", bar)
+
                 gate.set()
-                await self._wait_for(pilot, lambda: not parent.agent.jobs)
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
+                self.assertIs(app.pane, parent, "the screen falls back to a pane still there")
+                await self._wait_for(
+                    pilot, lambda: f"agent {job_id} finished" in self._log_text(parent))
                 await self._wait_for(pilot, lambda: "agent running" not in str(
                     app.query_one("#statusbar", Static).render()))
+
+    async def test_no_free_pane_refuses_the_agent(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"])):
+            async with app.run_test() as pilot:
+                for _ in range(MAX_PANES - 1):
+                    await app.action_new_pane()
+                parent = app.panes[0]
+                app._switch_to(parent)
+                parent.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(
+                    pilot, lambda: "panes are in use" in self._log_text(parent))
+                self.assertEqual(len(app.panes), MAX_PANES)
+                self.assertEqual(parent.agent.jobs, {})
+                for session in Session.list(parent.cwd, include_children=True):
+                    if session.parent_id == parent.agent.session.id:
+                        self.assertFalse(lockfile.held(session.path),
+                                         "the child that never ran holds nothing")
 
     async def test_a_finished_child_wakes_the_idle_parent(self) -> None:
         app = self.make_app(mode="yolo")
@@ -122,7 +161,7 @@ class SpawnAgentTest(AppTestCase):
                 gate.set()
                 await self._wait_for(pilot, lambda: not parent.agent.jobs)
 
-    async def test_the_palette_stops_one_agent_and_the_model_hears_of_it(self) -> None:
+    async def test_closing_its_tab_stops_one_agent_and_the_model_hears_of_it(self) -> None:
         app = self.make_app(mode="yolo")
         gate = asyncio.Event()
         with patch("paimon.agent.build_model",
@@ -132,17 +171,32 @@ class SpawnAgentTest(AppTestCase):
                 await self._spawn(app, pilot)
                 await self._wait_for(pilot, lambda: not parent.is_busy)
                 first, second = parent.agent.jobs
-                titles = [command.title for command in app.get_system_commands(app.screen)]
-                self.assertIn(f"Stop agent {first}", titles)
-                self.assertIn(f"Stop agent {second}", titles)
+                self.assertEqual([pane.job_id for pane in app.panes[1:]], [first, second])
 
-                app.action_stop_agent(first)
+                app._switch_to(app.panes[1])
+                await pilot.press("ctrl+w")
                 await self._wait_for(
                     pilot, lambda: f"agent {first} was stopped by the user"
                     in self._log_text(parent))
                 self.assertEqual(list(parent.agent.jobs), [second], "the other one carries on")
+                self.assertEqual([pane.job_id for pane in app.panes[1:]], [second])
                 gate.set()
                 await self._wait_for(pilot, lambda: not parent.agent.jobs)
+
+    async def test_stopping_it_from_the_model_closes_the_tab(self) -> None:
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                job_id = await self._spawn(app, pilot)
+                await self._wait_for(pilot, lambda: not parent.is_busy)
+
+                answer = await parent.agent._job_tool("stop_job", {"job_id": job_id})
+                self.assertIn("Stopped agent", answer)
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
+                self.assertEqual(parent.agent.notices, [])
 
     async def test_changing_the_session_stops_its_agents(self) -> None:
         app = self.make_app(mode="yolo")
@@ -166,98 +220,102 @@ class SpawnAgentTest(AppTestCase):
                 self.assertIn(job_id, log)
                 self.assertEqual(parent.agent.jobs, {})
                 self.assertEqual(old.notices, [], "the conversation left behind hears nothing")
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
 
 
 class ChildConfirmationTest(AppTestCase):
-    """A child's confirmation shows in its parent's pane, beside the prompt."""
+    """A child's confirmation shows in the child's own pane."""
 
-    async def _ask(self, app: PaimonApp, pilot, job_id: str = "a1f2") -> asyncio.Future:
-        task = asyncio.ensure_future(
-            app.pane._confirm_child(job_id, "shell", {"command": "rm -rf build"}))
-        await self._wait_for(pilot, lambda: bool(app.pane.query(ConfirmPanel)))
+    async def _child(self, app: PaimonApp, pilot) -> AgentPane:
+        app.pane.handle_submit(PromptInput.Submitted("go"))
+        await self._wait_for(pilot, lambda: len(app.panes) == 2)
+        await self._wait_for(pilot, lambda: not app.panes[0].is_busy)
+        return app.panes[1]
+
+    async def _ask(self, pilot, child: AgentPane, command: str = "rm -rf build") -> asyncio.Future:
+        # Through the hook the child's agent was given, as its loop would.
+        task = asyncio.ensure_future(child.job.agent.confirm("shell", {"command": command}))
+        await self._wait_for(pilot, lambda: child.needs_confirm)
         return task
 
-    async def test_it_does_not_take_the_keyboard_from_a_draft(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            prompt = app.pane.query_one(PromptInput)
-            await pilot.press("h", "i")
-            task = await self._ask(app, pilot)
+    async def test_it_waits_in_the_childs_tab_without_taking_the_keyboard(self) -> None:
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                prompt = parent.query_one(PromptInput)
+                child = await self._child(app, pilot)
+                await pilot.press("h", "i")
+                task = await self._ask(pilot, child)
 
-            self.assertTrue(prompt.display, "the prompt stays where it was")
-            self.assertIs(app.focused, prompt)
-            await pilot.press("y")
-            await pilot.pause()
-            self.assertEqual(prompt.text, "hiy", "typing goes on into the draft")
-            self.assertFalse(task.done(), "and answers nothing")
-            self.assertTrue(app.pane.needs_confirm)
-            self.assertIn("agent a1f2 needs permission",
-                          str(app.pane.query_one(ConfirmPanel).children[0].render()))
+                self.assertFalse(parent.query(ConfirmPanel), "nothing lands in the parent")
+                self.assertIs(app.focused, prompt)
+                await pilot.press("y")
+                await pilot.pause()
+                self.assertEqual(prompt.text, "hiy", "typing goes on into the draft")
+                self.assertFalse(task.done(), "and answers nothing")
+                self.assertFalse(child.is_running, "it is waiting, not working")
+                self.assertTrue(app.query_one(f"#tab-{child.id}").has_class("-attention"))
+                self.assertIn("1 waiting on you",
+                              str(app.query_one("#statusbar", Static).render()))
 
-            await pilot.press("ctrl+g")
-            await pilot.pause()
-            self.assertIs(app.focused, app.pane.query_one(ConfirmPanel))
-            await pilot.press("y")
-            self.assertTrue(await task)
-            await pilot.pause()
-            self.assertIs(app.focused, prompt, "the keyboard goes back to the draft")
-            self.assertEqual(prompt.text, "hiy")
-            self.assertFalse(app.pane.needs_confirm)
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                self.assertIs(app.pane, child)
+                self.assertIs(app.focused, child.query_one(ConfirmPanel))
+                await pilot.press("y")
+                self.assertTrue(await task)
+                await pilot.pause()
+                self.assertFalse(child.needs_confirm)
+                self.assertTrue(child.is_running)
+                gate.set()
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
 
-    async def test_swapping_the_session_under_a_panel_keeps_the_count_right(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            pane = app.pane
-            task = await self._ask(app, pilot)
-            old = pane.driver
-            self.assertEqual(old.blocked, 1)
+    async def test_two_confirmations_at_once_are_asked_in_turn(self) -> None:
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                child = await self._child(app, pilot)
+                app._switch_to(child)
+                first = await self._ask(pilot, child)
+                second = asyncio.ensure_future(child._confirm("shell", {"command": "ls"}))
+                await pilot.pause()
+                self.assertEqual(len(child.query(ConfirmPanel)), 1,
+                                 "a second panel would strand the first one's answer")
 
-            pane.new_session()
-            task.cancel()  # what stopping the child does to its confirmation
-            await self._wait_for(pilot, lambda: not pane.query(ConfirmPanel))
+                await self._wait_for(
+                    pilot, lambda: app.focused is child.query_one(ConfirmPanel))
+                await pilot.press("n")
+                self.assertFalse(await first)
+                await self._wait_for(pilot, lambda: child.needs_confirm and len(
+                    child.query(ConfirmPanel)) == 1 and app.focused in child.query(ConfirmPanel))
+                self.assertFalse(second.done())
+                await pilot.press("y")
+                self.assertTrue(await second)
+                gate.set()
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
 
-            self.assertIsNot(pane.driver, old)
-            self.assertEqual(pane.driver.blocked, 0, "the new session owes nothing")
-            self.assertFalse(pane.needs_confirm)
-            self.assertTrue(pane.query_one(PromptInput).display)
+    async def test_closing_the_tab_with_a_panel_up_stops_the_agent(self) -> None:
+        app = self.make_app(mode="yolo")
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=asyncio.Event())):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                child = await self._child(app, pilot)
+                task = await self._ask(pilot, child)
+                app._switch_to(child)
 
-    async def test_two_children_asking_at_once_are_asked_in_turn(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            first = await self._ask(app, pilot, "aaaa")
-            second = asyncio.ensure_future(
-                app.pane._confirm_child("bbbb", "shell", {"command": "ls"}))
-            await pilot.pause()
-            self.assertEqual(len(app.pane.query(ConfirmPanel)), 1,
-                             "a second panel would strand the first one's answer")
-
-            await pilot.press("ctrl+g")
-            await pilot.press("n")
-            self.assertFalse(await first)
-            await self._wait_for(pilot, lambda: "agent bbbb" in str(
-                app.pane.query_one(ConfirmPanel).children[0].render()))
-            self.assertFalse(second.done())
-            await pilot.press("ctrl+g")
-            await pilot.press("y")
-            self.assertTrue(await second)
-
-    async def test_the_parents_own_confirmation_waits_behind_a_childs(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            child = await self._ask(app, pilot)
-            own = asyncio.ensure_future(app.pane._confirm("shell", {"command": "echo hi"}))
-            await pilot.pause()
-            self.assertEqual(len(app.pane.query(ConfirmPanel)), 1)
-            self.assertFalse(child.done(), "the child's panel was not swept away")
-
-            await pilot.press("ctrl+g")
-            await pilot.press("y")
-            self.assertTrue(await child)
-            await self._wait_for(pilot, lambda: not app.pane.query_one(PromptInput).display)
-            await self._wait_for(
-                pilot, lambda: app.focused is app.pane.query_one(ConfirmPanel))
-            await pilot.press("y")
-            self.assertTrue(await own)
+                await pilot.press("ctrl+w")
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
+                task.cancel()  # what stopping the child does to its confirmation
+                await self._wait_for(pilot, lambda: not parent.agent.jobs)
+                self.assertFalse(parent.needs_confirm)
+                await self._wait_for(pilot, lambda: "waiting on you" not in str(
+                    app.query_one("#statusbar", Static).render()))
 
 
 # What the command prints, as opposed to the command line itself, which also

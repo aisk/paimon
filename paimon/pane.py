@@ -14,16 +14,15 @@ from datetime import datetime
 from pydantic_ai.messages import ModelRequest
 from textual import events, on, work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.message import Message
-from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
-from textual.widgets.markdown import MarkdownStream
 
 from . import lockfile, tools
 from .agent import (
     Agent,
+    Job,
     JobNotice,
     CompactionNotice,
     ContextCompactionFailed,
@@ -32,8 +31,6 @@ from .agent import (
     ReasoningDelta,
     RequestStats,
     SessionHandoff,
-    ShellRun,
-    TextDelta,
     TodosUpdate,
     ToolEnd,
     ToolStart,
@@ -44,30 +41,14 @@ from .agent import (
 from .turns import TurnDriver, Outcome, Result, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, resume_hint, shell_message
-from .skills import parse_skill_block
+from .transcript import EventRenderer, Transcript
 from .ui import (
-    AssistantMessage,
     BlockingPanel,
     ConfirmPanel,
     QuestionPanel,
-    FoldedText,
     PromptInput,
     RecapMessage,
-    ToolCall,
-    ToolEntry,
-    ToolGroup,
-    ToolResult,
-    UserMessage,
 )
-
-# All three markers are East Asian Width "narrow", so the labels stay aligned on
-# terminals that render ambiguous-width glyphs double-wide. Finished work is
-# struck through and dimmed to keep the accent on whatever is in progress.
-_TODO_STYLE = {
-    "completed": ("✓", "$text-disabled strike"),
-    "in_progress": ("▸", "$text-accent b"),
-    "pending": ("◦", "$text-muted"),
-}
 
 # One is picked whenever the spinner enters a new state, Genshin style.
 # The spinner only covers stretches with no visible stream: "thinking" while
@@ -108,166 +89,12 @@ def _session_label(session: Session) -> str:
     return f"{when} · {session.id[:8]} · {preview}"
 
 
-class _EventRenderer:
-    """Renders agent events into a pane's log.
-
-    The single rendering path: live turns and resumed-history replay both feed
-    events through ``handle``, so history always looks like it did live.
-    """
-
-    def __init__(self, pane: "SessionPane") -> None:
-        self._pane = pane
-        self._stream: MarkdownStream | None = None
-        self._reasoning: FoldedText | None = None
-        self._reasoning_buf = ""
-        self._first_text_block = True
-        # Consecutive calls between prose blocks share one collapsed activity
-        # group. Entries stay addressable by call id until their result arrives.
-        self._tool_group: ToolGroup | None = None
-        self._tool_entries: dict[str, ToolEntry] = {}
-
-    async def handle(self, ev: object) -> None:
-        if isinstance(ev, UserInput):
-            await self.close()
-            self._first_text_block = True
-            self._pane._add_user(ev.text)
-
-        elif isinstance(ev, CompactionNotice):
-            await self.close()
-            self._first_text_block = True
-            self._pane._add(Content.from_markup("[$text-muted]Earlier context was compacted[/]"))
-
-        elif isinstance(ev, JobNotice):
-            await self.close()
-            self._first_text_block = True
-            # The first line names the job and how it ended; an agent's answer
-            # follows it and folds like any other result.
-            header, _, body = ev.text.partition("\n")
-            header = header.rstrip(":")
-            self._pane._add(Content.from_markup("[$text-muted]$text[/]", text=header))
-            if body:
-                self._pane._add_tool_result(body, label=header)
-
-        elif isinstance(ev, ShellRun):
-            # Replay only: a command run live is logged as it happens, by the
-            # worker that runs it, so its output is on screen before the model
-            # ever hears about it.
-            await self.close()
-            self._first_text_block = True
-            step = await self._pane._add_shell_call(ev.command)
-            self._pane._add_tool_result(ev.output, label=ev.command, container=step)
-
-        elif isinstance(ev, ReasoningDelta):
-            self._reasoning_buf += ev.text
-            if self._reasoning is None:
-                self._reasoning = FoldedText(
-                    "",
-                    classes="reasoning",
-                    expanded=self._pane.config.show_reasoning,
-                    label="reasoning",
-                )
-                await self._pane.query_one("#log", VerticalScroll).mount(self._reasoning)
-            self._reasoning.set_text(self._reasoning_buf)
-
-        elif isinstance(ev, TextDelta):
-            if self._stream is None:
-                await self._close_content()
-                self._finish_tool_group()
-                widget = AssistantMessage("", heading=self._first_text_block)
-                self._first_text_block = False
-                # Await the mount so the initial document (the Paimon heading)
-                # is rendered before the stream appends to it.
-                await self._pane.query_one("#log", VerticalScroll).mount(widget)
-                self._stream = AssistantMessage.get_stream(widget)
-            await self._stream.write(ev.text)
-
-        elif isinstance(ev, ToolStart):
-            # Reasoning immediately before a call belongs in that call's hidden
-            # detail rather than taking another line in the conversation.
-            reasoning = self._reasoning
-            await self._close_content()
-            if reasoning is not None:
-                await reasoning.remove()
-            group = await self._enter_tool_group()
-            self._tool_entries[ev.id] = await group.add_call(ev.name, ev.args, reasoning)
-
-        elif isinstance(ev, TodosUpdate):
-            await self.close()
-            self._pane._show_todos(ev.todos)
-
-        elif isinstance(ev, ToolEnd):
-            entry = self._tool_entries.pop(ev.id, None)
-            if entry is None:
-                # Tolerate an incomplete/old log with a result but no call.
-                self._pane._add_tool_result(ev.result, label=ev.name, denied=ev.denied)
-            else:
-                label = f"{ev.name} {entry.summary}"
-                await entry.finish(ev.result, label=label, denied=ev.denied)
-                if self._tool_group is not None:
-                    self._tool_group.refresh_header()
-
-        elif isinstance(ev, ContextCompacted):
-            await self.close()
-            self._pane._add(
-                Content.from_markup(
-                    "[$text-muted]Context compacted: $before → ~$after tokens[/]",
-                    before=f"{ev.tokens_before:,}",
-                    after=f"{ev.tokens_after:,}",
-                )
-            )
-
-        elif isinstance(ev, ContextCompactionFailed):
-            await self.close()
-            self._pane._add(
-                Content.from_markup(
-                    "[$text-warning]Context compaction failed; continuing without it: $error[/]",
-                    error=ev.error,
-                )
-            )
-
-        elif isinstance(ev, ModelRetry):
-            await self.close()
-            self._pane._add(
-                Content.from_markup(
-                    "[$text-warning]$error — retrying in $delay s ($attempt/$total)[/]",
-                    error=ev.error,
-                    delay=f"{ev.delay:g}",
-                    attempt=str(ev.attempt),
-                    total=str(ev.max_attempts - 1),
-                )
-            )
-
-    async def _enter_tool_group(self) -> ToolGroup:
-        if self._tool_group is None:
-            self._tool_group = ToolGroup(self._pane.cwd)
-            await self._pane.query_one("#log", VerticalScroll).mount(self._tool_group)
-        return self._tool_group
-
-    def _finish_tool_group(self) -> None:
-        self._tool_group = None
-
-    async def _close_content(self) -> None:
-        if self._stream is not None:
-            await self._stream.stop()
-            self._stream = None
-        if self._reasoning is not None and self._pane.config.show_reasoning:
-            # Fold the live stream now that the block is over; blocks the user
-            # clicked open themselves are left alone.
-            self._reasoning.collapse()
-        self._reasoning = None
-        self._reasoning_buf = ""
-
-    async def close(self) -> None:
-        """End current content and make the next call start a fresh group."""
-        await self._close_content()
-        self._finish_tool_group()
-
-
 class Pane(Vertical):
     """What the app and the tab strip may assume about any pane.
 
-    Two kinds share the strip: a conversation (``SessionPane``) and a
-    background command (``CommandPane``). Everything app-wide — switching,
+    Three kinds share the strip: a conversation (``SessionPane``), an agent a
+    conversation started (``AgentPane``) and a background command
+    (``CommandPane``). Everything app-wide — switching,
     closing, the tab label, the status bar — goes through this class, and only
     the session-specific actions look at the concrete type.
 
@@ -333,11 +160,12 @@ class SessionPane(Pane):
 
     def __init__(self, agent: Agent, *, resumed: bool = False, id: str | None = None) -> None:
         super().__init__(id=id)
-        # One confirmation or question on screen at a time. The conversation
-        # and every agent it started ask through this pane, and a second panel
+        # One confirmation or question on screen at a time: a second panel
         # mounting over the first would leave the first one's answer waiting
         # forever.
         self._panel_lock = asyncio.Lock()
+        # Made here rather than in compose: _adopt points a renderer at it.
+        self.transcript = Transcript(id="log")
         self._compacting = False
         # Set before _adopt, which cancels whatever recap the pane had armed.
         self._recap_timer = None
@@ -363,7 +191,6 @@ class SessionPane(Pane):
         self._phrase = ""
         self._turn_started = 0.0
         self._status_timer = None
-        self._todo_panel: Static | None = None
         self._queue: list[str] = []
         # Finished "!" runs waiting for a gap in the running turn to be
         # appended to the history. Kept apart from ``_queue``: these already
@@ -419,7 +246,7 @@ class SessionPane(Pane):
         return " ".join(self._title.split()) or "new session"
 
     def notice(self, renderable) -> None:
-        self._add(renderable)
+        self.transcript.add(renderable)
 
     def close(self) -> None:
         """Give up everything this pane owns; the app removes the widget.
@@ -453,7 +280,7 @@ class SessionPane(Pane):
             self.agent.close()
 
     def compose(self) -> ComposeResult:
-        yield VerticalScroll(id="log")
+        yield self.transcript
         status = Horizontal(
             LoadingIndicator(),
             Static(classes="status-label"),
@@ -472,7 +299,6 @@ class SessionPane(Pane):
         # The first driver is built in __init__, before there is a loop to
         # run it; every later one is started by _swap_agent as it is made.
         self.driver.start()
-        self.query_one("#log", VerticalScroll).anchor()
         self._focus_input()
         self._refresh_mode()
         if self._resumed:
@@ -510,9 +336,7 @@ class SessionPane(Pane):
 
         A panel that has taken the prompt's place wins over it: the prompt is
         hidden underneath, and switching to a pane to answer it has to land on
-        the panel or the keys go nowhere. A panel raised by an agent this
-        conversation started sits above a prompt that is still there, and the
-        prompt keeps the keyboard.
+        the panel or the keys go nowhere.
 
         Widget.focusable only looks at ``visible``, which is unrelated to
         ``display``, so a hidden pane focusing anything really does take the
@@ -522,18 +346,7 @@ class SessionPane(Pane):
             return
         prompt = self.query_one(PromptInput)
         panels = self.query(BlockingPanel)
-        if isinstance(self.app.focused, BlockingPanel) and self.app.focused in panels:
-            # The user turned to it; a turn ending elsewhere must not take the
-            # keyboard back, or their answer lands in the prompt.
-            return
         (prompt if prompt.display or not panels else panels.last()).focus()
-
-    def focus_attention(self) -> None:
-        """Turn to the pending confirmation or question, whoever raised it."""
-        if not self.is_current:
-            return
-        panels = self.query(BlockingPanel)
-        (panels.last() if panels else self.query_one(PromptInput)).focus()
 
     # ---- session switching --------------------------------------------------
 
@@ -542,16 +355,15 @@ class SessionPane(Pane):
         self._cancel_recap()
         self.agent = agent
         agent.confirm = self._confirm
-        agent.confirm_child = self._confirm_child
         agent.ask = self._ask
         agent.pending = self._take_queued
         agent.on_jobs_changed = self._jobs_changed
-        agent.open_command = self._open_command
+        agent.open_job = self._open_job
         # One renderer per conversation rather than one per turn: a turn now
         # opens with a UserInput event, which is what resets it. A new one per
         # agent, so a swapped-out session cannot leave a live markdown stream
         # pointing at a log that has just been emptied.
-        self._renderer = _EventRenderer(self)
+        self._renderer = EventRenderer(self.transcript, self.agent)
         self.driver = TurnDriver(agent)
         self.driver.sink = self._on_event
         self.driver.on_change = self._on_change
@@ -581,17 +393,17 @@ class SessionPane(Pane):
 
     def _report_killed(self, killed: list[str]) -> None:
         if killed:
-            self._add(Content.from_markup(
+            self.transcript.add(Content.from_markup(
                 "[$text-muted]Stopped $n job(s) started by the previous session: $ids[/]",
                 n=str(len(killed)), ids=", ".join(killed)))
 
     async def _show_resumed(self) -> None:
-        renderer = _EventRenderer(self)
+        renderer = EventRenderer(self.transcript, self.agent)
         events = replay_events(self.agent.history)
         for ev in events:
             await renderer.handle(ev)
         await renderer.close()
-        self._add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
+        self.transcript.add(Content.from_markup("[$text-muted]Resumed session $id[/]", id=self.agent.session.id[:8]))
         self._sync_statusbar(tokens=True)
         # Coming back to a session is when a recap is wanted most, so this one
         # does not wait for the idle timer. Same bar as after a turn: there
@@ -619,12 +431,11 @@ class SessionPane(Pane):
         self._swap_agent(agent)
         self._title = ""
         self._reset_measurements()
-        self.query_one("#log", VerticalScroll).remove_children()
-        self._todo_panel = None
+        self.transcript.clear()
         self._queue.clear()
         self._pending_shell.clear()
         self._refresh_queued()
-        self._add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
+        self.transcript.add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._report_killed(killed)
         self._sync_statusbar()
         self._notify_state()
@@ -637,14 +448,14 @@ class SessionPane(Pane):
             agent = Agent.open(cwd=self.agent.cwd, session=forked, confirm=self._confirm,
                                mode=self.mode, config=self.config, toolset=self.agent.toolset)
         except SessionError as exc:
-            self._add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
+            self.transcript.add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
             return
         # The conversation on screen is the fork's history verbatim, so the
         # log stays; only the agent underneath changes.
         agent.todos = list(self.agent.todos)
         killed = self._retire_agent()
         self._swap_agent(agent)
-        self._add(Content.from_markup("[$text-muted]Forked session $id[/]", id=agent.session.id[:8]))
+        self.transcript.add(Content.from_markup("[$text-muted]Forked session $id[/]", id=agent.session.id[:8]))
         self._report_killed(killed)
         self._sync_statusbar()
         self._notify_state()
@@ -662,7 +473,7 @@ class SessionPane(Pane):
                   for session in Session.list(self.agent.cwd)
                   if not lockfile.held(session.path)}
         if not labels:
-            self._add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
+            self.transcript.add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
             return
         choice = await self.app.push_screen_wait(PickerScreen("Resume session", list(labels)))
         if choice not in labels or self.is_busy:
@@ -672,14 +483,13 @@ class SessionPane(Pane):
             agent = Agent.open(cwd=self.agent.cwd, session=labels[choice], confirm=self._confirm,
                                mode=self.mode, config=self.config, toolset=self.agent.toolset)
         except SessionError as exc:  # already open elsewhere, or no persisted system prompt
-            self._add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
+            self.transcript.add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return
         killed = self._retire_agent()
         self._swap_agent(agent)
         self._title = agent.session.first_user_text() or ""
         self._reset_measurements()
-        self.query_one("#log", VerticalScroll).remove_children()
-        self._todo_panel = None
+        self.transcript.clear()
         self._queue.clear()
         self._pending_shell.clear()
         self._refresh_queued()
@@ -692,14 +502,14 @@ class SessionPane(Pane):
     @work(exclusive=True, group="compact")
     async def compact(self) -> None:
         if self.is_busy:
-            self._add(Content.from_markup("[$text-muted]Busy — compact the context after this turn[/]"))
+            self.transcript.add(Content.from_markup("[$text-muted]Busy — compact the context after this turn[/]"))
             return
         self._set_status(True, " Compacting context")
         self._compacting = True
         try:
             result = await self.agent.compact_now()
         except Exception as exc:  # noqa: BLE001 — the session is still usable
-            self._add(Content.from_markup("[$text-error b]Compaction failed:[/] $body", body=str(exc)))
+            self.transcript.add(Content.from_markup("[$text-error b]Compaction failed:[/] $body", body=str(exc)))
             return
         finally:
             self._compacting = False
@@ -708,9 +518,9 @@ class SessionPane(Pane):
             # A job that ended meanwhile was held back; report it now.
             self._jobs_changed()
         if result is None:
-            self._add(Content.from_markup("[$text-muted]Nothing to compact yet — the context is still short[/]"))
+            self.transcript.add(Content.from_markup("[$text-muted]Nothing to compact yet — the context is still short[/]"))
             return
-        self._add(
+        self.transcript.add(
             Content.from_markup(
                 "[$text-muted]Context compacted: $before → ~$after tokens[/]",
                 before=f"{result.tokens_before:,}",
@@ -731,72 +541,13 @@ class SessionPane(Pane):
     def _refresh_mode(self) -> None:
         self.query_one(PromptInput).border_title = f" {self.mode} "
 
-    # ---- rendering helpers --------------------------------------------------
-
-    # The #log container is anchored once in on_mount: the compositor keeps an
-    # anchored scrollable pinned to the bottom as content grows, releases the
-    # anchor while the user scrolls up, and re-engages it when they return to
-    # the bottom. Helpers therefore just mount widgets — no manual scrolling.
-
-    def _add(self, renderable, classes: str = "") -> Static:
-        log = self.query_one("#log", VerticalScroll)
-        widget = Static(renderable, classes=classes)
-        log.mount(widget)
-        return widget
-
-    def _add_user(self, body: str) -> UserMessage:
-        log = self.query_one("#log", VerticalScroll)
-        # A replayed /skill:name turn is stored expanded; show it folded
-        # behind the skill's name, followed by whatever the user added.
-        block = parse_skill_block(body)
-        if block is not None:
-            log.mount(FoldedText(block.body, classes="skill-invocation", label=f"skill {block.name}"))
-            body = block.user_message or f"/skill:{block.name}"
-        widget = UserMessage(body)
-        log.mount(widget)
-        return widget
+    # ---- status --------------------------------------------------------------
 
     def _set_status(self, visible: bool, label: str = "") -> None:
         status = self.query_one("#response-status", Horizontal)
         status.display = visible
         if visible and label:
             status.query_one(".status-label", Static).update(label)
-
-    def _add_tool_result(
-        self, result: str, *, label: str = "", denied: bool = False,
-        container: Widget | None = None,
-    ) -> ToolResult:
-        log = container if container is not None else self.query_one("#log", VerticalScroll)
-        widget = ToolResult(result, label=label, denied=denied)
-        log.mount(widget)
-        return widget
-
-    def _show_todos(self, todos: list[dict]) -> None:
-        """Update the panel in place while it is still the tail of the log, so a
-        burst of revisions collapses into one; once anything is logged under it
-        the panel stays put as a snapshot of the plan at that point and the next
-        revision starts a new one."""
-        log = self.query_one("#log", VerticalScroll)
-        if not todos:
-            if self._todo_panel is not None:
-                self._todo_panel.remove()
-                self._todo_panel = None
-            return
-        body = self._render_todos(todos)
-        if self._todo_panel is not None and log.children[-1:] == [self._todo_panel]:
-            self._todo_panel.update(body)
-        else:
-            self._todo_panel = self._add(body, classes="todos")
-
-    def _render_todos(self, todos: list[dict]) -> Content:
-        done = sum(1 for t in todos if t.get("status") == "completed")
-        lines = [f"[$text-muted b]Plan[/][$text-muted]  {done}/{len(todos)}[/]"]
-        kwargs = {}
-        for i, t in enumerate(todos):
-            marker, style = _TODO_STYLE.get(t.get("status"), _TODO_STYLE["pending"])
-            kwargs[f"c{i}"] = t.get("content", "")
-            lines.append(f"[{style}]{marker} ${f'c{i}'}[/]")
-        return Content.from_markup("\n".join(lines), **kwargs)
 
     def _sync_statusbar(self, *, tokens: bool = False) -> None:
         """Redraw the app-wide status bar, which only ever shows this pane's
@@ -819,23 +570,8 @@ class SessionPane(Pane):
         future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
         return await self._block_on(QuestionPanel(question, options, future), future)
 
-    async def _confirm_child(self, job_id: str, tool_name: str, args: dict) -> bool:
-        """A confirmation for an agent this conversation started.
-
-        Shown here because the child has no screen of its own, and beside the
-        prompt rather than over it: the user may be in the middle of typing,
-        and a panel that took the keyboard would be answered by their next
-        keystroke.
-        """
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        panel = ConfirmPanel(tool_name, args, future, cwd=self.agent.cwd,
-                             source=f"agent {job_id}")
-        return await self._block_on(panel, future, beside=True) == "allow"
-
-    async def _block_on(self, panel: BlockingPanel, future: asyncio.Future, *,
-                        beside: bool = False):
-        """Show ``panel`` until ``future`` is answered: in place of the prompt,
-        or with ``beside`` above a prompt that keeps the keyboard."""
+    async def _block_on(self, panel: BlockingPanel, future: asyncio.Future):
+        """Show ``panel`` in place of the prompt until ``future`` is answered."""
         async with self._panel_lock:
             # Held across the wait: the session can be swapped while a panel is
             # up, and the count taken from one driver must go back to that one.
@@ -848,12 +584,11 @@ class SessionPane(Pane):
             # remove.
             await self.query(BlockingPanel).remove()
             await self.mount(panel, before=prompt)
-            if not beside:
-                prompt.display = False
-                # A panel in a background pane must not grab the keyboard: the
-                # user's next keystroke would answer a question they never saw.
-                if self.is_current:
-                    panel.focus()
+            prompt.display = False
+            # A panel in a background pane must not grab the keyboard: the
+            # user's next keystroke would answer a question they never saw.
+            if self.is_current:
+                panel.focus()
             # Counted on the driver rather than here: removing the panel is
             # asynchronous, and the tab badge has to clear the moment the
             # answer is in, not whenever the widget finally goes.
@@ -863,10 +598,7 @@ class SessionPane(Pane):
             finally:
                 driver.mark_blocked(False)
                 prompt.display = True
-                held_keyboard = panel.has_focus
                 panel.remove()
-                if beside and held_keyboard and not self._pane_closing:
-                    prompt.focus()
 
     # ---- input → turn -------------------------------------------------------
 
@@ -894,7 +626,7 @@ class SessionPane(Pane):
     def run_user_command(self, command: str, *, record: bool = True) -> None:
         """Run a "!" command, log it, and let the model in on it unless quiet."""
         if self._shell_worker is not None:
-            self._add(Content.from_markup(
+            self.transcript.add(Content.from_markup(
                 "[$text-muted]A command is already running — Esc cancels it[/]"))
             return
         self._shell_worker = self._user_command(command, record)
@@ -909,7 +641,7 @@ class SessionPane(Pane):
         steps, since a message inserted between a tool call and its result is
         the one shape providers reject.
         """
-        step = await self._add_shell_call(command)
+        step = await self.transcript.add_shell_call(command)
         try:
             output = await self.agent.run_shell(command)
         except asyncio.CancelledError:
@@ -917,29 +649,18 @@ class SessionPane(Pane):
             # out); what it managed to print went with it, so there is nothing
             # worth telling the model about.
             if not self._pane_closing:
-                self._add_tool_result("(interrupted)", label=command, container=step)
+                self.transcript.add_tool_result("(interrupted)", label=command, container=step)
             raise
         finally:
             self._shell_worker = None
         if self._pane_closing:
             return
-        self._add_tool_result(output, label=command, container=step)
+        self.transcript.add_tool_result(output, label=command, container=step)
         if record:
             if self.is_busy:
                 self._pending_shell.append((command, output))
             else:
                 self.agent.record_shell(command, output)
-
-    async def _add_shell_call(self, command: str) -> Vertical:
-        """The box a "!" run is logged in, with its command line already in it.
-
-        Awaited, since the result mounts into the box the moment the command
-        exits and a container has to be mounted before anything goes in it.
-        """
-        step = Vertical(classes="shell-step")
-        await self.query_one("#log", VerticalScroll).mount(step)
-        await step.mount(ToolCall("!", command))
-        return step
 
     def _refresh_queued(self) -> None:
         widget = self.query_one("#queued", Static)
@@ -1033,7 +754,7 @@ class SessionPane(Pane):
             return
         if self._pane_closing or self.is_busy or not self.is_current or not text:
             return
-        self.query_one("#log", VerticalScroll).mount(RecapMessage(text))
+        self.transcript.mount(RecapMessage(text))
 
     # ---- the agent's job hooks ----------------------------------------------
 
@@ -1052,8 +773,8 @@ class SessionPane(Pane):
         if self.agent.notices and not self._compacting:
             self.driver.wake()
 
-    async def _open_command(self, job_id: str, command, description: str) -> None:
-        await self.app.open_command(self, job_id, command, description)
+    async def _open_job(self, job_id: str, job: Job) -> None:
+        await self.app.open_job(self, job_id, job)
 
     # ---- the driver's two hooks ---------------------------------------------
 
@@ -1150,9 +871,9 @@ class SessionPane(Pane):
             self._status_timer.stop()
             self._status_timer = None
         if result.outcome is Outcome.INTERRUPTED:
-            self._add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
+            self.transcript.add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
         elif result.outcome is Outcome.FAILED:
-            self._add(Content.from_markup("[$text-error b]Error:[/] $body", body=result.error))
+            self.transcript.add(Content.from_markup("[$text-error b]Error:[/] $body", body=result.error))
         self._focus_input()
         if self._pending_handoff is not None:
             prompt, self._pending_handoff = self._pending_handoff, None
@@ -1198,7 +919,7 @@ class SessionPane(Pane):
             prompt_input.move_cursor(prompt_input.document.end)
         hint = resume_hint(self.agent.session.id)
         self.new_session()
-        self._add(Content.from_markup(
+        self.transcript.add(Content.from_markup(
             "[$text-muted]Handed off — previous session: $hint[/]", hint=hint))
         self.driver.submit(prompt)
 
