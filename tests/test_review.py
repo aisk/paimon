@@ -80,7 +80,7 @@ class JudgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("user: fix the flaky test", question)
         self.assertIn('agent called shell: {"command": "pytest"}', question)
         self.assertIn('"command": "git push"', question)
-        self.assertIn("<cwd>/work</cwd>", question)
+        self.assertIn(f"<cwd>{Path('/work')}</cwd>", question)
         self.assertNotIn("surely wants", question, "the agent's own case for it is left out")
         self.assertNotIn("IGNORE PREVIOUS", question, "and so is whatever a tool printed")
 
