@@ -624,7 +624,7 @@ class Agent:
     def _built(self, name: str, cached: Optional[tuple[tuple, Model]]) -> tuple[tuple, Model]:
         """``cached`` if it still matches the config, else ``name`` built anew."""
         api_base, api_key = self.config.provider_auth(name)
-        key = (name, api_base, api_key, self.config.profile)
+        key = (name, api_base, api_key)
         if cached is None or cached[0] != key:
             cached = (key, build_model(*key))
         return cached
@@ -1009,7 +1009,7 @@ class Agent:
         providers.extend(self.config.providers)
         for name in LOGIN_PROVIDERS:
             try:
-                if importlib.import_module(f".{name}", __package__).signed_in(self.config.profile):
+                if importlib.import_module(f".{name}", __package__).signed_in():
                     providers.append(name)
             except Exception:  # noqa: BLE001 — an unreadable login is a provider not offered
                 pass

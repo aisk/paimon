@@ -22,8 +22,8 @@ from .session import SessionError, resume_hint
 def _resume_flags(args: argparse.Namespace) -> tuple[str, ...]:
     """The launch options a resumed session needs to behave like this run.
 
-    Only the ones fixed for the life of the process. The mode, the profile and
-    the model change while the app runs, so the app adds the ones in effect.
+    Only the ones fixed for the life of the process. The mode and the model
+    change while the app runs, so the app adds the ones in effect.
     """
     flags: list[str] = []
     if args.strict:
@@ -61,10 +61,6 @@ def main() -> None:
                         help="resume the most recent session in this directory")
     parser.add_argument("--model", default=None, metavar="PROVIDER:NAME",
                         help="model for this run only; the configured one is untouched")
-    parser.add_argument("--profile", default=None, metavar="NAME",
-                        help="use this named profile's configuration "
-                             "(an independent config dir; log in with "
-                             "'paimon login --profile NAME ...')")
     parser.add_argument("-p", "--print", nargs="?", const="", default=None, metavar="PROMPT",
                         dest="prompt",
                         help="run one prompt without the UI and exit; with no value the "
@@ -111,10 +107,9 @@ def main() -> None:
 
     if args.continue_latest and args.resume is not None:
         parser.error("--continue and --resume cannot be combined")
-    # Loaded here, once: the profile is a property of this Config instance,
-    # so everything downstream just carries the instance.
+    # Loaded here, once: everything downstream just carries the instance.
     try:
-        config = Config.load(args.profile)
+        config = Config.load()
         # Per-run skill options ride on the shared config like --model does, so
         # every Agent.open in the process (new session, fork, child agents) sees them.
         config.skills = [*config.skills, *args.skills]
@@ -159,8 +154,6 @@ def main() -> None:
             flags += ["--textual-debug"]
         if args.model:
             flags += ["--model", args.model]
-        if args.profile:
-            flags += ["--profile", args.profile]
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
         telemetry.record_launch("web", model=args.model or config.model)
         Server(command, port=args.port).serve()

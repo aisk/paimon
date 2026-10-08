@@ -162,11 +162,10 @@ class BrowserLoginScreen(ModalScreen[bool]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(self, provider: str, profile: str) -> None:
+    def __init__(self, provider: str) -> None:
         super().__init__()
         self._plan = importlib.import_module(f"paimon.{provider}")
         self._name = LOGIN_PROVIDERS[provider]
-        self._profile = profile
         self._pasted: asyncio.Future = asyncio.get_running_loop().create_future()
 
     def compose(self) -> ComposeResult:
@@ -191,7 +190,7 @@ class BrowserLoginScreen(ModalScreen[bool]):
     @work
     async def _flow(self) -> None:
         try:
-            await self._plan.login(self._profile, self._show_url, self._pasted)
+            await self._plan.login(self._show_url, self._pasted)
         except PaimonError as exc:
             self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
                 "[$text-error b]$name sign-in failed:[/] $body", name=self._name, body=str(exc)))
@@ -241,7 +240,7 @@ class LoginScreen(ModalScreen[bool]):
         if provider in LOGIN_PROVIDERS:
             # The plan's credential is a browser login the sign-in stores
             # itself, so there is no endpoint or key to ask for.
-            if not await self.app.push_screen_wait(BrowserLoginScreen(provider, config.profile)):
+            if not await self.app.push_screen_wait(BrowserLoginScreen(provider)):
                 self.dismiss(False)
                 return
         else:

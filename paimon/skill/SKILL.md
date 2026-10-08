@@ -51,8 +51,7 @@ paimon -p "fix the failing test in tests/test_foo.py" \
   counted in `denied`, with the reason in the tool result; a non-zero count
   usually means rerun with a more permissive mode. `--strict` stops treating
   read-only commands as safe, so `read` refuses them and `auto` reviews them.
-- `--model provider:name` overrides the model for this run;
-  `--profile NAME` switches to a separately configured account.
+- `--model provider:name` overrides the model for this run.
 - `--append-system-prompt "You are a code reviewer. Only report findings."`
   adds a role definition on top of the base system prompt. New sessions only —
   it is persisted with the session (resuming keeps the role), so combining it

@@ -178,11 +178,11 @@ class ResumeFlagsTest(unittest.TestCase):
     @staticmethod
     def _flags(**given) -> tuple[str, ...]:
         args = {"strict": False, "no_web_search": False, "no_skills": False, "skills": [],
-                "profile": "work", "model": "zai:glm-4.7", "mode": "auto"}
+                "model": "zai:glm-4.7", "mode": "auto"}
         return cli._resume_flags(argparse.Namespace(**{**args, **given}))
 
     def test_nothing_by_default(self) -> None:
-        # Profile, model and mode are the app's to add: they change under it.
+        # Model and mode are the app's to add: they change under it.
         self.assertEqual(self._flags(), ())
 
     def test_options_fixed_at_launch(self) -> None:
@@ -215,7 +215,7 @@ class AppReportingTest(AppTestCase):
                 ("paimon", "--resume", session.id, "--mode", "read",
                  "--model", "test-model", "--strict")))
 
-    async def test_resume_command_follows_mode_and_profile(self) -> None:
+    async def test_resume_command_follows_mode_and_model(self) -> None:
         recorder = _Recorder()
         app = self._app(recorder, session=self._old_session())
         async with app.run_test() as pilot:
@@ -223,10 +223,9 @@ class AppReportingTest(AppTestCase):
             app.action_cycle_mode()  # read -> auto
             await pilot.pause()
             self.assertIn("auto", recorder.reports[-1].resume)
-            app._apply_config(Config(model="other-model", profile="work"))
+            app.config.model = "other-model"
             app._report_herdr()
             resume = recorder.reports[-1].resume
-            self.assertEqual(resume[resume.index("--profile") + 1], "work")
             self.assertEqual(resume[resume.index("--model") + 1], "other-model")
 
     async def test_new_session_has_no_resume_command_until_it_has_a_turn(self) -> None:

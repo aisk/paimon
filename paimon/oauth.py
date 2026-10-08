@@ -1,7 +1,7 @@
 """What the browser logins share: opening the browser, catching the redirect
 on a loopback port, and keeping the stored tokens fresh.
 
-A login lives in the profile's config.json, under "providers": {NAME: ...},
+A login lives in config.json, under "providers": {NAME: ...},
 and is rewritten whenever its tokens change. Each provider describes itself
 with a Login and brings its own endpoints and token requests.
 """
@@ -20,7 +20,7 @@ from typing import Awaitable, Callable, Iterator, Optional, TypeVar
 from urllib.parse import parse_qs, urlsplit
 
 from . import lockfile
-from .config import DEFAULT_PROFILE, ConfigError, config_dir, read_provider, update_provider
+from .config import ConfigError, config_root, read_provider, update_provider
 from .errors import PaimonError
 
 T = TypeVar("T")
@@ -72,24 +72,24 @@ class Login:
     # Two refreshes racing on one refresh token leave the loser's login revoked.
     _mutex: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def read(self, profile: str) -> dict:
-        return read_provider(profile, self.provider)
+    def read(self) -> dict:
+        return read_provider(self.provider)
 
     def complete(self, stored: dict) -> bool:
         return all(isinstance(stored.get(key), str) and stored[key] for key in self.keys)
 
-    def signed_in(self, profile: str) -> bool:
-        """Whether the profile holds a login to build a model from."""
-        return self.complete(self.read(profile))
+    def signed_in(self) -> bool:
+        """Whether there is a login to build a model from."""
+        return self.complete(self.read())
 
     @contextmanager
-    def _lock(self, profile: str) -> Iterator[None]:
+    def _lock(self) -> Iterator[None]:
         """Held by whoever replaces the stored tokens, a refresh or a login.
 
         Not the config's own lock: this one is held across a network call, and
         an unrelated save (a theme change) must not wait that out.
         """
-        lock = config_dir(profile) / f"{self.provider}.lock"
+        lock = config_root() / f"{self.provider}.lock"
         lock.parent.mkdir(parents=True, exist_ok=True)
         with self._mutex:
             if not lockfile.acquire(lock, _REFRESH_LOCK_TIMEOUT):
@@ -99,39 +99,39 @@ class Login:
             finally:
                 lockfile.release(lock)
 
-    def _store_rotation(self, profile: str, fields: dict) -> dict:
+    def _store_rotation(self, fields: dict) -> dict:
         """Write freshly rotated tokens, trying again if the config cannot be
         written. The old refresh token may already be dead, so a write given
         up on is a login lost."""
         for attempt in range(_STORE_ATTEMPTS):
             try:
-                return update_provider(profile, self.provider, fields)
+                return update_provider(self.provider, fields)
             except ConfigError:
                 if attempt == _STORE_ATTEMPTS - 1:
                     raise
                 time.sleep(_STORE_RETRY_SECONDS)
         raise AssertionError("unreachable")
 
-    def renewed(self, profile: str) -> dict:
+    def renewed(self) -> dict:
         """The stored login, refreshed first if it has expired.
 
         Synchronous and run on a thread: a turn cancelled mid-refresh must
         still get the rotated refresh token onto disk, or the login is lost.
         """
-        with self._lock(profile):
+        with self._lock():
             # Re-read inside the lock: another process may have refreshed.
-            stored = self.read(profile)
+            stored = self.read()
             if not self.complete(stored):
                 raise self.error(f"not signed in to {self.label}, log in again")
             if expired(stored):
-                stored = self._store_rotation(profile, self.refresh(stored))
+                stored = self._store_rotation(self.refresh(stored))
             return stored
 
-    def store(self, profile: str, credential: dict) -> None:
+    def store(self, credential: dict) -> None:
         # Under the lock, so a refresh still in flight for the previous login
         # lands first and cannot mix its tokens into this one's entry.
-        with self._lock(profile):
-            update_provider(profile, self.provider, credential)
+        with self._lock():
+            update_provider(self.provider, credential)
 
     def callback_query(self, target: str, redirect_uri: str, state: str) -> dict:
         """The query of a callback URL or request target, once it is known to
@@ -153,13 +153,12 @@ def expired(stored: dict) -> bool:
 
 
 class Credentials:
-    """The bearer token for one profile, as the callable an API client asks
-    before every request."""
+    """The bearer token, as the callable an API client asks before every
+    request."""
 
-    def __init__(self, login: Login, profile: Optional[str] = None) -> None:
+    def __init__(self, login: Login) -> None:
         self.login = login
-        self.profile = profile or DEFAULT_PROFILE
-        self._stored = login.read(self.profile)
+        self._stored = login.read()
         if not login.complete(self._stored):
             raise login.error(
                 f"not signed in to {login.label}, run 'paimon login --model {login.provider}:MODEL'")
@@ -167,7 +166,7 @@ class Credentials:
     async def current(self) -> dict:
         """The stored login with a live access token."""
         if expired(self._stored):
-            self._stored = await asyncio.to_thread(self.login.renewed, self.profile)
+            self._stored = await asyncio.to_thread(self.login.renewed)
         return self._stored
 
     async def __call__(self) -> str:

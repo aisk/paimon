@@ -17,7 +17,7 @@ local patch. `FunctionModel` stubs still exercise the real agent loop.
 | The recap request | `test_agent_recap.py` |
 | TUI panes, tabs and focus | `test_app.py` |
 | TUI input, approvals, queuing and interruption | `test_app_input.py` |
-| TUI resume, fork, handoff and profiles | `test_app_sessions.py` |
+| TUI resume, fork and handoff | `test_app_sessions.py` |
 | TUI rendering, background jobs and recaps | `test_app_rendering.py`, `test_app_jobs.py`, `test_app_recap.py` |
 | Tool dispatch, file edits, validation and history | `test_tools.py` |
 | Permissions, shell processes/output and grep | `test_tools_permissions.py`, `test_tools_shell.py`, `test_tools_grep.py` |

@@ -40,11 +40,11 @@ Paimon 会从 `~/.config/paimon/skills`、`~/.agents/skills` 以及工作目录�
 
 ## 当作 subagent 使用
 
-前沿模型擅长制定计划和验收结果，中间的执行步骤往往比较机械。让 Paimon 使用成本较低的模型执行，由 Claude Code 或 Codex 制定计划并检查结果。用一个 profile 单独保存该模型的账号：
+前沿模型擅长制定计划和验收结果，中间的执行步骤往往比较机械。让 Paimon 使用成本较低的模型执行，由 Claude Code 或 Codex 制定计划并检查结果。先登录该模型的 provider，之后每次运行时指定模型：
 
 ```bash
-paimon login --profile glm --model zai:glm-4.7 --api-key-env ZAI_API_KEY
-paimon --profile glm -p "apply the plan in PLAN.md" --mode auto --output-format result
+paimon login --model zai:glm-4.7 --api-key-env ZAI_API_KEY
+paimon --model zai:glm-4.7 -p "apply the plan in PLAN.md" --mode auto --output-format result
 ```
 
 自带的 skill 会向调用方 agent 说明这套流程：
@@ -97,7 +97,6 @@ paimon --web                        # 在浏览器中使用同一套 UI（--port
 paimon -p "what does cli.py do?"    # 直接在 stdout 输出回答，不启动 UI
 cat log.txt | paimon -p "summarize this"
 paimon --model zai:glm-4.7          # 仅本次运行使用该模型
-paimon --profile work               # 单独配置的另一个账号
 ```
 
 `-p` 不会停下来询问，配合默认的 `yolo` 模式，它已经可以修改文件和执行命令。加 `--output-format result` 会输出一个包含结果的 JSON 对象，调用方程序读这个就够了。其余选项见 `paimon --help`。
@@ -115,7 +114,7 @@ paimon --profile work               # 单独配置的另一个账号
 
 ## 配置
 
-每个 profile 的模型设置保存在 `~/.config/paimon/<name>/config.json`，由首次启动或 `paimon login` 写入。也可以用 ChatGPT 订阅代替 API key，`paimon login --model chatgpt:gpt-5.5` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
+模型设置保存在 `~/.config/paimon/config.json`，由首次启动或 `paimon login` 写入。也可以用 ChatGPT 订阅代替 API key，`paimon login --model chatgpt:gpt-5.5` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
 
 read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉，Windows 上命令由 cmd.exe 执行，一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。当前的模型默认用同一家里快速档的那个来审批（GPT 用 Luna，Claude 用 Haiku，GLM 用 Flash），其余模型自己审自己，在配置里写 `"review_model": "provider:name"` 可以自行指定。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
@@ -156,7 +155,7 @@ flowchart TD
     end
 
     subgraph support["配置与 skills"]
-        Config["config.py<br/>profile、凭证"]
+        Config["config.py<br/>设置、凭证"]
         Skills["skills.py<br/>Agent Skills 发现"]
     end
 

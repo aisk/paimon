@@ -6,7 +6,7 @@ agent refused, and here is why" from a bug that happened to surface as a
 concrete classes stay in the module that raises them.
 
 Not a replacement for the builtins. A malformed argument is still a
-``ValueError`` (``split_model_string``, ``validate_profile``) because that is
+``ValueError`` (``split_model_string``) because that is
 what it is. What lives under this root is a refusal about state: a session
 already open, a job that cannot start, an answer that never came.
 """

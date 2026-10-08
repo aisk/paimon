@@ -102,14 +102,14 @@ _LOGIN = oauth.Login(
 )
 
 
-def signed_in(profile: str) -> bool:
-    """Whether the profile holds a ChatGPT login to build a model from."""
-    return _LOGIN.signed_in(profile)
+def signed_in() -> bool:
+    """Whether there is a ChatGPT login to build a model from."""
+    return _LOGIN.signed_in()
 
 
 class Credentials(oauth.Credentials):
-    def __init__(self, profile: Optional[str] = None) -> None:
-        super().__init__(_LOGIN, profile)
+    def __init__(self) -> None:
+        super().__init__(_LOGIN)
 
 
 class ChatGPTModel(OpenAIResponsesModel):
@@ -140,8 +140,8 @@ class ChatGPTModel(OpenAIResponsesModel):
         return stream.get()
 
 
-def build_model(model_name: str, profile: Optional[str] = None) -> ChatGPTModel:
-    provider = OpenAIProvider(openai_client=AsyncOpenAI(base_url=_RESOURCE, api_key=Credentials(profile)))
+def build_model(model_name: str) -> ChatGPTModel:
+    provider = OpenAIProvider(openai_client=AsyncOpenAI(base_url=_RESOURCE, api_key=Credentials()))
     return ChatGPTModel(
         model_name,
         provider=provider,
@@ -164,16 +164,15 @@ def _parse_callback(target: str, state: str) -> tuple[str, str]:
     return query["code"], query["client_id"]
 
 
-async def login(profile: Optional[str], show_url: Callable[[str], None],
+async def login(show_url: Callable[[str], None],
                 pasted: Optional[Awaitable[str]] = None) -> None:
-    """Run the browser login and store the credential for the profile.
+    """Run the browser login and store the credential.
 
     show_url receives the address to open. The browser normally ends on the
     loopback callback served here; where it cannot reach this machine,
     ``pasted`` may deliver the final redirect URL instead.
     """
-    profile = profile or oauth.DEFAULT_PROFILE
-    host_id = _host_id(_LOGIN.read(profile))
+    host_id = _host_id(_LOGIN.read())
     state = secrets.token_urlsafe(32)
     verifier, challenge = oauth.pkce()
     authorize = _AUTHORIZE_URL + "?" + urlencode({
@@ -205,5 +204,5 @@ async def login(profile: Optional[str], show_url: Callable[[str], None],
         "redirect_uri": REDIRECT_URI,
         "resource": _RESOURCE,
     })
-    await asyncio.to_thread(_LOGIN.store, profile, {"host_id": host_id, "client_id": client_id, **fields})
+    await asyncio.to_thread(_LOGIN.store, {"host_id": host_id, "client_id": client_id, **fields})
 

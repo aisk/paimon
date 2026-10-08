@@ -40,11 +40,11 @@ Paimon loads [Agent Skills](https://agentskills.io) from `~/.config/paimon/skill
 
 ## Using Paimon as a subagent
 
-Frontier models are good at planning and reviewing; the steps in between are often mechanical. Point Paimon at a cheaper model and let Claude Code or Codex write the plan and check the result. A profile keeps that model's account separate:
+Frontier models are good at planning and reviewing; the steps in between are often mechanical. Point Paimon at a cheaper model and let Claude Code or Codex write the plan and check the result. Log in to that model's provider once, then name the model on each run:
 
 ```bash
-paimon login --profile glm --model zai:glm-4.7 --api-key-env ZAI_API_KEY
-paimon --profile glm -p "apply the plan in PLAN.md" --mode auto --output-format result
+paimon login --model zai:glm-4.7 --api-key-env ZAI_API_KEY
+paimon --model zai:glm-4.7 -p "apply the plan in PLAN.md" --mode auto --output-format result
 ```
 
 The bundled skill teaches the calling agent this workflow:
@@ -97,7 +97,6 @@ paimon --web                        # the same UI in a browser (--port, default 
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"
 paimon --model zai:glm-4.7          # this model for this run only
-paimon --profile work               # a separately configured account
 ```
 
 `-p` never stops to ask, so with the default `yolo` mode it can already write files and run commands. Add `--output-format result` for a single JSON object with the outcome, which is what a calling program should read. `paimon --help` lists the rest.
@@ -117,7 +116,7 @@ You can ask it, for example, to “find why `#prompt` is narrower than expected,
 
 ## Configuration
 
-Each profile keeps its model settings in `~/.config/paimon/<name>/config.json`, written by the first launch or by `paimon login`. A ChatGPT plan works in place of an API key: `paimon login --model chatgpt:gpt-5.5` signs in through the browser. `antigravity:gemini-3.8-flash-high` does the same for an Antigravity plan, which Google does not support outside Antigravity: Paimon signs in as the Antigravity client and calls an internal endpoint, so the account may be limited or closed, and the risk is yours. Sessions live in `~/.local/share/paimon/sessions/`.
+Model settings are kept in `~/.config/paimon/config.json`, written by the first launch or by `paimon login`. A ChatGPT plan works in place of an API key: `paimon login --model chatgpt:gpt-5.5` signs in through the browser. `antigravity:gemini-3.8-flash-high` does the same for an Antigravity plan, which Google does not support outside Antigravity: Paimon signs in as the Antigravity client and calls an internal endpoint, so the account may be limited or closed, and the risk is yours. Sessions live in `~/.local/share/paimon/sessions/`.
 
 Read and auto modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) on their own; `--strict` turns that off, and on Windows, where cmd.exe runs the commands, none are recognized. Read mode refuses everything else. Auto mode asks a reviewer model, which sees your messages and the agent's tool calls but not its reasoning or any tool output, and answers allow or block. It asks you instead when the reviewer cannot be reached or has blocked three calls in a row, and under `-p` those are refusals. Current models review with their provider's fast tier by default (GPT with Luna, Claude with Haiku, GLM with Flash) and the rest review with themselves; set `"review_model": "provider:name"` in the config to choose. **All of this is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
 
@@ -158,7 +157,7 @@ flowchart TD
     end
 
     subgraph support["Config & skills"]
-        Config["config.py<br/>profiles, credentials"]
+        Config["config.py<br/>settings, credentials"]
         Skills["skills.py<br/>Agent Skills discovery"]
     end
 

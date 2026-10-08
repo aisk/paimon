@@ -2078,7 +2078,7 @@ REGISTRY: dict[str, Tool] = {
         access="none",
         description=(
             "List the models spawn_agent can start an agent on, across every "
-            "provider this profile is signed in to. Call it before giving an "
+            "provider you are signed in to. Call it before giving an "
             "agent a model other than your own, for a second opinion from a "
             "different model or a cheaper one for simple work. The list is read "
             "fresh on each call."

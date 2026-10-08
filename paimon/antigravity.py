@@ -194,9 +194,9 @@ _LOGIN = oauth.Login(
 )
 
 
-def signed_in(profile: str) -> bool:
-    """Whether the profile holds an Antigravity login to build a model from."""
-    return _LOGIN.signed_in(profile)
+def signed_in() -> bool:
+    """Whether there is an Antigravity login to build a model from."""
+    return _LOGIN.signed_in()
 
 
 def _thinking_budget(model_name: str) -> int:
@@ -371,19 +371,18 @@ def _error_body(text: str) -> object:
         return text
 
 
-def build_model(model_name: str, profile: Optional[str] = None) -> AntigravityModel:
-    return AntigravityModel(model_name, oauth.Credentials(_LOGIN, profile))
+def build_model(model_name: str) -> AntigravityModel:
+    return AntigravityModel(model_name, oauth.Credentials(_LOGIN))
 
 
-async def login(profile: Optional[str], show_url: Callable[[str], None],
+async def login(show_url: Callable[[str], None],
                 pasted: Optional[Awaitable[str]] = None) -> None:
-    """Run the browser login and store the credential for the profile.
+    """Run the browser login and store the credential.
 
     show_url receives the address to open. The browser normally ends on the
     loopback callback served here; where it cannot reach this machine,
     ``pasted`` may deliver the final redirect URL instead.
     """
-    profile = profile or oauth.DEFAULT_PROFILE
     state = secrets.token_urlsafe(32)
     verifier, challenge = oauth.pkce()
     authorize = _AUTHORIZE_URL + "?" + urlencode({
@@ -420,4 +419,4 @@ async def login(profile: Optional[str], show_url: Callable[[str], None],
     if "refresh" not in fields:
         raise AntigravityAuthError("Google returned no refresh token, sign in again and allow offline access")
     project = await asyncio.to_thread(_project, fields["access"])
-    await asyncio.to_thread(_LOGIN.store, profile, {**fields, "project_id": project})
+    await asyncio.to_thread(_LOGIN.store, {**fields, "project_id": project})

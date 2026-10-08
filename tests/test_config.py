@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon.config import DEFAULT_PROFILE, Config, ConfigError, config_path
+from paimon.config import Config, ConfigError, config_path
 
 
 def _hammer_save(config_home: str, field: str, rounds: int) -> None:
@@ -29,8 +29,7 @@ def _hold_config_lock(lock_path: str, ready, stop) -> None:
         lockfile.release(path)
 
 
-class ConfigProfileTest(unittest.TestCase):
-    """load/save are bound to the instance's profile, not any global state."""
+class ConfigTest(unittest.TestCase):
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -39,15 +38,23 @@ class ConfigProfileTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def test_instances_on_different_profiles_do_not_interfere(self) -> None:
-        work = Config.load("work")
-        default = Config.load()
-        work.save(model="test:work")
-        default.save(model="test:default")
+    def test_config_from_the_default_profile_is_moved_up(self) -> None:
+        old = config_path().parent / "default" / "config.json"
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps({"model": "test:old"}))
 
-        self.assertEqual(Config.load("work").model, "test:work")
-        self.assertEqual(Config.load().model, "test:default")
-        self.assertEqual(json.loads(config_path("work").read_text())["model"], "test:work")
+        self.assertEqual(Config.load().model, "test:old")
+        self.assertFalse(old.exists())
+        self.assertEqual(json.loads(config_path().read_text())["model"], "test:old")
+
+    def test_a_config_already_in_place_is_not_replaced(self) -> None:
+        old = config_path().parent / "default" / "config.json"
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps({"model": "test:old"}))
+        config_path().write_text(json.dumps({"model": "test:new"}))
+
+        self.assertEqual(Config.load().model, "test:new")
+        self.assertTrue(old.exists())
 
     def test_save_none_clears_while_unpassed_fields_keep_their_values(self) -> None:
         config = Config.load()
@@ -118,19 +125,11 @@ class ConfigProfileTest(unittest.TestCase):
         self.assertFalse(config.recap_enabled)
         self.assertFalse(Config.load().recap_enabled)
 
-    def test_load_records_the_profile_on_the_instance(self) -> None:
-        self.assertEqual(Config.load().profile, "default")
-        self.assertEqual(Config.load("work").profile, "work")
-
-    def test_invalid_profile_name_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            Config.load("../evil")
-
     def test_safe_commands_defaults_on(self) -> None:
         self.assertTrue(Config.load().safe_commands)
 
     def test_safe_commands_loaded_and_preserved(self) -> None:
-        path = config_path("default")
+        path = config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"safe_commands": False}))
 
@@ -171,7 +170,7 @@ class ConfigDurableWriteTest(unittest.TestCase):
         self.assertEqual(stored, {"model": "test:m", "api_key": "sk-other", "theme": "nord"})
 
     def test_concurrent_processes_do_not_lose_fields(self) -> None:
-        """Real processes hammering one profile keep every writer's field."""
+        """Real processes hammering one config keep every writer's field."""
         config = Config.load()
         config.save(model="test:base")
         home = os.environ["PAIMON_CONFIG_HOME"]
@@ -251,7 +250,7 @@ class ConfigDurableWriteTest(unittest.TestCase):
             Config.load()
         # A save must refuse to write over the remains with {} plus one field.
         with self.assertRaises(ConfigError):
-            Config(profile="default").save(theme="nord")
+            Config().save(theme="nord")
         self.assertEqual(path.read_text(), torn)
 
     def test_non_object_config_is_reported(self) -> None:
@@ -294,7 +293,7 @@ class ConfigSkillsTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def test_skills_list_is_read_and_non_lists_are_ignored(self) -> None:
-        path = config_path(DEFAULT_PROFILE)
+        path = config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"skills": ["~/.claude/skills", "/abs/one"]}))
         self.assertEqual(Config.load().skills, ["~/.claude/skills", "/abs/one"])
@@ -307,4 +306,4 @@ class ConfigSkillsTest(unittest.TestCase):
         config.skills = ["x"]
         config.model = "test:stub"
         config.save()
-        self.assertNotIn("skills", json.loads(config_path(DEFAULT_PROFILE).read_text()))
+        self.assertNotIn("skills", json.loads(config_path().read_text()))

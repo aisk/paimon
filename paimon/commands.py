@@ -20,7 +20,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
-from .config import UNSET, Config, config_path, validate_profile
+from .config import UNSET, Config, config_path
 from .errors import PaimonError
 from .llm import LOGIN_PROVIDERS, build_model, is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
@@ -50,18 +50,6 @@ def latest_session() -> Session:
     return sessions[0]
 
 
-def _profile_option(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--profile", default=None, metavar="NAME",
-                        help="use this named profile's configuration")
-
-
-def _resolve_profile(parser: argparse.ArgumentParser, args: argparse.Namespace) -> str:
-    try:
-        return validate_profile(args.profile)
-    except ValueError as exc:
-        parser.error(str(exc))
-
-
 def version() -> str:
     try:
         return metadata.version("paimon")
@@ -79,7 +67,7 @@ def _ready_error(config: Config) -> Optional[str]:
     """
     api_base, api_key = config.provider_auth()
     try:
-        build_model(config.model, api_base=api_base, api_key=api_key, profile=config.profile)
+        build_model(config.model, api_base=api_base, api_key=api_key)
     except Exception as exc:
         return str(exc)
     return None
@@ -94,12 +82,10 @@ def status(argv: list) -> int:
                     "credentials, 1 when login or credentials are still needed.",
     )
     parser.add_argument("--json", action="store_true", help="one JSON object on stdout")
-    _profile_option(parser)
     args = parser.parse_args(argv)
-    profile = _resolve_profile(parser, args)
 
     try:
-        config = Config.load(profile)
+        config = Config.load()
     except PaimonError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
@@ -119,7 +105,7 @@ def status(argv: list) -> int:
             "api_base": api_base,
             "api_key_set": bool(api_key),
             "safe_commands": config.safe_commands,
-            "config_path": str(config_path(profile)),
+            "config_path": str(config_path()),
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
     elif configured:
@@ -134,7 +120,7 @@ def status(argv: list) -> int:
             print(f"api base: {api_base}")
         if not config.safe_commands:
             print("safe read-only commands: off (strict)")
-        print(f"config: {config_path(profile)}")
+        print(f"config: {config_path()}")
         print(f"sessions here: {len(Session.list(Path.cwd()))}")
         if not ready:
             print(f"not ready: {error}")
@@ -164,7 +150,7 @@ def _read_api_key(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
-def _browser_login(provider: str, profile: str) -> None:
+def _browser_login(provider: str) -> None:
     """Sign in to a plan from a terminal: print the address, wait for the
     browser to come back, or for the redirect URL pasted on stdin."""
     import asyncio
@@ -197,7 +183,7 @@ def _browser_login(provider: str, profile: str) -> None:
             # A daemon thread: a read still blocked on stdin when the browser
             # callback wins must not keep the process alive.
             threading.Thread(target=read_line, daemon=True).start()
-        await plan.login(profile, show_url, pasted)
+        await plan.login(show_url, pasted)
 
     asyncio.run(run())
 
@@ -224,9 +210,7 @@ def login(argv: list) -> int:
                             help="read the API key from stdin")
     parser.add_argument("--force", action="store_true",
                         help="set an unreadable config aside and log in fresh")
-    _profile_option(parser)
     args = parser.parse_args(argv)
-    profile = _resolve_profile(parser, args)
 
     try:
         provider, _ = split_model_string(args.model)
@@ -240,7 +224,7 @@ def login(argv: list) -> int:
         return 1
 
     try:
-        config = Config.load(profile)
+        config = Config.load()
     except PaimonError as exc:
         # The only recovery path the CLI offers for a damaged config: without
         # it the file can only be repaired by hand, since every command
@@ -252,7 +236,7 @@ def login(argv: list) -> int:
             return 1
         # Kept rather than deleted: it holds every provider's key and the
         # browser logins, which a hand repair can still get back.
-        path = config_path(profile)
+        path = config_path()
         aside = path.with_name(path.name + ".broken")
         try:
             path.replace(aside)
@@ -263,10 +247,10 @@ def login(argv: list) -> int:
             return 1
         else:
             print(f"paimon: the unreadable config was kept as {aside}", file=sys.stderr)
-        config = Config(profile=profile)
+        config = Config()
     try:
         if provider in LOGIN_PROVIDERS:
-            _browser_login(provider, profile)
+            _browser_login(provider)
         config.save(
             model=args.model,
             # An absent flag keeps the stored value; only an explicit '' clears it.

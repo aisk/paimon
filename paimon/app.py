@@ -18,9 +18,8 @@ from textual.widgets import ContentSwitcher, Static
 from . import herdr
 from .agent import Agent, Job
 from .agentpane import AgentPane
-from .config import DEFAULT_PROFILE, Config, list_profiles
 from .errors import PaimonError
-from .login import LoginScreen, PickerScreen, PromptScreen
+from .login import LoginScreen
 from .pane import Pane, SessionPane
 from .session import SessionError
 from .tabs import PaneTabs
@@ -63,11 +62,6 @@ class PaimonApp(App):
                 "Login / switch provider",
                 "Reconfigure model, API base and API key",
                 self.action_login,
-            ),
-            SystemCommand(
-                "Switch profile",
-                "Use another profile's account and model, or create a new one",
-                self.action_switch_profile,
             ),
             SystemCommand(
                 "Toggle thinking display",
@@ -218,10 +212,8 @@ class PaimonApp(App):
             return
         session_id = pane.agent.session.id
         resume = [herdr.NAME, "--resume", session_id, "--mode", pane.mode]
-        # Read now rather than at launch: both follow a login or a profile
-        # switch made from inside the app.
-        if self.config.profile != DEFAULT_PROFILE:
-            resume += ["--profile", self.config.profile]
+        # Read now rather than at launch: it follows a login made from inside
+        # the app.
         if self.config.model:
             resume += ["--model", self.config.model]
         self._herdr.report(herdr.Report(state, session_id, (*resume, *self._resume_flags)))
@@ -471,9 +463,9 @@ class PaimonApp(App):
         """Whether a running turn makes it unsafe to rewrite the config.
 
         Config is process-wide, and a turn re-reads the model at the top of
-        every step (Agent._model), so a login or profile switch landing
-        mid-turn silently swaps providers between two tool calls. Both refuse
-        while any pane is running a turn.
+        every step (Agent._model), so a login landing mid-turn silently
+        swaps providers between two tool calls. It is refused while any pane
+        is running a turn.
         """
         return any(pane.is_busy for pane in self.panes)
 
@@ -498,58 +490,6 @@ class PaimonApp(App):
             self.pane._focus_input()
 
         self.push_screen(LoginScreen(), _done)
-
-    # ---- profiles -----------------------------------------------------------
-
-    _NEW_PROFILE = "New profile…"
-
-    def _apply_config(self, config: Config) -> None:
-        """Config is process-wide, so every pane's agent moves with it."""
-        self.config = config
-        for pane in self.sessions:
-            pane.agent.config = config
-
-    @work
-    async def action_switch_profile(self) -> None:
-        if self._config_is_busy():
-            self.pane.notice(Content.from_markup("[$text-muted]Busy — switch profiles after this turn[/]"))
-            return
-        current = self.config.profile
-        labels = {f"{name} (current)" if name == current else name: name
-                  for name in list_profiles()}
-        choice = await self.push_screen_wait(
-            PickerScreen("Switch profile", [*labels, self._NEW_PROFILE]))
-        if choice == self._NEW_PROFILE:
-            choice = await self.push_screen_wait(PromptScreen("New profile name"))
-        # An unlisted typed name is accepted too: switching to a profile that
-        # does not exist yet is how one gets created.
-        name = labels.get(choice, choice) if choice else None
-        if name is None or name == current:
-            self.pane._focus_input()
-            return
-        try:
-            switched = Config.load(name)
-        except (ValueError, PaimonError) as exc:
-            self.pane.notice(Content.from_markup("[$text-error b]Cannot switch:[/] $body", body=str(exc)))
-            self.pane._focus_input()
-            return
-        previous_config = self.config
-        self._apply_config(switched)
-        if not self.config.model:
-            completed = await self.push_screen_wait(LoginScreen())
-            if not completed:
-                self._apply_config(previous_config)
-                self.pane.notice(Content.from_markup("[$text-muted]Profile switch cancelled[/]"))
-                self.pane._focus_input()
-                return
-        if self.config.theme in self.available_themes:
-            self.theme = self.config.theme
-        self.pane.notice(Content.from_markup(
-            "[$text-success b]Profile:[/] $name  [$text-muted]$model[/]",
-            name=name, model=self.config.model or ""))
-        self.refresh_statusbar()
-        self._report_herdr()
-        self.pane._focus_input()
 
     # ---- status bar ---------------------------------------------------------
 
@@ -583,8 +523,6 @@ class PaimonApp(App):
         # The agent's model, not the config's: a pane may override it.
         parts = [f"{pane.mode} mode", pane.agent.model_name or "no model",
                  f"session {pane.agent.session.id[:8]}"]
-        if self.config.profile != DEFAULT_PROFILE:
-            parts.insert(1, f"profile {self.config.profile}")
         agents = sum(1 for job in pane.agent.jobs.values() if job.kind == "agent" and job.running)
         if agents:
             parts.append(f"{agents} agent{'s' if agents > 1 else ''} running")

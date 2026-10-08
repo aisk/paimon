@@ -220,11 +220,11 @@ class LoginTest(CommandTestCase):
         with patch("paimon.commands._browser_login") as sign_in:
             code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5")
         self.assertEqual(code, 0)
-        sign_in.assert_called_once_with("chatgpt", "default")
+        sign_in.assert_called_once_with("chatgpt")
         self.assertEqual(json.loads(config_path().read_text()), {"model": "chatgpt:gpt-5.5"})
 
     def test_antigravity_login_says_it_is_unsupported_before_signing_in(self) -> None:
-        async def sign_in(profile, show_url, pasted) -> None:
+        async def sign_in(show_url, pasted) -> None:
             show_url("https://accounts.example/authorize")
 
         with patch("paimon.antigravity.login", sign_in), patch("paimon.antigravity.open_browser"):
@@ -257,41 +257,6 @@ class LoginTest(CommandTestCase):
         self.assertEqual(code, 1)
         self.assertIn("ChatGPT plan", out)
         self.assertIn("not signed in to ChatGPT", out)
-
-
-class ProfileTest(CommandTestCase):
-    def test_login_and_status_share_a_profile(self) -> None:
-        with patch.dict("os.environ", {"WORK_KEY": "sk-work"}):
-            code, out, err = self._run("login", "--profile", "work", "--model",
-                                       "openai:gpt-5", "--api-key-env", "WORK_KEY")
-        self.assertEqual(code, 0)
-        profile_config = self.home / "config" / "work" / "config.json"
-        stored = json.loads(profile_config.read_text())
-        self.assertEqual(stored["providers"]["openai"]["api_key"], "sk-work")
-
-        code, out, err = self._run("status", "--profile", "work", "--json")
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["model"], "openai:gpt-5")
-
-    def test_default_profile_is_untouched(self) -> None:
-        with patch.dict("os.environ", {"WORK_KEY": "sk-work"}):
-            self._run("login", "--profile", "work", "--model", "openai:gpt-5",
-                      "--api-key-env", "WORK_KEY")
-        code, out, err = self._run("status", "--json")
-        self.assertEqual(code, 1)
-        self.assertFalse(json.loads(out)["configured"])
-
-    def test_traversal_in_profile_name_is_rejected(self) -> None:
-        code, out, err = self._run("status", "--profile", "../evil")
-        self.assertEqual(code, 2)
-        self.assertIn("invalid profile name", err)
-
-    def test_default_profile_lives_in_its_own_directory(self) -> None:
-        with patch.dict("os.environ", {"KEY": "sk-x"}):
-            code, out, err = self._run("login", "--model", "openai:gpt-5", "--api-key-env", "KEY")
-        self.assertEqual(code, 0)
-        path = self.home / "config" / "default" / "config.json"
-        self.assertEqual(json.loads(path.read_text())["model"], "openai:gpt-5")
 
 
 class SessionsTest(CommandTestCase):

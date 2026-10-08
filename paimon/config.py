@@ -1,20 +1,17 @@
 """Model settings loaded from a JSON config file.
 
-$PAIMON_CONFIG_HOME (default ~/.config/paimon/) holds one directory per
-profile, each fully independent — model, keys, theme, everything. The profile
-named "default" is used unless another one is activated. Credentials are
-scoped per provider ("providers": {"zai": {"api_base": ..., "api_key": ...}}),
-so one profile holds an account per provider and switching models never
-borrows another provider's key. A provider that signs in through the browser
-keeps its tokens in the same map (see paimon.chatgpt). The stored model plus
-its provider's
-credentials are turned into a pydantic-ai model by paimon.llm; provider
-environment variables are the fallback when unset.
+$PAIMON_CONFIG_HOME (default ~/.config/paimon/) holds config.json: model,
+keys, theme, everything. Credentials are scoped per provider ("providers":
+{"zai": {"api_base": ..., "api_key": ...}}), so it holds an account per
+provider and switching models never borrows another provider's key. A
+provider that signs in through the browser keeps its tokens in the same map
+(see paimon.chatgpt). The stored model plus its provider's credentials are
+turned into a pydantic-ai model by paimon.llm; provider environment variables
+are the fallback when unset.
 """
 
 import json
 import os
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,13 +21,9 @@ from typing import Callable, Optional
 from . import lockfile
 from .errors import PaimonError
 
-DEFAULT_PROFILE = "default"
-
 # Default for save() arguments, so passing None can mean "clear the stored
 # value" (re-logging in with a blank api_base must drop the old override).
 UNSET: object = object()
-
-_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 
 # How long save() waits for another Paimon's write to finish before giving up
 # with a diagnostic. The lock is only held for the few milliseconds of one
@@ -73,42 +66,28 @@ def _parse_providers(raw: object) -> dict:
 
 
 def config_root() -> Path:
-    """The directory holding all profiles — not itself a profile."""
     override = os.environ.get("PAIMON_CONFIG_HOME")
     return Path(override) if override else Path.home() / ".config" / "paimon"
 
 
-def validate_profile(name: Optional[str]) -> str:
-    """Normalize a --profile value: None means the default profile.
-
-    Raises ValueError on a name that could escape the config root.
-    """
-    name = name or DEFAULT_PROFILE
-    if not re.fullmatch(_NAME_PATTERN, name):
-        raise ValueError(f"invalid profile name {name!r}")
-    return name
+def config_path() -> Path:
+    return config_root() / "config.json"
 
 
-def list_profiles() -> list[str]:
-    """Profile names present on disk, always including the default."""
-    names = {DEFAULT_PROFILE}
-    root = config_root()
-    if root.is_dir():
-        names.update(entry.name for entry in root.iterdir()
-                     if entry.is_dir() and re.fullmatch(_NAME_PATTERN, entry.name))
-    return sorted(names)
-
-
-def config_dir(profile: str = DEFAULT_PROFILE) -> Path:
-    return config_root() / profile
-
-
-def config_path(profile: str = DEFAULT_PROFILE) -> Path:
-    return config_dir(profile) / "config.json"
+def _adopt_default_profile() -> None:
+    """Move the config up from where it lived while there were profiles, each
+    in a directory of its own with "default" the one in use."""
+    path = config_path()
+    old = config_root() / "default" / "config.json"
+    if not path.exists() and old.exists():
+        try:
+            old.replace(path)
+        except OSError:
+            pass
 
 
 def _lock_path(path: Path) -> Path:
-    """The sidecar lock for one profile's config.
+    """The sidecar lock for the config.
 
     Never lock config.json itself: the atomic replace swaps the file's inode,
     which would strand the lock on the file readers just replaced.
@@ -176,7 +155,7 @@ def _replace(tmp: Path, path: Path) -> None:
 
 
 def write_atomic(path: Path, payload: str) -> None:
-    """Replace path's contents in one step. Call only under the profile lock.
+    """Replace path's contents in one step. Call only under the config lock.
 
     The new bytes go to a sibling temp file that is fsynced and renamed over
     path, so a reader (load() never locks) always sees either the complete
@@ -213,7 +192,7 @@ def _update_file(path: Path, change: Callable[[dict], None]) -> dict:
     written.
 
     Writers serialize on a sidecar lock, re-read inside it and replace the
-    file atomically, so two Paimons sharing a profile cannot lose each
+    file atomically, so two Paimons running at once cannot lose each
     other's fields and a reader never sees a half-written config.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -256,33 +235,27 @@ def _merge_provider(data: dict, provider: str, fields: dict) -> None:
         data.pop("providers", None)
 
 
-def read_provider(profile: str, provider: str) -> dict:
+def read_provider(provider: str) -> dict:
     """One provider's entry exactly as stored, {} when there is none.
 
     Config.providers only carries api_base and api_key. This is for the
     providers that keep more than that, and need it fresh from the file.
     """
-    providers = _read_file_config(config_path(profile)).get("providers")
+    providers = _read_file_config(config_path()).get("providers")
     entry = providers.get(provider) if isinstance(providers, dict) else None
     return dict(entry) if isinstance(entry, dict) else {}
 
 
-def update_provider(profile: str, provider: str, fields: dict) -> dict:
+def update_provider(provider: str, fields: dict) -> dict:
     """Merge fields into one provider's stored entry and return the entry."""
-    data = _update_file(config_path(profile), lambda data: _merge_provider(data, provider, fields))
+    data = _update_file(config_path(), lambda data: _merge_provider(data, provider, fields))
     return dict(data.get("providers", {}).get(provider, {}))
 
 
 @dataclass
 class Config:
-    """Settings owned by whoever constructed them — no module-level state.
+    """Settings owned by whoever constructed them — no module-level state."""
 
-    ``profile`` names the config directory this instance was loaded from and
-    is where ``save()`` writes back, so concurrent Config instances bound to
-    different profiles never interfere.
-    """
-
-    profile: str = DEFAULT_PROFILE
     model: Optional[str] = None
     # Per-provider credentials: {"zai": {"api_base": ..., "api_key": ...}}.
     # Keyed by provider so switching models never sends one provider's key
@@ -319,17 +292,12 @@ class Config:
     web_search: bool = True
 
     @classmethod
-    def load(cls, profile: Optional[str] = None) -> "Config":
-        """Load the named profile's settings (None means the default profile).
-
-        Raises ValueError on an invalid profile name.
-        """
-        profile = validate_profile(profile)
-        data = _read_file_config(config_path(profile))
+    def load(cls) -> "Config":
+        _adopt_default_profile()
+        data = _read_file_config(config_path())
         compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
         skills = data.get("skills")
         return cls(
-            profile=profile,
             model=data.get("model"),
             providers=_parse_providers(data.get("providers")),
             theme=data.get("theme"),
@@ -409,7 +377,7 @@ class Config:
             if provider is not None:
                 _merge_provider(data, provider, dict(auth_passed))
 
-        data = _update_file(config_path(self.profile), change)
+        data = _update_file(config_path(), change)
 
         # Only the fields this call wrote are refreshed from the file. A
         # runtime override the caller set on the instance (paimon --model X

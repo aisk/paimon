@@ -29,12 +29,12 @@ _TOOL = ToolDefinition(name="read", description="Read a file", parameters_json_s
 
 
 def _store(**fields) -> None:
-    update_provider("default", "antigravity", {"access": "at-1", "refresh": "rt-1", "project_id": "proj-1",
+    update_provider("antigravity", {"access": "at-1", "refresh": "rt-1", "project_id": "proj-1",
                                                "expires": time.time() + 3600, **fields})
 
 
 def _stored() -> dict:
-    return read_provider("default", "antigravity")
+    return read_provider("antigravity")
 
 
 def _sse(*chunks: dict) -> bytes:
@@ -278,7 +278,7 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json=project)
 
         with patch("paimon.antigravity.httpx.post", side_effect=post):
-            await antigravity.login(None, show_url)
+            await antigravity.login(show_url)
         return parse_qs(urlsplit(shown[0]).query), posts
 
     async def test_the_browser_callback_completes_the_login_and_finds_the_project(self) -> None:

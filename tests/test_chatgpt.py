@@ -24,12 +24,12 @@ from paimon.llm import ask_once, build_model
 
 
 def _store(**fields) -> None:
-    update_provider("default", "chatgpt", {"access": "at-1", "refresh": "rt-1", "client_id": "client-1",
+    update_provider("chatgpt", {"access": "at-1", "refresh": "rt-1", "client_id": "client-1",
                                            "expires": time.time() + 3600, **fields})
 
 
 def _stored() -> dict:
-    return read_provider("default", "chatgpt")
+    return read_provider("chatgpt")
 
 
 def _token_response(access: str, refresh: str, scope: str = "openid chatgpt.tokens.use.direct") -> httpx.Response:
@@ -185,7 +185,7 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
             shown.append(url)
             asyncio.get_running_loop().create_task(respond(parse_qs(urlsplit(url).query)))
 
-        await chatgpt.login(None, show_url, pasted)
+        await chatgpt.login(show_url, pasted)
         return shown
 
     async def _browser(self, query: str) -> bytes:
@@ -278,7 +278,7 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
             holder.bind(("127.0.0.1", self.port))
             holder.listen()
             with self.assertRaisesRegex(chatgpt.ChatGPTAuthError, "in use"):
-                await chatgpt.login(None, lambda url: None)
+                await chatgpt.login(lambda url: None)
 
 
 class OpenBrowserTest(unittest.TestCase):

@@ -1,5 +1,3 @@
-import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -215,53 +213,7 @@ class HandoffTest(AppTestCase):
             self.assertFalse(started)
             self.assertEqual(app.pane.agent.session.id, old_id)
 
-
-class ProfileSwitchTest(AppTestCase):
-    @staticmethod
-    def _write_profile(name: str, **data) -> None:
-        directory = Path(os.environ["PAIMON_CONFIG_HOME"]) / name
-        directory.mkdir(parents=True)
-        (directory / "config.json").write_text(json.dumps(data), encoding="utf-8")
-
-    async def test_switch_reloads_config_and_statusbar(self) -> None:
-        self._write_profile("work", model="test:work")
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            app.action_switch_profile()
-            await pilot.pause()
-            self.assertIsInstance(app.screen, PickerScreen)
-            app.screen.dismiss("work")
-            await pilot.pause()
-            self.assertEqual(app.config.profile, "work")
-            self.assertEqual(app.config.model, "test:work")
-            self.assertIs(app.pane.agent.config, app.config)
-            self.assertIn("profile work", str(app.query_one("#statusbar", Static).render()))
-
-    async def test_unconfigured_profile_opens_login_and_cancel_reverts(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            app.action_switch_profile()
-            await pilot.pause()
-            # An unlisted typed name switches to a not-yet-existing profile,
-            # which has no model, so the login flow opens. Cancel it.
-            app.screen.dismiss("fresh")
-            await self._wait_for(
-                pilot, lambda: self._login_screens(app) and isinstance(app.screen, PickerScreen))
-            await pilot.press("escape")
-            await self._wait_for(pilot, lambda: app.config.profile == "default")
-            self.assertEqual(app.config.profile, "default")
-            self.assertEqual(app.config.model, "test-model")
-            self.assertIs(app.pane.agent.config, app.config)
-
-    async def test_noop_while_turn_is_running(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            hold_turn(app.pane)
-            app.action_switch_profile()
-            await pilot.pause()
-            self.assertNotIsInstance(app.screen, PickerScreen)
-            self.assertEqual(app.config.profile, "default")
-
+class LoginTest(AppTestCase):
     async def test_login_is_refused_while_a_turn_is_running(self) -> None:
         """Login rewrites the model every running turn re-reads at each step."""
         app = self.make_app()
@@ -283,7 +235,7 @@ class ProfileSwitchTest(AppTestCase):
     async def test_chatgpt_login_asks_for_no_key_and_saves_the_model(self) -> None:
         pasted: list[str] = []
 
-        async def sign_in(profile, show_url, redirect) -> None:
+        async def sign_in(show_url, redirect) -> None:
             show_url("https://auth.example/authorize")
             pasted.append(await redirect)
 
@@ -308,7 +260,7 @@ class ProfileSwitchTest(AppTestCase):
                 self.assertEqual(app.config.providers, {})
 
     async def test_antigravity_login_shows_that_it_is_unsupported(self) -> None:
-        async def sign_in(profile, show_url, redirect) -> None:
+        async def sign_in(show_url, redirect) -> None:
             await redirect
 
         app = self.make_app()
@@ -326,7 +278,7 @@ class ProfileSwitchTest(AppTestCase):
                 await self._wait_for(pilot, lambda: self._login_screens(app) == [])
 
     async def test_a_cancelled_chatgpt_login_keeps_the_model(self) -> None:
-        async def sign_in(profile, show_url, redirect) -> None:
+        async def sign_in(show_url, redirect) -> None:
             await redirect
 
         app = self.make_app()

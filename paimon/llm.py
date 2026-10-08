@@ -30,7 +30,7 @@ from .errors import PaimonError
 CHATGPT_PROVIDER = "chatgpt"
 # Likewise, served by paimon.antigravity.
 ANTIGRAVITY_PROVIDER = "antigravity"
-# The providers whose credential is a browser login kept in the profile,
+# The providers whose credential is a browser login kept in the config,
 # rather than an endpoint and a key, with the name of the plan each spends.
 LOGIN_PROVIDERS = {CHATGPT_PROVIDER: "ChatGPT", ANTIGRAVITY_PROVIDER: "Antigravity"}
 
@@ -164,19 +164,16 @@ def _provider_resolved_key(provider_cls) -> str:
         return "unset"
 
 
-def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None,
-                profile: Optional[str] = None) -> Model:
-    """``profile`` only matters to providers whose credential is a login they
-    read from the profile themselves, rather than a key passed in here."""
+def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None) -> Model:
     provider_name, model_name = split_model_string(model)
     if provider_name == CHATGPT_PROVIDER:
         from . import chatgpt
 
-        return chatgpt.build_model(model_name, profile)
+        return chatgpt.build_model(model_name)
     if provider_name == ANTIGRAVITY_PROVIDER:
         from . import antigravity
 
-        return antigravity.build_model(model_name, profile)
+        return antigravity.build_model(model_name)
     provider_cls = provider_class(provider_name)
     parameters = inspect.signature(provider_cls.__init__).parameters
 

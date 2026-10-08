@@ -3,7 +3,7 @@
 One event per invocation, delivered to GA4's gtag collection endpoint from a
 background thread so launch never waits on the network. The only identity is
 a random UUID minted on first use and kept in telemetry.json next to the
-profiles (shared by every profile, so one person counts once). No prompt
+config. No prompt
 text, paths, credentials or anything else from a session ever leaves the
 machine. Setting DO_NOT_TRACK or PAIMON_NO_TELEMETRY disables it entirely,
 including the state file.
