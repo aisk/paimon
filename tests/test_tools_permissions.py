@@ -85,10 +85,6 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gate("write_todos", {"todos": []}, mode, self.cwd), "allow")
         self.assertEqual(gate("read_file", {}, "read", self.cwd), "allow")
 
-    def test_start_new_session_always_confirms(self) -> None:
-        for mode in MODES:
-            self.assertEqual(gate("start_new_session", {"prompt": "x"}, mode, self.cwd), "confirm")
-
     def test_safe_shell_commands_auto_allowed(self) -> None:
         with patch("paimon.tools.shell_executable", return_value="/bin/sh"):
             for mode in ("read", "auto"):

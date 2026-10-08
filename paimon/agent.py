@@ -808,8 +808,11 @@ class Agent:
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
-        if (refusal := await self._refusal(call.tool_name, args)) is not None:
-            slot.content = refusal
+        # Only the user decides this, in every mode: the prompt is all the
+        # next session will know, and reading it is what the confirmation is
+        # for. No confirm hook means nobody to ask, so the call is refused.
+        if self.confirm is None or not await self.confirm(call.tool_name, args):
+            slot.content = tools.USER_DENIAL
             slot.outcome = "denied"
             persist()
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)

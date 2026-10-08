@@ -83,8 +83,7 @@ class Tool:
     the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
     "write" runs freely inside cwd in auto mode, "execute" is held outside
     yolo except for commands safe_command() recognizes as read-only,
-    "background" is "execute" with no such exception, "none" is never gated,
-    "always" needs the user's confirmation even in yolo mode.
+    "background" is "execute" with no such exception, "none" is never gated.
     """
 
     description: str
@@ -634,15 +633,12 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
     """Decide what stands between a tool call and running it.
 
     "allow" is nothing. A call the mode does not let through on its own is
-    held: "deny" in read mode, "review" in auto mode. "confirm" is the one
-    thing only the user can approve, whatever the mode.
+    held: "deny" in read mode, "review" in auto mode.
 
     ``safe_commands`` lets shell commands recognized as clearly read-only
     through (see safe_command); False holds every command.
     """
     tool = (REGISTRY if registry is None else registry).get(name)
-    if tool is not None and tool.access == "always":
-        return "confirm"
     if mode == "yolo" or tool is None or tool.access == "none":
         return "allow"
     held = "review" if mode == "auto" else "deny"
@@ -2032,10 +2028,11 @@ REGISTRY: dict[str, Tool] = {
         ),
         params=AskUserArgs,
     ),
-    # Stateful: ends the session, so the agent loop handles it.
+    # Stateful: ends the session, so the agent loop handles it, and asks the
+    # user itself, whatever the mode.
     "start_new_session": Tool(
         run=None,
-        access="always",
+        access="none",
         description=(
             "Hand off to a fresh session: end this one and start a new empty session "
             "whose first user message is your prompt. Use when most of the conversation "
