@@ -149,6 +149,8 @@ LoginScreen, BrowserLoginScreen, PickerScreen, PromptScreen { align: center midd
     width: 70%; height: auto; max-height: 70%;
     padding: 1 2; border: round $accent; background: $surface;
 }
+/* The sign-in address runs to many lines, and the input under it must stay in view. */
+BrowserLoginScreen #prompt-screen-box { max-height: 100%; overflow-y: auto; }
 #picker-title, #prompt-screen-title { margin-bottom: 1; }
-#picker-filter, #browser-login-notice, #browser-login-status { margin-bottom: 1; }
+#picker-filter, #browser-login-notice, #browser-login-status, #browser-login-copy { margin-bottom: 1; }
 #picker-list { height: auto; max-height: 20; }

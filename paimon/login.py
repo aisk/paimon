@@ -23,10 +23,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from textual.content import Content
+from textual.style import Style
 
 from paimon import llm
 from paimon.errors import PaimonError
@@ -168,6 +169,7 @@ class BrowserLoginScreen(ModalScreen[bool]):
         self._plan = importlib.import_module(f"paimon.{provider}")
         self._name = LOGIN_PROVIDERS[provider]
         self._pasted: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._url = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="prompt-screen-box"):
@@ -176,6 +178,7 @@ class BrowserLoginScreen(ModalScreen[bool]):
                 yield Static(Content.from_markup("[$text-warning]$notice[/]", notice=notice),
                              id="browser-login-notice")
             yield Static("Opening the browser…", id="browser-login-status")
+            yield Button("Copy link", id="browser-login-copy", compact=True, disabled=True)
             yield Input(placeholder="or paste the final redirect URL here", id="prompt-screen-input")
 
     def on_mount(self) -> None:
@@ -185,8 +188,19 @@ class BrowserLoginScreen(ModalScreen[bool]):
     def _show_url(self, url: str) -> None:
         lead = ("Finish signing in in the browser. If it did not open, visit:"
                 if self._plan.open_browser(url) else "Open this address in a browser to sign in:")
-        self.query_one("#browser-login-status", Static).update(
-            Content.from_markup("$lead\n\n$url", lead=lead, url=url))
+        # A terminal hyperlink stays one link however the box wraps it, so it
+        # opens in the browser of the machine the terminal runs on.
+        link = Content(url).stylize(Style(link=url, underline=True))
+        self.query_one("#browser-login-status", Static).update(Content.assemble(lead, "\n\n", link))
+        self._url = url
+        self.query_one("#browser-login-copy", Button).disabled = False
+
+    @on(Button.Pressed, "#browser-login-copy")
+    def _copy_url(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.app.copy_to_clipboard(self._url)
+        event.button.label = "Copied"
+        self.query_one("#prompt-screen-input", Input).focus()
 
     @work
     async def _flow(self) -> None:

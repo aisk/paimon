@@ -250,6 +250,11 @@ class LoginTest(AppTestCase):
                 await self._wait_for(pilot, lambda: opened.called)
                 opened.assert_called_once_with("https://auth.example/authorize")
 
+                status = app.screen.query_one("#browser-login-status").render()
+                self.assertIn("https://auth.example/authorize", {span.style.link for span in status.spans})
+                await pilot.click("#browser-login-copy")
+                self.assertEqual(app.clipboard, "https://auth.example/authorize")
+
                 app.screen.query_one(Input).value = "http://127.0.0.1:1455/auth/callback?code=x"
                 await pilot.press("enter")
                 await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
