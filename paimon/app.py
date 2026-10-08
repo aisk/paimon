@@ -19,7 +19,7 @@ from . import herdr
 from .agent import Agent, Job
 from .agentpane import AgentPane
 from .errors import PaimonError
-from .login import LoginScreen
+from .login import LoginScreen, PickerScreen
 from .pane import Pane, SessionPane
 from .session import SessionError
 from .tabs import PaneTabs
@@ -62,6 +62,11 @@ class PaimonApp(App):
                 "Login / switch provider",
                 "Reconfigure model, API base and API key",
                 self.action_login,
+            ),
+            SystemCommand(
+                "Switch model",
+                "Change to another model of a provider you are logged in to",
+                self.action_switch_model,
             ),
             SystemCommand(
                 "Toggle thinking display",
@@ -490,6 +495,29 @@ class PaimonApp(App):
             self.pane._focus_input()
 
         self.push_screen(LoginScreen(), _done)
+
+    # ---- model --------------------------------------------------------------
+
+    def action_switch_model(self) -> None:
+        """Change the configured model without asking for credentials again."""
+        pane = self._session()
+        if pane is None:
+            return
+        if self._config_is_busy():
+            self.pane.notice(Content.from_markup("[$text-muted]Busy — switch model after this turn[/]"))
+            return
+
+        def _done(model: str | None) -> None:
+            # A turn may have started while the picker was up.
+            if not model or self._config_is_busy():
+                return
+            self.config.model = model
+            self.save_config(model=model)
+            self.pane.notice(Content.from_markup("[$text-muted]Model: $model[/]", model=model))
+            self.refresh_statusbar()
+            self._report_herdr()
+
+        self.push_screen(PickerScreen("Switch model", pane.agent.available_models()), _done)
 
     # ---- status bar ---------------------------------------------------------
 

@@ -991,8 +991,8 @@ class Agent:
 
         return f"Error: unknown tool {name!r}"
 
-    def _list_models(self) -> str:
-        """The models an agent can be started on, one qualified name per line.
+    def available_models(self) -> list[str]:
+        """The models this agent can be put on, as qualified names.
 
         Read from the config on every call rather than baked into a prompt, so
         a provider signed in to mid-session is offered from the next call on.
@@ -1013,9 +1013,13 @@ class Agent:
                     providers.append(name)
             except Exception:  # noqa: BLE001 — an unreadable login is a provider not offered
                 pass
-        lines = [f"{provider}:{name}"
-                 for provider in dict.fromkeys(providers)
-                 for name in models_for(provider)]
+        return [f"{provider}:{name}"
+                for provider in dict.fromkeys(providers)
+                for name in models_for(provider)]
+
+    def _list_models(self) -> str:
+        """The models an agent can be started on, one qualified name per line."""
+        lines = self.available_models()
         if not lines:
             return "No models are available; the user has to log in first."
         return (f"You are running on {self.model_name}. An agent can be started on:\n"

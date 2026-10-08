@@ -14,6 +14,7 @@ from textual.widgets import Input, Static
 from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import PaimonApp
+from paimon.config import Config
 from paimon.turns import TurnDriver, Outcome
 from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen
 from paimon.pane import _session_label
@@ -297,6 +298,38 @@ class LoginTest(AppTestCase):
     @staticmethod
     def _login_screens(app: PaimonApp) -> list[LoginScreen]:
         return [screen for screen in app.screen_stack if isinstance(screen, LoginScreen)]
+
+
+class ModelSwitchTest(AppTestCase):
+    CATALOG = ["zai:glm-5.3", "zai:glm-5.3-flash", "openai:gpt-6.1-sol"]
+
+    def _app(self) -> PaimonApp:
+        return self.make_app(config=Config(model="zai:glm-5.3", providers={"zai": {"api_key": "k"}}))
+
+    async def test_switching_saves_the_model_for_every_pane(self) -> None:
+        app = self._app()
+        async with app.run_test() as pilot:
+            first = app.pane
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            with patch("paimon.llm.known_models", return_value=self.CATALOG):
+                app.action_switch_model()
+                await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            self.assertEqual(app.screen._options, ["zai:glm-5.3", "zai:glm-5.3-flash"],
+                             "only providers there is a credential for")
+            app.screen.dismiss("zai:glm-5.3-flash")
+            await self._wait_for(pilot, lambda: Config.load().model == "zai:glm-5.3-flash")
+            self.assertEqual(app.pane.agent.model_name, "zai:glm-5.3-flash")
+            self.assertEqual(first.agent.model_name, "zai:glm-5.3-flash")
+            self.assertEqual(Config.load().providers, {}, "credentials are not touched")
+
+    async def test_switching_is_refused_while_a_turn_is_running(self) -> None:
+        app = self._app()
+        async with app.run_test() as pilot:
+            hold_turn(app.pane)
+            app.action_switch_model()
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, PickerScreen)
 
 
 class PaneSessionLockTest(AppTestCase):
