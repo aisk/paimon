@@ -13,6 +13,8 @@ from textual import events, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.content import Content
+from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
 
 from . import herdr, llm
@@ -24,7 +26,7 @@ from .pane import Pane, SessionPane
 from .session import SessionError
 from .tabs import PaneTabs
 from .commandpane import CommandPane
-from .ui import PromptInput
+from .ui import BlockingPanel, PromptInput
 
 # Every pane holds a live agent and its context, or a live process, so panes
 # cost model requests, memory and file descriptors, not just a row in the
@@ -35,6 +37,21 @@ MAX_PANES = 8
 
 class PaneLimitError(PaimonError):
     """Every pane is taken, so nothing more can be put on screen."""
+
+
+class PaneScreen(Screen):
+    """Reconcile pending input when a modal hands the keyboard back."""
+
+    _blocked_before_suspend = False
+    _had_focus_before_suspend = True
+
+    def on_screen_suspend(self) -> None:
+        self._blocked_before_suspend = self.app.pane.needs_confirm
+        self._had_focus_before_suspend = self.focused is not None
+
+    def on_screen_resume(self) -> None:
+        self.call_later(self.app.resume_pane_focus, not self._blocked_before_suspend,
+                        not self._had_focus_before_suspend)
 
 
 class PaimonApp(App):
@@ -53,6 +70,7 @@ class PaimonApp(App):
         Binding("ctrl+pageup", "prev_pane", "Previous pane", priority=True),
         Binding("ctrl+pagedown", "next_pane", "Next pane", priority=True),
         Binding("ctrl+g", "goto_attention", "Go to a pane waiting on you", priority=True),
+        Binding("ctrl+l", "focus_input", "Focus input / answer", priority=True),
     ]
 
     def get_system_commands(self, screen) -> list[SystemCommand]:
@@ -115,7 +133,8 @@ class PaimonApp(App):
         prompt = pane.query_one(PromptInput)
         prompt.clear()
         prompt.insert(f"/skill:{name} ")
-        prompt.focus()
+        self._switch_to(pane)
+        pane._request_focus(prompt)
 
     def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False,
                  reporter: herdr.Reporter | None = None, resume_flags: tuple[str, ...] = ()) -> None:
@@ -223,11 +242,78 @@ class PaimonApp(App):
             resume += ["--model", self.config.model]
         self._herdr.report(herdr.Report(state, session_id, (*resume, *self._resume_flags)))
 
+    def focus_pane_widget(self, pane: Pane, widget: Widget) -> None:
+        """Transfer keyboard ownership only on the visible, base screen.
+
+        Widget.focus() defers the transfer; a modal or tab change can occur in
+        between. Validate and transfer synchronously instead.
+        """
+        if (pane is not self.pane or not widget.is_mounted
+                or pane not in widget.ancestors
+                or self.screen is not self._switcher.screen):
+            return
+        if not widget.focusable or any(not node.display or not node.visible
+                                       for node in [widget, *widget.ancestors]):
+            return
+        self.screen.set_focus(widget, scroll_visible=False)
+
     def _switch_to(self, pane: Pane) -> None:
+        if self.screen is not self._switcher.screen:
+            return
+        if pane is self.pane:
+            return
+        focused = self.focused
+        if focused is not None and self.pane in focused.ancestors:
+            self.pane._last_focus = focused
+        # Never leave keyboard ownership in a pane we are about to hide.
+        self.screen.set_focus(None)
         self._current = pane
         self._switcher.current = pane.id
         self._sync_panes()
-        pane._focus_input()
+        # Preserve deliberate reading focus; a pending panel takes precedence.
+        previous = pane._last_focus
+        if pane.needs_confirm or previous is None or not previous.is_mounted:
+            pane._focus_input()
+        else:
+            self.focus_pane_widget(pane, previous)
+            if self.focused is not previous:
+                pane._focus_input()
+
+    def get_default_screen(self) -> Screen:
+        return PaneScreen(id="_default")
+
+    def resume_pane_focus(self, new_attention: bool = True, missing_focus: bool = False) -> None:
+        if self.screen is self._switcher.screen:
+            focused = self.focused
+            invalid = focused is None or self.pane not in focused.ancestors or any(
+                not node.display or not node.visible for node in [focused, *focused.ancestors])
+            if (self.pane.needs_confirm and new_attention) or invalid or missing_focus:
+                self.pane.focus_attention()
+            self.refresh_statusbar()
+
+    def action_focus_input(self) -> None:
+        self.pane.focus_attention()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"new_pane", "close_pane", "prev_pane", "next_pane",
+                      "goto_attention", "focus_input", "cycle_mode"}:
+            return len(self.screen_stack) == 1
+        return super().check_action(action, parameters)
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if (self.screen is self._switcher.screen and event.widget is self.focused
+                and self.pane in event.widget.ancestors):
+            self.pane._last_focus = event.widget
+        self.call_later(self.refresh_statusbar)
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        self.call_later(self.refresh_statusbar)
+
+    def on_app_focus(self) -> None:
+        self.call_later(self.refresh_statusbar)
+
+    def on_app_blur(self) -> None:
+        self.call_later(self.refresh_statusbar)
 
     def on_pane_state_changed(self, event: Pane.StateChanged) -> None:
         """A pane started or finished something the strip or the bar shows."""
@@ -256,11 +342,12 @@ class PaimonApp(App):
                 "[$text-error b]Cannot open a pane:[/] $body", body=str(exc)))
             return
         pane = self._make_pane(agent)
-        # Current before mounting: the pane focuses its prompt in on_mount, and
-        # only does so if it is the one on screen.
+        # Clear old ownership before mounting the new current pane.
+        self.screen.set_focus(None)
         self._current = pane
         await self._switcher.add_content(pane, set_current=True)
         self._sync_panes()
+        pane._focus_input()
 
     def _make_pane(self, agent: Agent) -> SessionPane:
         """Register a pane for an agent. The caller mounts it."""
@@ -545,7 +632,6 @@ class PaimonApp(App):
             self.exit()
         self.refresh_statusbar()
         self._report_herdr()
-        self.pane._focus_input()
 
     # ---- status bar ---------------------------------------------------------
 
@@ -573,6 +659,29 @@ class PaimonApp(App):
         if waiting:
             line = line.append_text("  ·  ").append_text(
                 f"{waiting} waiting on you (ctrl+g)", "$text-warning")
+        focused = self.focused
+        if not self.app_focus and not self.is_headless:
+            label, style = "Terminal inactive · click terminal to return", "$text-warning"
+        elif self.screen is not self._switcher.screen:
+            label, style = "Focus: dialog", "$text-accent"
+        elif focused is None or pane not in focused.ancestors:
+            label, style = "No keyboard focus · Ctrl+L to return", "$text-warning"
+        elif isinstance(focused, PromptInput):
+            label, style = "Focus: input", "$text-accent"
+        elif isinstance(focused, BlockingPanel) or any(
+                isinstance(node, BlockingPanel) for node in focused.ancestors):
+            label, style = "Focus: answer", "$text-accent"
+        elif pane.needs_confirm:
+            label, style = "Focus: reading · answer waiting (Ctrl+L)", "$text-warning"
+        elif not isinstance(pane, SessionPane):
+            label, style = "Focus: output", "$text-accent"
+        else:
+            label, style = "Focus: reading · Ctrl+L to return", "$text-warning"
+        if isinstance(pane, SessionPane) and pane.is_mounted:
+            prompt = pane.query_one(PromptInput)
+            prompt.border_subtitle = (PromptInput.INPUT_HELP if focused is prompt and self.app_focus
+                                      else "Input inactive · Ctrl+L or click here to focus")
+        line = Content.styled(label, style).append_text("  ·  ").append(line)
         bars.first(Static).update(line)
 
     def _session_status(self, pane: SessionPane, tokens: int | None) -> list[str]:

@@ -70,7 +70,7 @@ class AgentPane(Pane):
         # from whoever is typing.
         if self.is_current:
             panels = self.query(BlockingPanel)
-            (panels.last() if panels else self.transcript).focus()
+            self._request_focus(panels.last() if panels else self.transcript)
 
     def notice(self, renderable) -> None:
         self.transcript.add(renderable)
@@ -120,17 +120,17 @@ class AgentPane(Pane):
             await self.mount(panel)
             # A panel in a background pane must not grab the keyboard: the
             # user's next keystroke would answer a question they never saw.
-            if self.is_current:
-                panel.focus()
+            self._request_focus(panel)
             self.needs_confirm = True
             self._notify_state()
             try:
                 return await future == "allow"
             finally:
                 self.needs_confirm = False
-                panel.remove()
+                focused = self.app.focused if self.app.screen_stack else None
+                restore = focused is panel or (focused is not None and panel in focused.ancestors)
+                if restore and not self._pane_closing:
+                    self._request_focus(self.transcript)
+                await panel.remove()
                 if not self._pane_closing:
                     self._notify_state()
-                    # The panel takes the focus with it when it goes.
-                    if self.is_current:
-                        self.transcript.focus()

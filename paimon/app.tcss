@@ -60,10 +60,12 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
-.tool-group-header:hover, .tool-group-header:focus,
-.tool-entry-header:hover, .tool-entry-header:focus {
-    background: $primary 8%;
+.tool-group-header:hover, .tool-entry-header:hover { background: $primary 8%; }
+.tool-group-header:focus, .tool-entry-header:focus {
+    background: $primary 30%;
+    text-style: bold reverse;
 }
+#log:focus { background: $primary 4%; }
 .tool-group-body { height: auto; margin-top: 1; }
 .tool-entry { height: auto; }
 .tool-entry-header { padding-left: 1; color: $text-muted; }
@@ -123,7 +125,8 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 }
 #prompt:focus { border: round $primary; background: transparent; }
 /* A line starting with "!" runs as a shell command instead of being sent. */
-#prompt.bash, #prompt.bash:focus { border: round $accent; }
+#prompt.bash { border: round $surface-lighten-2; }
+#prompt.bash:focus { border: round $accent; }
 #statusbar { height: 1; margin: 0 2 1 2; padding: 0 1; color: $text-muted; }
 
 /* ---- permission confirmation and questions ---- */
@@ -132,11 +135,17 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     height: auto;
     margin-top: 1;
     padding: 1 2;
-    border: round $warning;
+    border: round $surface-lighten-2;
     background: transparent;
 }
-.blocking-panel:focus { border: round $warning; }
-.question-panel, .question-panel:focus, .question-panel:focus-within { border: round $accent; }
+.blocking-panel:focus, .blocking-panel:focus-within {
+    border: round $warning;
+    background: $warning 5%;
+}
+.question-panel:focus, .question-panel:focus-within {
+    border: round $accent;
+    background: $accent 5%;
+}
 #confirm-detail, #question-detail { height: auto; max-height: 12; margin-top: 1; color: $text-muted; }
 #question-detail { color: $text; }
 #confirm-options, #question-options { height: auto; margin-top: 1; }

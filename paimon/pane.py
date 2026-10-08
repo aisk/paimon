@@ -17,6 +17,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
 
 from . import lockfile, tools
@@ -120,6 +121,7 @@ class Pane(Vertical):
     needs_confirm = False
     is_busy = False
     is_running = False
+    _last_focus: Widget | None = None
 
     @property
     def is_current(self) -> bool:
@@ -140,6 +142,10 @@ class Pane(Vertical):
 
     def _focus_input(self) -> None:
         """Focus whatever this pane is waiting on, if it is the one on screen."""
+
+    def _request_focus(self, widget: Widget) -> None:
+        """All automatic pane focus goes through the app's ownership checks."""
+        self.app.focus_pane_widget(self, widget)
 
     def focus_attention(self) -> None:
         """Focus what is waiting on the user here, if anything is."""
@@ -292,7 +298,7 @@ class SessionPane(Pane):
         queued.display = False
         yield queued
         prompt = PromptInput(id="prompt", soft_wrap=True)
-        prompt.border_subtitle = "Enter send · Ctrl+J newline · / commands · Esc interrupt · Shift+Tab mode"
+        prompt.border_subtitle = PromptInput.INPUT_HELP
         yield prompt
 
     async def on_mount(self) -> None:
@@ -319,15 +325,16 @@ class SessionPane(Pane):
         screens keep the keyboard to themselves, and so does a panel that has
         taken the prompt's place.
         """
-        if not event.is_printable or len(self.app.screen_stack) > 1:
+        if not self.is_mounted or not event.is_printable or len(self.app.screen_stack) > 1:
             return
         prompt = self.query_one(PromptInput)
         if not prompt.display or isinstance(self.app.focused, BlockingPanel):
             return
         if self.app.focused is not prompt:
-            prompt.focus()
-            prompt.insert(event.character)
-            event.stop()
+            self._request_focus(prompt)
+            if self.app.focused is prompt:
+                prompt.insert(event.character)
+                event.stop()
 
     # ---- focus --------------------------------------------------------------
 
@@ -346,7 +353,7 @@ class SessionPane(Pane):
             return
         prompt = self.query_one(PromptInput)
         panels = self.query(BlockingPanel)
-        (prompt if prompt.display or not panels else panels.last()).focus()
+        self._request_focus(prompt if prompt.display or not panels else panels.last())
 
     # ---- session switching --------------------------------------------------
 
@@ -514,7 +521,7 @@ class SessionPane(Pane):
         finally:
             self._compacting = False
             self._set_status(False)
-            self._focus_input()
+            # Completion is not a user request to move the keyboard.
             # A job that ended meanwhile was held back; report it now.
             self._jobs_changed()
         if result is None:
@@ -584,11 +591,12 @@ class SessionPane(Pane):
             # remove.
             await self.query(BlockingPanel).remove()
             await self.mount(panel, before=prompt)
+            focused = self.app.focused
             prompt.display = False
-            # A panel in a background pane must not grab the keyboard: the
-            # user's next keystroke would answer a question they never saw.
-            if self.is_current:
-                panel.focus()
+            # Replace input ownership, not deliberate reading focus. Background
+            # panes and modals are additionally protected by the central guard.
+            if focused is prompt or focused is None:
+                self._request_focus(panel)
             # Counted on the driver rather than here: removing the panel is
             # asynchronous, and the tab badge has to clear the moment the
             # answer is in, not whenever the widget finally goes.
@@ -597,8 +605,14 @@ class SessionPane(Pane):
                 return await future
             finally:
                 driver.mark_blocked(False)
+                focused = self.app.focused if self.app.screen_stack else None
+                restore = focused is panel or (focused is not None and panel in focused.ancestors)
                 prompt.display = True
-                panel.remove()
+                if restore and not self._pane_closing:
+                    # Transfer before removal resets Textual's focus chain;
+                    # do not restore after an await where the user can move it.
+                    self._request_focus(prompt)
+                await panel.remove()
 
     # ---- input → turn -------------------------------------------------------
 
@@ -874,7 +888,7 @@ class SessionPane(Pane):
             self.transcript.add(Content.from_markup("[$text-warning]⏹ Paimon stopped![/]"))
         elif result.outcome is Outcome.FAILED:
             self.transcript.add(Content.from_markup("[$text-error b]Error:[/] $body", body=result.error))
-        self._focus_input()
+        # Finishing a turn must not steal focus from reading or a modal.
         if self._pending_handoff is not None:
             prompt, self._pending_handoff = self._pending_handoff, None
             if result.finished:

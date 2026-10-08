@@ -98,7 +98,7 @@ class CommandPane(Pane):
         # at: focusability ignores display, so it would take the keyboard away
         # from whoever is typing.
         if self.is_current:
-            self.query_one("#log", RichLog).focus()
+            self._request_focus(self.query_one("#log", RichLog))
 
     def notice(self, renderable) -> None:
         self.query_one("#log", RichLog).write(renderable)

@@ -14,6 +14,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static, TextArea
 
 from .diff import locate_line, render_diff
@@ -450,6 +451,8 @@ class PromptInput(TextArea):
     the line into a shell command the pane runs on submit.
     """
 
+    INPUT_HELP = "Enter send · Ctrl+J newline · / commands · Esc interrupt · Shift+Tab mode"
+
     class Submitted(Message):
         def __init__(self, text: str) -> None:
             self.text = text
@@ -541,6 +544,30 @@ class BlockingPanel(Vertical, can_focus=True):
     conversation it takes the prompt's place, and the keyboard with it.
     """
 
+    def _focus_control(self, widget: Widget) -> None:
+        for pane in self.app.panes:
+            if pane in self.ancestors:
+                self.app.focus_pane_widget(pane, widget)
+                break
+
+    def _scroll_detail_key(self, event: events.Key) -> bool:
+        focused = self.app.focused
+        if not isinstance(focused, VerticalScroll) or self not in focused.ancestors:
+            return False
+        amounts = {"up": -1, "k": -1, "down": 1, "j": 1,
+                   "pageup": -focused.size.height, "pagedown": focused.size.height}
+        if event.key in amounts:
+            focused.scroll_relative(y=amounts[event.key], animate=False)
+        elif event.key == "home":
+            focused.scroll_home(animate=False)
+        elif event.key == "end":
+            focused.scroll_end(animate=False)
+        else:
+            return False
+        event.prevent_default()
+        event.stop()
+        return True
+
 
 class ConfirmPanel(BlockingPanel):
     """Inline confirmation for a dangerous tool call, shown in the asking agent's pane.
@@ -596,6 +623,8 @@ class ConfirmPanel(BlockingPanel):
         self.query_one("#confirm-options", Static).update(Content.from_markup("\n".join(lines)))
 
     def on_key(self, event: events.Key) -> None:
+        if self._scroll_detail_key(event):
+            return
         key = event.key
         if key in ("up", "k"):
             self._selected = (self._selected - 1) % len(self._OPTIONS)
@@ -728,7 +757,13 @@ class QuestionPanel(BlockingPanel):
         # With the free-text entry selected the panel hands the keyboard on to
         # the answer box, so a question without options is ready to type into.
         if self._selected == self._other:
-            self.query_one(Input).focus()
+            self._focus_control(self.query_one(Input))
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if (event.widget is self.app.focused and isinstance(event.widget, Input)
+                and self._selected != self._other):
+            self._selected = self._other
+            self._render_options()
 
     def _render_options(self) -> None:
         labels = [*self.options, "Something else (type below)" if self.options else "Type your answer"]
@@ -744,11 +779,13 @@ class QuestionPanel(BlockingPanel):
         self._selected = index % (self._other + 1)
         self._render_options()
         if self._selected == self._other:
-            self.query_one(Input).focus()
+            self._focus_control(self.query_one(Input))
         else:
-            self.focus()
+            self._focus_control(self)
 
     def on_key(self, event: events.Key) -> None:
+        if self._scroll_detail_key(event):
+            return
         key = event.key
         typing = isinstance(self.app.focused, Input)
         if key == "up" or (key == "k" and not typing):
@@ -757,7 +794,7 @@ class QuestionPanel(BlockingPanel):
             self._select(self._selected + 1)
         elif key == "enter" and not typing:
             if self._selected == self._other:
-                self.query_one(Input).focus()
+                self._focus_control(self.query_one(Input))
             else:
                 self._resolve(self.options[self._selected])
         elif key.isdigit() and not typing and 1 <= int(key) <= self._other + 1:

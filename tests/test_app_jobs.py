@@ -62,6 +62,8 @@ class SpawnAgentTest(AppTestCase):
                 bar = str(app.query_one("#statusbar", Static).render())
                 self.assertIn(f"agent {job_id}", bar)
                 self.assertIn(f"session {child.job.agent.session.id[:8]}", bar)
+                self.assertIn("Focus: output", bar)
+                self.assertNotIn("Ctrl+L to return", bar)
 
                 gate.set()
                 await self._wait_for(pilot, lambda: len(app.panes) == 1)
@@ -401,6 +403,10 @@ class BackgroundTaskTest(AppTestCase):
                 bar = str(app.query_one("#statusbar", Static).render())
                 self.assertIn(f"command {task.job_id}", bar)
                 self.assertIn("running", bar)
+                self.assertIn("Focus: output", bar)
+                self.assertNotIn("Ctrl+L to return", bar)
+                await pilot.press("ctrl+l")
+                self.assertIs(app.focused, task.query_one("#log", RichLog))
 
     async def test_closing_the_tab_stops_the_command(self) -> None:
         app = self.make_app(mode="yolo")
