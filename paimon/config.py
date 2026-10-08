@@ -338,20 +338,20 @@ class Config:
         theme: object = UNSET,
         show_reasoning: object = UNSET,
         recap_enabled: object = UNSET,
+        provider: Optional[str] = None,
     ) -> None:
         """Persist the fields passed to config.json and update self.
 
         Passing None (or an empty string) removes the stored value; fields not
         passed and other keys already in the file are preserved. api_base and
-        api_key are stored under the provider of the model being saved (the
-        model argument, else the configured model), so every provider keeps
-        its own credentials.
+        api_key are stored under provider, so every provider keeps its own
+        credentials. Left out, it is the provider of the model being saved
+        (the model argument, else the configured model).
         """
         auth_passed = [(key, value) for key, value in (
             ("api_base", api_base), ("api_key", api_key),
         ) if value is not UNSET]
-        provider = None
-        if auth_passed:
+        if auth_passed and provider is None:
             target = model if model is not UNSET and model else self.model
             if not target:
                 raise ConfigError("credentials need a model to scope them to a provider; "
@@ -374,7 +374,7 @@ class Config:
                     data.pop(key, None)
                 else:
                     data[key] = value
-            if provider is not None:
+            if auth_passed:
                 _merge_provider(data, provider, dict(auth_passed))
 
         data = _update_file(config_path(), change)
@@ -385,5 +385,5 @@ class Config:
         # persisting a theme change.
         for key, _ in passed:
             setattr(self, key, data.get(key, getattr(type(self), key)))
-        if provider is not None:
+        if auth_passed:
             self.providers = _parse_providers(data.get("providers"))

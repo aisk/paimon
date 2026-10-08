@@ -1,10 +1,11 @@
-"""Login flow: pick provider → pick model → enter api_base → enter api_key.
+"""Login flow: pick provider → enter api_base → enter api_key.
 
-Provider and model lists come from pydantic-ai's static ``KnownModelName``
-catalog; no network calls are made. The catalog keeps every model a provider
-ever served, so the model list is cut down to the current ones. The picker
-accepts free-typed entries, so unlisted providers, brand-new model names and
-the models left out still work.
+It stores one provider's credential and nothing else. Which model to run on
+is asked afterwards by the app, with the picker that switches models.
+
+The provider list comes from pydantic-ai's static ``KnownModelName`` catalog;
+no network calls are made. The picker accepts free-typed entries, so unlisted
+providers and brand-new model names still work.
 
 The provider doubles as the wire dialect, so the catalog is narrowed to the
 ones whose SDK ships with Paimon — offering the rest would only produce an
@@ -211,8 +212,8 @@ class BrowserLoginScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class LoginScreen(ModalScreen[bool]):
-    """Multi-step login. Returns True on completion, False if cancelled anywhere."""
+class LoginScreen(ModalScreen[Optional[str]]):
+    """Multi-step login. Returns the provider logged in to, None if cancelled anywhere."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
@@ -227,62 +228,64 @@ class LoginScreen(ModalScreen[bool]):
     async def _flow(self) -> None:
         provider = await self.app.push_screen_wait(PickerScreen("Select provider", _providers()))
         if not provider:
-            self.dismiss(False)
+            self.dismiss(None)
+            return
+        try:
+            # A name typed in rather than picked may be one nothing here can build.
+            llm.require_provider(provider)
+        except ValueError as exc:
+            self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
+                "[$text-error]$body[/]", body=str(exc)))
+            self.dismiss(None)
             return
 
-        model = await self.app.push_screen_wait(PickerScreen(f"Select model · {provider}", llm.models_for(provider)))
-        if not model:
-            self.dismiss(False)
-            return
-
-        config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
-        fields: dict = {"model": f"{provider}:{model}"}
         if provider in LOGIN_PROVIDERS:
             # The plan's credential is a browser login the sign-in stores
             # itself, so there is no endpoint or key to ask for.
-            if not await self.app.push_screen_wait(BrowserLoginScreen(provider)):
-                self.dismiss(False)
-                return
-        else:
-            api_base = await self.app.push_screen_wait(
-                PromptScreen(
-                    "API base (leave blank for provider default)",
-                    placeholder="https://api.example.com/v1",
-                )
-            )
-            if api_base is None:
-                self.dismiss(False)
-                return
+            signed_in = await self.app.push_screen_wait(BrowserLoginScreen(provider))
+            self.dismiss(provider if signed_in else None)
+            return
 
-            api_key = await self.app.push_screen_wait(
-                PromptScreen("API key", password=True, placeholder="sk-…")
+        config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
+        api_base = await self.app.push_screen_wait(
+            PromptScreen(
+                "API base (leave blank for provider default)",
+                placeholder="https://api.example.com/v1",
             )
-            if api_key is None:
-                self.dismiss(False)
-                return
-            fields["api_base"] = api_base.strip() or None
-            fields["api_key"] = api_key.strip() or None
+        )
+        if api_base is None:
+            self.dismiss(None)
+            return
+
+        stored = (config.providers.get(provider) or {}).get("api_key")
+        blank = "keep the stored one" if stored else "use the provider's environment variable"
+        api_key = await self.app.push_screen_wait(
+            PromptScreen(f"API key (leave blank to {blank})", password=True, placeholder="sk-…")
+        )
+        if api_key is None:
+            self.dismiss(None)
+            return
+        fields: dict = {"api_base": api_base.strip() or None}
+        if api_key.strip():
+            fields["api_key"] = api_key.strip()
         try:
             # On a thread: save() can wait on the cross-process config lock.
-            await asyncio.to_thread(config.save, **fields)
+            await asyncio.to_thread(config.save, provider=provider, **fields)
         except PaimonError as exc:
             # The credentials just typed must not die with the write. Apply
             # them to this run and let the user repair the file afterwards.
-            config.model = fields["model"]
             entry = config.providers.setdefault(provider, {})
-            for key in ("api_base", "api_key"):
-                if key not in fields:
-                    continue
-                if fields[key] is None:
+            for key, value in fields.items():
+                if value is None:
                     entry.pop(key, None)
                 else:
-                    entry[key] = fields[key]
+                    entry[key] = value
             if not entry:
                 config.providers.pop(provider, None)
             self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
                 "[$text-warning b]Logged in for this run only, config not saved:[/] $body",
                 body=str(exc)))
-        self.dismiss(True)
+        self.dismiss(provider)
 
     def action_cancel(self) -> None:
-        self.dismiss(False)
+        self.dismiss(None)

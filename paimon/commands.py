@@ -3,12 +3,14 @@
 These exist so another program (a shell script, a calling code agent) can
 check whether Paimon is ready and log it in non-interactively. Nothing here
 talks to the network: ``status`` constructs the configured model offline to
-prove the provider SDK and its credentials resolve, ``login`` validates shape
-and persists, the first real turn is what proves the credentials work.
+prove the provider SDK and its credentials resolve, ``login`` and ``model``
+validate shape and persist, the first real turn is what proves the credentials
+work.
 
 Exit codes: ``status`` exits 0 when the configured model is constructible
 with resolvable credentials and 1 when not;
-``login`` exits 0 on success and 1 on any refusal, with the reason on stderr;
+``login`` and ``model`` exit 0 on success and 1 on any refusal, with the
+reason on stderr;
 ``log`` exits 0 on success and 1 when the session cannot be found.
 """
 
@@ -22,7 +24,7 @@ from typing import Optional
 
 from .config import UNSET, Config, config_path
 from .errors import PaimonError
-from .llm import LOGIN_PROVIDERS, build_model, is_provider_available, split_model_string
+from .llm import LOGIN_PROVIDERS, build_model, require_provider, signed_in_plans, split_model_string
 from .session import Session, is_synthetic_user_text
 from .tools import render_record, superseded_seqs
 
@@ -93,6 +95,7 @@ def status(argv: list) -> int:
     error = _ready_error(config) if configured else "no model configured"
     ready = error is None
     api_base, api_key = config.provider_auth()
+    providers = list(dict.fromkeys([*config.providers, *signed_in_plans()]))
     if args.json:
         # The api_key itself is deliberately absent: status output is meant
         # to be pasted into logs and other agents' contexts.
@@ -104,6 +107,7 @@ def status(argv: list) -> int:
             "model": config.model,
             "api_base": api_base,
             "api_key_set": bool(api_key),
+            "providers": providers,
             "safe_commands": config.safe_commands,
             "config_path": str(config_path()),
             "sessions_here": len(Session.list(Path.cwd())),
@@ -118,12 +122,18 @@ def status(argv: list) -> int:
         print(f"model: {config.model} ({key_note})")
         if api_base:
             print(f"api base: {api_base}")
+        if providers:
+            print(f"logged in: {', '.join(providers)}")
         if not config.safe_commands:
             print("safe read-only commands: off (strict)")
         print(f"config: {config_path()}")
         print(f"sessions here: {len(Session.list(Path.cwd()))}")
         if not ready:
             print(f"not ready: {error}")
+    elif providers:
+        print(f"paimon {version()}")
+        print(f"logged in: {', '.join(providers)}")
+        print("no model selected, run 'paimon model provider:name'")
     else:
         print(f"paimon {version()}")
         print("not logged in — run 'paimon' for interactive setup, or "
@@ -189,18 +199,21 @@ def _browser_login(provider: str) -> None:
 
 
 def login(argv: list) -> int:
-    """Persist model settings from flags instead of the interactive flow.
+    """Store a provider's credentials from flags instead of the interactive flow.
 
     The key is never taken on the command line — argv is visible to every
-    process on the machine. Fields not passed keep their current values, so
-    ``login --model x:y`` switches just the model.
+    process on the machine. Fields not passed keep their current values.
     """
     parser = argparse.ArgumentParser(
         prog="paimon login",
-        description="Log in without the UI. Fields not passed keep their current values.",
+        description="Log in to a provider without the UI. Fields not passed keep their "
+                    "current values. 'paimon model' picks the model to run on.",
     )
-    parser.add_argument("--model", required=True, metavar="PROVIDER:NAME",
-                        help="model to use, e.g. 'zai:glm-4.7'")
+    parser.add_argument("provider", nargs="?", metavar="PROVIDER",
+                        help="provider to log in to, e.g. 'zai'")
+    parser.add_argument("--model", metavar="PROVIDER:NAME",
+                        help="in place of PROVIDER: log in to this model's provider and "
+                             "make it the default model, e.g. 'zai:glm-4.7'")
     parser.add_argument("--api-base", metavar="URL",
                         help="endpoint override for the provider (pass '' to clear a stored one)")
     key_source = parser.add_mutually_exclusive_group()
@@ -213,12 +226,20 @@ def login(argv: list) -> int:
     args = parser.parse_args(argv)
 
     try:
-        provider, _ = split_model_string(args.model)
-        if not is_provider_available(provider):
-            raise ValueError(f"provider {provider!r} needs a dependency Paimon does not ship")
+        if bool(args.provider) == bool(args.model):
+            raise ValueError("name the provider to log in to, or pass --model provider:name "
+                             "to make that model the default as well")
+        provider = args.provider or split_model_string(args.model)[0]
+        require_provider(provider)
         api_key = _read_api_key(args)
-        if provider in LOGIN_PROVIDERS and (args.api_base is not None or api_key is not None):
+        nothing_passed = args.api_base is None and api_key is None
+        if provider in LOGIN_PROVIDERS and not nothing_passed:
             raise ValueError(f"{provider} signs in through the browser and takes no api base or key")
+        if provider not in LOGIN_PROVIDERS and args.provider and nothing_passed:
+            raise ValueError(
+                f"nothing to store for {provider}: pass --api-key-env, --api-key-stdin or --api-base. "
+                f"A key the provider reads from its own environment variable needs no login, "
+                f"'paimon model {provider}:name' selects it")
     except ValueError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
@@ -252,7 +273,8 @@ def login(argv: list) -> int:
         if provider in LOGIN_PROVIDERS:
             _browser_login(provider)
         config.save(
-            model=args.model,
+            model=args.model or UNSET,
+            provider=provider,
             # An absent flag keeps the stored value; only an explicit '' clears it.
             api_base=args.api_base if args.api_base is not None else UNSET,
             api_key=api_key if api_key is not None else UNSET,
@@ -260,7 +282,25 @@ def login(argv: list) -> int:
     except PaimonError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
-    print(f"logged in: {args.model}")
+    print(f"logged in: {args.model or provider}")
+    return 0
+
+
+def model(argv: list) -> int:
+    """Set the default model, leaving every credential alone."""
+    parser = argparse.ArgumentParser(
+        prog="paimon model",
+        description="Set the default model. Credentials are not touched, 'paimon login' stores those.",
+    )
+    parser.add_argument("model", metavar="PROVIDER:NAME", help="model to use, e.g. 'zai:glm-4.7'")
+    args = parser.parse_args(argv)
+    try:
+        require_provider(split_model_string(args.model)[0])
+        Config.load().save(model=args.model)
+    except (ValueError, PaimonError) as exc:
+        print(f"paimon: {exc}", file=sys.stderr)
+        return 1
+    print(f"model: {args.model}")
     return 0
 
 
@@ -425,6 +465,7 @@ def install_skill(argv: list) -> int:
 REGISTRY = {
     "status": status,
     "login": login,
+    "model": model,
     "sessions": sessions,
     "log": log,
     "install-skill": install_skill,

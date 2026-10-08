@@ -16,7 +16,7 @@ from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.config import Config
 from paimon.turns import TurnDriver, Outcome
-from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen
+from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen, PromptScreen
 from paimon.pane import _session_label
 from paimon.ui import (
     AssistantMessage,
@@ -233,7 +233,7 @@ class LoginTest(AppTestCase):
             # look down the stack rather than at the active screen.
             self.assertEqual(len(self._login_screens(app)), 1)
 
-    async def test_chatgpt_login_asks_for_no_key_and_saves_the_model(self) -> None:
+    async def test_chatgpt_login_asks_for_no_key_and_then_for_a_model(self) -> None:
         pasted: list[str] = []
 
         async def sign_in(show_url, redirect) -> None:
@@ -246,18 +246,17 @@ class LoginTest(AppTestCase):
                 app.action_login()
                 await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
                 app.screen.dismiss("chatgpt")
-                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
-                app.screen.dismiss("gpt-5.5")
                 await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
                 await self._wait_for(pilot, lambda: opened.called)
                 opened.assert_called_once_with("https://auth.example/authorize")
-                self.assertEqual(app.config.model, "test-model", "nothing is saved before the sign-in")
 
                 app.screen.query_one(Input).value = "http://127.0.0.1:1455/auth/callback?code=x"
                 await pilot.press("enter")
-                await self._wait_for(pilot, lambda: self._login_screens(app) == [])
+                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
                 self.assertEqual(pasted, ["http://127.0.0.1:1455/auth/callback?code=x"])
-                self.assertEqual(app.config.model, "chatgpt:gpt-5.5")
+                self.assertEqual(app.config.model, "test-model", "logging in alone changes no model")
+                app.screen.dismiss("chatgpt:gpt-5.5")
+                await self._wait_for(pilot, lambda: app.config.model == "chatgpt:gpt-5.5")
                 self.assertEqual(app.config.providers, {})
 
     async def test_antigravity_login_shows_that_it_is_unsupported(self) -> None:
@@ -270,8 +269,6 @@ class LoginTest(AppTestCase):
                 app.action_login()
                 await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
                 app.screen.dismiss("antigravity")
-                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
-                app.screen.dismiss("gemini-3.8-flash-high")
                 await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
                 notice = app.screen.query_one("#browser-login-notice", Static)
                 self.assertIn("at your own risk", str(notice.render()))
@@ -288,12 +285,58 @@ class LoginTest(AppTestCase):
                 app.action_login()
                 await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
                 app.screen.dismiss("chatgpt")
-                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
-                app.screen.dismiss("gpt-5.5")
                 await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
                 await pilot.press("escape")
                 await self._wait_for(pilot, lambda: self._login_screens(app) == [])
+                self.assertNotIsInstance(app.screen, PickerScreen)
                 self.assertEqual(app.config.model, "test-model")
+
+    async def _log_in_with_key(self, app: PaimonApp, pilot, provider: str, key: str) -> None:
+        """Drive the login up to the model picker that follows it."""
+        app.action_login()
+        await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+        app.screen.dismiss(provider)
+        for answer in ("", key):
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PromptScreen)
+                                 and app.screen.is_current)
+            screen = app.screen
+            screen.dismiss(answer)
+            await self._wait_for(pilot, lambda: app.screen is not screen)
+        await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
+
+    async def test_a_key_login_stores_the_credential_and_leaves_the_model_to_the_picker(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._log_in_with_key(app, pilot, "zai", "sk-zai")
+            self.assertEqual(Config.load().providers, {"zai": {"api_key": "sk-zai"}})
+            self.assertTrue(all(option.startswith("zai:") for option in app.screen._options))
+            app.screen.dismiss(None)
+            await self._wait_for(pilot, lambda: not isinstance(app.screen, PickerScreen))
+            self.assertEqual(app.config.model, "test-model", "escaping the picker keeps the model")
+            self.assertIsNone(Config.load().model)
+
+    async def test_a_model_typed_after_login_belongs_to_that_provider(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._log_in_with_key(app, pilot, "zai", "sk-zai")
+            app.screen.dismiss("glm-9")
+            await self._wait_for(pilot, lambda: Config.load().model == "zai:glm-9")
+
+    async def test_a_blank_key_keeps_the_stored_one(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await self._log_in_with_key(app, pilot, "zai", "sk-zai")
+            app.screen.dismiss(None)
+            await self._wait_for(pilot, lambda: not isinstance(app.screen, PickerScreen))
+            await self._log_in_with_key(app, pilot, "zai", "")
+            self.assertEqual(Config.load().providers, {"zai": {"api_key": "sk-zai"}})
+
+    async def test_first_launch_with_a_credential_only_asks_for_the_model(self) -> None:
+        app = self.make_app(config=Config(providers={"zai": {"api_key": "k"}}))
+        async with app.run_test() as pilot:
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            self.assertEqual(app.screen._title, "Switch model")
+            self.assertEqual(self._login_screens(app), [])
 
     @staticmethod
     def _login_screens(app: PaimonApp) -> list[LoginScreen]:
@@ -322,6 +365,18 @@ class ModelSwitchTest(AppTestCase):
             self.assertEqual(app.pane.agent.model_name, "zai:glm-5.3-flash")
             self.assertEqual(first.agent.model_name, "zai:glm-5.3-flash")
             self.assertEqual(Config.load().providers, {}, "credentials are not touched")
+
+    async def test_a_model_without_a_provider_is_asked_for_again(self) -> None:
+        app = self._app()
+        async with app.run_test() as pilot:
+            app.action_switch_model()
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            first = app.screen
+            first.dismiss("glm-5.3-flash")
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen)
+                                 and app.screen is not first)
+            self.assertEqual(app.config.model, "zai:glm-5.3")
+            self.assertIsNone(Config.load().model)
 
     async def test_switching_is_refused_while_a_turn_is_running(self) -> None:
         app = self._app()

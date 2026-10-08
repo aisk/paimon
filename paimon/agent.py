@@ -6,7 +6,6 @@ render however it likes.
 
 import asyncio
 import dataclasses
-import importlib
 import json
 import time
 from dataclasses import dataclass
@@ -34,8 +33,8 @@ from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import compaction, retry, review, tools
 from .config import Config
-from .llm import (LOGIN_PROVIDERS, NoModelError, ask_once, build_model, models_for,
-                  request_settings, split_model_string)
+from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
+                  signed_in_plans, split_model_string)
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -1007,12 +1006,7 @@ class Agent:
             except ValueError:
                 pass
         providers.extend(self.config.providers)
-        for name in LOGIN_PROVIDERS:
-            try:
-                if importlib.import_module(f".{name}", __package__).signed_in():
-                    providers.append(name)
-            except Exception:  # noqa: BLE001 — an unreadable login is a provider not offered
-                pass
+        providers.extend(signed_in_plans())
         return [f"{provider}:{name}"
                 for provider in dict.fromkeys(providers)
                 for name in models_for(provider)]

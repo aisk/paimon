@@ -11,6 +11,7 @@ Only the dialects whose SDK is installed can be built — pydantic-ai imports
 those lazily and raises ImportError for the rest.
 """
 
+import importlib
 import inspect
 import platform
 import typing
@@ -78,6 +79,23 @@ def is_provider_available(provider_name: str) -> bool:
     except (ImportError, ValueError):
         return False
     return True
+
+
+def require_provider(provider_name: str) -> None:
+    if not is_provider_available(provider_name):
+        raise ValueError(f"provider {provider_name!r} needs a dependency Paimon does not ship")
+
+
+def signed_in_plans() -> list[str]:
+    """The plans there is a browser login for."""
+    plans = []
+    for name in LOGIN_PROVIDERS:
+        try:
+            if importlib.import_module(f".{name}", __package__).signed_in():
+                plans.append(name)
+        except Exception:  # noqa: BLE001 — an unreadable login is a plan not offered
+            pass
+    return plans
 
 
 def split_model_string(model: str) -> tuple[str, str]:

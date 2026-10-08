@@ -216,6 +216,48 @@ class LoginTest(CommandTestCase):
         self.assertEqual(data["providers"]["openai"], {"api_key": "sk-openai"})
 
 
+    def test_login_to_a_provider_stores_its_key_and_keeps_the_model(self) -> None:
+        self._write_config(model="zai:glm-4.7")
+        with patch.dict("os.environ", {"MY_KEY": "sk-openai"}):
+            code, out, err = self._run("login", "openai", "--api-key-env", "MY_KEY")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(config_path().read_text()),
+                         {"model": "zai:glm-4.7", "providers": {"openai": {"api_key": "sk-openai"}}})
+
+    def test_login_to_a_provider_with_nothing_to_store_is_refused(self) -> None:
+        code, out, err = self._run("login", "openai")
+        self.assertEqual(code, 1)
+        self.assertIn("paimon model openai:name", err)
+        self.assertFalse(config_path().exists())
+
+    def test_login_takes_a_provider_or_a_model_not_both(self) -> None:
+        for argv in (["login"], ["login", "zai", "--model", "openai:gpt-5"]):
+            code, out, err = self._run(*argv)
+            self.assertEqual(code, 1)
+            self.assertIn("--model provider:name", err)
+
+    def test_model_sets_the_default_and_leaves_credentials_alone(self) -> None:
+        self._write_config(model="zai:glm-4.7", providers={"zai": {"api_key": "sk-zai"}})
+        code, out, err = self._run("model", "openai:gpt-5")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(config_path().read_text()),
+                         {"model": "openai:gpt-5", "providers": {"zai": {"api_key": "sk-zai"}}})
+
+    def test_model_refuses_a_name_without_a_provider(self) -> None:
+        self._write_config(model="zai:glm-4.7")
+        code, out, err = self._run("model", "gpt-5")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(config_path().read_text())["model"], "zai:glm-4.7")
+
+    def test_status_with_a_login_but_no_model_says_which_is_missing(self) -> None:
+        self._write_config(providers={"zai": {"api_key": "sk-zai"}})
+        code, out, err = self._run("status")
+        self.assertEqual(code, 1)
+        self.assertIn("logged in: zai", out)
+        self.assertIn("paimon model", out)
+        code, out, err = self._run("status", "--json")
+        self.assertEqual(json.loads(out)["providers"], ["zai"])
+
     def test_chatgpt_login_signs_in_through_the_browser_and_stores_no_key(self) -> None:
         with patch("paimon.commands._browser_login") as sign_in:
             code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5")

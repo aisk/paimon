@@ -50,7 +50,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Paimon terminal code agent",
         epilog="commands: status (login state and configuration), "
-               "login (log in without the UI), sessions (list resumable sessions), "
+               "login (log in to a provider without the UI), model (set the default model), "
+               "sessions (list resumable sessions), "
                "log (inspect a session's event log), "
                "install-skill (teach a calling code agent how to drive paimon)",
     )

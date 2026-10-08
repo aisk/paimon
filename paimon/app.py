@@ -15,7 +15,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.widgets import ContentSwitcher, Static
 
-from . import herdr
+from . import herdr, llm
 from .agent import Agent, Job
 from .agentpane import AgentPane
 from .errors import PaimonError
@@ -59,13 +59,13 @@ class PaimonApp(App):
         return [
             *super().get_system_commands(screen),
             SystemCommand(
-                "Login / switch provider",
-                "Reconfigure model, API base and API key",
+                "Log in to a provider",
+                "Add or replace a provider's credentials",
                 self.action_login,
             ),
             SystemCommand(
                 "Switch model",
-                "Change to another model of a provider you are logged in to",
+                "Change to another model, of any provider you are logged in to",
                 self.action_switch_model,
             ),
             SystemCommand(
@@ -382,7 +382,12 @@ class PaimonApp(App):
     def on_mount(self) -> None:
         self._sync_panes()
         if not self.config.model:
-            self.action_login()
+            # Credentials left by an earlier login only need a model chosen.
+            pane = self._session()
+            if pane is not None and pane.agent.available_models():
+                self._pick_model()
+            else:
+                self.action_login()
         elif self._pick_session:
             self.action_resume_session()
 
@@ -479,20 +484,19 @@ class PaimonApp(App):
             self.pane.notice(Content.from_markup("[$text-muted]Busy — log in after this turn[/]"))
             return
 
-        def _done(completed: bool | None) -> None:
-            if completed:
+        def _done(provider: str | None) -> None:
+            if provider:
                 self.pane.notice(
                     Content.from_markup(
-                        "[$text-success b]Logged in.[/]  [$text-muted]$model[/]",
-                        model=self.config.model or "",
+                        "[$text-success b]Logged in.[/]  [$text-muted]$provider[/]",
+                        provider=provider,
                     )
                 )
-            elif not self.config.model:
-                self.pane.notice(Content.from_markup("[$text-warning]Login cancelled — no model configured.[/]"))
-                self.exit()
-            self.refresh_statusbar()
-            self._report_herdr()
-            self.pane._focus_input()
+                # Logging in stores a credential and nothing else. The model
+                # is a separate choice, offered here as it is usually wanted.
+                self._pick_model(provider)
+            else:
+                self._model_picked(None)
 
         self.push_screen(LoginScreen(), _done)
 
@@ -500,24 +504,48 @@ class PaimonApp(App):
 
     def action_switch_model(self) -> None:
         """Change the configured model without asking for credentials again."""
-        pane = self._session()
-        if pane is None:
-            return
         if self._config_is_busy():
             self.pane.notice(Content.from_markup("[$text-muted]Busy — switch model after this turn[/]"))
             return
+        self._pick_model()
+
+    def _pick_model(self, provider: str | None = None) -> None:
+        """Ask which model to run on: one of provider's, or without one, of
+        every provider there is a credential for."""
+        if provider:
+            title = f"Select model · {provider}"
+            options = [f"{provider}:{name}" for name in llm.models_for(provider)]
+        else:
+            pane = self._session()
+            title, options = "Switch model", pane.agent.available_models() if pane else []
 
         def _done(model: str | None) -> None:
-            # A turn may have started while the picker was up.
-            if not model or self._config_is_busy():
+            if model and provider and ":" not in model:
+                # Typed in rather than picked: a model of the provider asked about.
+                model = f"{provider}:{model}"
+            try:
+                if model:
+                    llm.require_provider(llm.split_model_string(model)[0])
+            except ValueError as exc:
+                self.pane.notice(Content.from_markup("[$text-error]$body[/]", body=str(exc)))
+                self._pick_model(provider)
                 return
+            self._model_picked(model)
+
+        self.push_screen(PickerScreen(title, options), _done)
+
+    def _model_picked(self, model: str | None) -> None:
+        # A turn may have started while the picker was up.
+        if model and not self._config_is_busy():
             self.config.model = model
             self.save_config(model=model)
             self.pane.notice(Content.from_markup("[$text-muted]Model: $model[/]", model=model))
-            self.refresh_statusbar()
-            self._report_herdr()
-
-        self.push_screen(PickerScreen("Switch model", pane.agent.available_models()), _done)
+        elif not self.config.model:
+            self.pane.notice(Content.from_markup("[$text-warning]No model configured.[/]"))
+            self.exit()
+        self.refresh_statusbar()
+        self._report_herdr()
+        self.pane._focus_input()
 
     # ---- status bar ---------------------------------------------------------
 

@@ -24,7 +24,7 @@ paimon
 uvx paimon
 ```
 
-首次启动会询问 provider、模型、API base 和 key。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。
+首次启动会询问 provider 及其 API base 和 key，然后选择模型。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
 运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 只读，**auto** 放行工作目录内的编辑，其余操作交给另一次模型调用审批，**yolo** 不做任何检查，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
@@ -43,7 +43,7 @@ Paimon 会从 `~/.config/paimon/skills`、`~/.agents/skills` 以及工作目录�
 前沿模型擅长制定计划和验收结果，中间的执行步骤往往比较机械。让 Paimon 使用成本较低的模型执行，由 Claude Code 或 Codex 制定计划并检查结果。先登录该模型的 provider，之后每次运行时指定模型：
 
 ```bash
-paimon login --model zai:glm-4.7 --api-key-env ZAI_API_KEY
+paimon login zai --api-key-env ZAI_API_KEY
 paimon --model zai:glm-4.7 -p "apply the plan in PLAN.md" --mode auto --output-format result
 ```
 
@@ -114,7 +114,7 @@ paimon --model zai:glm-4.7          # 仅本次运行使用该模型
 
 ## 配置
 
-模型设置保存在 `~/.config/paimon/config.json`，由首次启动或 `paimon login` 写入。也可以用 ChatGPT 订阅代替 API key，`paimon login --model chatgpt:gpt-5.5` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
+模型设置保存在 `~/.config/paimon/config.json`，由首次启动或 `paimon login` 写入。每个 provider 各自保存凭据，用 `paimon model provider:name` 或命令面板里的 Switch model 选择要用的模型。也可以用 ChatGPT 订阅代替 API key，`paimon login chatgpt` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
 
 read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉，Windows 上命令由 cmd.exe 执行，一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。当前的模型默认用同一家里快速档的那个来审批（GPT 用 Luna，Claude 用 Haiku，GLM 用 Flash），其余模型自己审自己，在配置里写 `"review_model": "provider:name"` 可以自行指定。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
@@ -126,7 +126,7 @@ read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`
 flowchart TD
     subgraph entry["入口"]
         CLI["cli.py"]
-        Commands["commands.py<br/>status / login / sessions"]
+        Commands["commands.py<br/>status / login / model / sessions"]
         Headless["headless.py<br/>-p，单次运行"]
         App["app.py<br/>Textual TUI / --web"]
     end
@@ -137,7 +137,7 @@ flowchart TD
         CommandPane["commandpane.py<br/>后台命令 pane"]
         Transcript["transcript.py<br/>对话记录与事件渲染"]
         Tabs["tabs.py<br/>pane 标签栏"]
-        Login["login.py<br/>provider / 模型 / key"]
+        Login["login.py<br/>provider / key"]
         UIWidgets["ui.py<br/>输入框、确认面板"]
         Diff["diff.py<br/>并排 diff 渲染"]
     end
