@@ -436,20 +436,51 @@ class BackgroundTaskTest(AppTestCase):
             else:
                 self.fail(f"{pid} outlived the app that started it")
 
-    async def test_an_exit_ends_the_tab_without_closing_it(self) -> None:
+    async def test_an_exit_closes_a_tab_nobody_is_looking_at(self) -> None:
         app = self.make_app(mode="yolo")
         with patch("paimon.agent.build_model",
                    return_value=self._model(printer("built", exit_code=1))):
             async with app.run_test() as pilot:
-                task = await self._start(app, pilot)
-                await self._wait_for(pilot, lambda: not task.is_running)
+                parent = app.pane
+                # Not _start: the tab may be gone before anyone sees it open.
+                parent.handle_submit(PromptInput.Submitted("build it"))
+                await self._wait_for(pilot, lambda: bool(parent.agent.jobs))
+                (job_id, job), = parent.agent.jobs.items()
+                await self._wait_for(pilot, lambda: not job.command.running)
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
 
-                self.assertEqual(len(app.panes), 2, "the tab stays, so the output can be read")
-                self.assertEqual(task.status_text, "exited (code 1)")
+                self.assertIs(app.pane, parent)
+                self.assertFalse(job.command.killed, "it ended by itself")
+                answer = await parent.agent._job_tool(
+                    "read_job", {"job_id": job_id, "mode": "all"})
+                self.assertIn("[exited, code 1]", answer)
+                self.assertIn("built", answer, "the output outlives the tab")
+
+    async def test_an_exit_leaves_the_tab_open_while_it_is_on_screen(self) -> None:
+        app = self.make_app(mode="yolo")
+        running = FakeCommand("build")
+        with patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.tools.start_background",
+                      new=AsyncMock(return_value=running)):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                await parent.agent._job_tool(
+                    "run_background", {"command": "build", "description": "build"})
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+                task = app.panes[1]
                 app._switch_to(task)
+                running.output.append(b"built\n")
+                running.exit(1)
+                await self._wait_for(pilot, lambda: task.status_text == "exited (code 1)")
                 await self._wait_for(pilot, lambda: "built" in self._command_log_text(task))
+
+                self.assertEqual(len(app.panes), 2, "the user is still reading it")
                 self.assertIn("exited (code 1)",
                               str(app.query_one("#statusbar", Static).render()))
+
+                app._switch_to(parent)
+                await self._wait_for(pilot, lambda: len(app.panes) == 1)
+                self.assertIs(app.pane, parent)
 
     async def test_a_command_belongs_to_the_pane_that_started_it(self) -> None:
         # The user is looking at another conversation when the first one's
@@ -567,9 +598,12 @@ class BackgroundTaskTest(AppTestCase):
                    return_value=self._model(printer("built", exit_code=3))):
             async with app.run_test() as pilot:
                 parent = app.pane
-                task = await self._start(app, pilot)
+                # Not _start: the tab may be gone before anyone sees it open.
+                parent.handle_submit(PromptInput.Submitted("build it"))
+                await self._wait_for(pilot, lambda: bool(parent.agent.jobs))
+                job_id = next(iter(parent.agent.jobs))
                 await self._wait_for(
-                    pilot, lambda: f"command {task.job_id} exited (code 3)"
+                    pilot, lambda: f"command {job_id} exited (code 3)"
                     in self._log_text(parent))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
                 self.assertTrue(any(is_job_message(m) for m in parent.agent.history))

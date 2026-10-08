@@ -61,6 +61,8 @@ class FakeCommand:
         return self.exit_code
 
     def kill(self) -> None:
+        if self.killed or not self.running:
+            return
         self.killed = True
         self.exit_code = -15
         self._over.set()

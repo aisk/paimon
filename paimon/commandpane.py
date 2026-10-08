@@ -141,15 +141,31 @@ class CommandPane(Pane):
             return
         if self.command.running or self._exited:
             return
-        # Over. Stop polling a buffer nothing writes to any more; anything
-        # still undrained is caught by on_show, which is the only way this
-        # pane can be looked at again.
+        # Over. Stop polling a buffer nothing writes to any more.
         self._exited = True
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
+        if not self.is_current:
+            self._leave()
+            return
         self._refresh_status()
         self._notify_state()
+
+    def on_hide(self) -> None:
+        """The user looked away from a command that is over: nothing to come back to."""
+        if self._exited:
+            self._leave()
+
+    def _leave(self) -> None:
+        """Give the tab back once the command has exited by itself.
+
+        Only ever from under a user who is not looking: a tab that is on
+        screen stays until they switch away. The output is not lost with it,
+        since the command's buffer belongs to the job and read_job reads that.
+        """
+        if not self._pane_closing:
+            self.app.call_later(self.app._drop_pane, self)
 
     def _drain(self) -> None:
         """Write what has arrived, a whole line at a time.
