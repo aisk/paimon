@@ -6,6 +6,7 @@ render however it likes.
 
 import asyncio
 import dataclasses
+import importlib
 import json
 import time
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import compaction, retry, review, tools
 from .config import Config
-from .llm import (CHATGPT_PROVIDER, NoModelError, ask_once, build_model, models_for,
+from .llm import (LOGIN_PROVIDERS, NoModelError, ask_once, build_model, models_for,
                   request_settings, split_model_string)
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
@@ -1003,13 +1004,12 @@ class Agent:
             except ValueError:
                 pass
         providers.extend(self.config.providers)
-        try:
-            from . import chatgpt
-
-            if chatgpt.signed_in(self.config.profile):
-                providers.append(CHATGPT_PROVIDER)
-        except Exception:  # noqa: BLE001 — an unreadable login is a provider not offered
-            pass
+        for name in LOGIN_PROVIDERS:
+            try:
+                if importlib.import_module(f".{name}", __package__).signed_in(self.config.profile):
+                    providers.append(name)
+            except Exception:  # noqa: BLE001 — an unreadable login is a provider not offered
+                pass
         lines = [f"{provider}:{name}"
                  for provider in dict.fromkeys(providers)
                  for name in models_for(provider)]

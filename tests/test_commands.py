@@ -217,15 +217,25 @@ class LoginTest(CommandTestCase):
 
 
     def test_chatgpt_login_signs_in_through_the_browser_and_stores_no_key(self) -> None:
-        with patch("paimon.commands._chatgpt_login") as sign_in:
+        with patch("paimon.commands._browser_login") as sign_in:
             code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5")
         self.assertEqual(code, 0)
-        sign_in.assert_called_once_with("default")
+        sign_in.assert_called_once_with("chatgpt", "default")
         self.assertEqual(json.loads(config_path().read_text()), {"model": "chatgpt:gpt-5.5"})
+
+    def test_antigravity_login_says_it_is_unsupported_before_signing_in(self) -> None:
+        async def sign_in(profile, show_url, pasted) -> None:
+            show_url("https://accounts.example/authorize")
+
+        with patch("paimon.antigravity.login", sign_in), patch("paimon.antigravity.open_browser"):
+            code, out, err = self._run("login", "--model", "antigravity:gemini-3.8-flash-high")
+        self.assertEqual(code, 0)
+        self.assertIn("at your own risk", err)
+        self.assertLess(err.index("at your own risk"), err.index("https://accounts.example/authorize"))
 
     def test_chatgpt_login_refuses_an_api_key(self) -> None:
         with patch.dict("os.environ", {"MY_KEY": "sk-openai"}), \
-                patch("paimon.commands._chatgpt_login") as sign_in:
+                patch("paimon.commands._browser_login") as sign_in:
             code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5", "--api-key-env", "MY_KEY")
         self.assertEqual(code, 1)
         self.assertIn("signs in through the browser", err)
@@ -235,7 +245,7 @@ class LoginTest(CommandTestCase):
         self._write_config(model="zai:glm-4.7")
         from paimon.chatgpt import ChatGPTAuthError
 
-        with patch("paimon.commands._chatgpt_login", side_effect=ChatGPTAuthError("port 1455 is in use")):
+        with patch("paimon.commands._browser_login", side_effect=ChatGPTAuthError("port 1455 is in use")):
             code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5")
         self.assertEqual(code, 1)
         self.assertIn("port 1455 is in use", err)

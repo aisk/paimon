@@ -28,6 +28,21 @@ from .errors import PaimonError
 # The pseudo-provider served by paimon.chatgpt, which is imported on demand
 # like the provider SDKs are.
 CHATGPT_PROVIDER = "chatgpt"
+# Likewise, served by paimon.antigravity.
+ANTIGRAVITY_PROVIDER = "antigravity"
+# The providers whose credential is a browser login kept in the profile,
+# rather than an endpoint and a key, with the name of the plan each spends.
+LOGIN_PROVIDERS = {CHATGPT_PROVIDER: "ChatGPT", ANTIGRAVITY_PROVIDER: "Antigravity"}
+
+# What an Antigravity plan serves, by the names its endpoint takes. The
+# thinking level is part of the name. Kept by hand from pi-antigravity's
+# src/models/models.ts (ANTIGRAVITY_ROUTING), see paimon.antigravity for the
+# version, with the older Flash generations left off.
+_ANTIGRAVITY_MODELS = [
+    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+    "gemini-pro-agent", "gemini-3.1-pro-low",
+    "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b-medium",
+]
 
 
 class NoModelError(PaimonError):
@@ -56,7 +71,7 @@ def provider_class(provider_name: str):
 
 def is_provider_available(provider_name: str) -> bool:
     """Whether this provider can be constructed with the installed dependencies."""
-    if provider_name == CHATGPT_PROVIDER:
+    if provider_name in LOGIN_PROVIDERS:
         return True
     try:
         infer_provider_class(provider_name)
@@ -123,6 +138,8 @@ def known_models() -> list[str]:
 
 def models_for(provider: str) -> list[str]:
     """The current models of one provider, newest generation first."""
+    if provider == ANTIGRAVITY_PROVIDER:
+        return list(_ANTIGRAVITY_MODELS)
     if provider == CHATGPT_PROVIDER:
         # A ChatGPT plan serves OpenAI's own models; which ones depends on the plan.
         provider = "openai"
@@ -156,6 +173,10 @@ def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[st
         from . import chatgpt
 
         return chatgpt.build_model(model_name, profile)
+    if provider_name == ANTIGRAVITY_PROVIDER:
+        from . import antigravity
+
+        return antigravity.build_model(model_name, profile)
     provider_cls = provider_class(provider_name)
     parameters = inspect.signature(provider_cls.__init__).parameters
 
@@ -190,6 +211,8 @@ def request_settings(model: Model, cache_key: Optional[str] = None) -> dict:
     settings: dict = {"extra_headers": {"User-Agent": user_agent()}}
     if cache_key and model.system == "openai":
         settings["openai_prompt_cache_key"] = cache_key
+    elif cache_key and (setting := getattr(model, "session_setting", None)):
+        settings[setting] = cache_key
     return settings
 
 

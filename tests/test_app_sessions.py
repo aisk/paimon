@@ -17,7 +17,7 @@ from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.turns import TurnDriver, Outcome
-from paimon.login import ChatGPTLoginScreen, LoginScreen, PickerScreen
+from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen
 from paimon.pane import _session_label
 from paimon.ui import (
     AssistantMessage,
@@ -295,7 +295,7 @@ class ProfileSwitchTest(AppTestCase):
                 app.screen.dismiss("chatgpt")
                 await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
                 app.screen.dismiss("gpt-5.5")
-                await self._wait_for(pilot, lambda: isinstance(app.screen, ChatGPTLoginScreen))
+                await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
                 await self._wait_for(pilot, lambda: opened.called)
                 opened.assert_called_once_with("https://auth.example/authorize")
                 self.assertEqual(app.config.model, "test-model", "nothing is saved before the sign-in")
@@ -306,6 +306,24 @@ class ProfileSwitchTest(AppTestCase):
                 self.assertEqual(pasted, ["http://127.0.0.1:1455/auth/callback?code=x"])
                 self.assertEqual(app.config.model, "chatgpt:gpt-5.5")
                 self.assertEqual(app.config.providers, {})
+
+    async def test_antigravity_login_shows_that_it_is_unsupported(self) -> None:
+        async def sign_in(profile, show_url, redirect) -> None:
+            await redirect
+
+        app = self.make_app()
+        with patch("paimon.antigravity.login", sign_in):
+            async with app.run_test() as pilot:
+                app.action_login()
+                await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+                app.screen.dismiss("antigravity")
+                await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
+                app.screen.dismiss("gemini-3.8-flash-high")
+                await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
+                notice = app.screen.query_one("#browser-login-notice", Static)
+                self.assertIn("at your own risk", str(notice.render()))
+                await pilot.press("escape")
+                await self._wait_for(pilot, lambda: self._login_screens(app) == [])
 
     async def test_a_cancelled_chatgpt_login_keeps_the_model(self) -> None:
         async def sign_in(profile, show_url, redirect) -> None:
@@ -319,7 +337,7 @@ class ProfileSwitchTest(AppTestCase):
                 app.screen.dismiss("chatgpt")
                 await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
                 app.screen.dismiss("gpt-5.5")
-                await self._wait_for(pilot, lambda: isinstance(app.screen, ChatGPTLoginScreen))
+                await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
                 await pilot.press("escape")
                 await self._wait_for(pilot, lambda: self._login_screens(app) == [])
                 self.assertEqual(app.config.model, "test-model")

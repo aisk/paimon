@@ -267,6 +267,8 @@ class ListModelsTest(JobsTestCase):
             self.assertIn("zai:glm-5.3", await agent._job_tool("list_models", {}))
             with patch("paimon.chatgpt.signed_in", return_value=True):
                 self.assertIn("chatgpt:gpt-6.1-sol", await agent._job_tool("list_models", {}))
+            with patch("paimon.antigravity.signed_in", return_value=True):
+                self.assertIn("antigravity:claude-sonnet-4-6", await agent._job_tool("list_models", {}))
 
     async def test_an_agent_is_started_on_the_model_asked_for(self) -> None:
         agent = self.agent()

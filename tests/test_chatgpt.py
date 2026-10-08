@@ -132,7 +132,7 @@ class CredentialsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_rotation_the_config_would_not_take_is_written_again(self) -> None:
         _store(expires=time.time() - 1)
-        update, failures = chatgpt.update_provider, [ConfigError("locked")]
+        update, failures = update_provider, [ConfigError("locked")]
 
         def flaky(*args):
             if failures:
@@ -140,7 +140,7 @@ class CredentialsTest(unittest.IsolatedAsyncioTestCase):
             return update(*args)
 
         with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at-2", "rt-2")) as post, \
-                patch("paimon.chatgpt.update_provider", flaky), patch("paimon.chatgpt._STORE_RETRY_SECONDS", 0):
+                patch("paimon.oauth.update_provider", flaky), patch("paimon.oauth._STORE_RETRY_SECONDS", 0):
             self.assertEqual(await chatgpt.Credentials()(), "at-2")
         post.assert_called_once()
         self.assertEqual(_stored()["refresh"], "rt-2")
@@ -198,6 +198,10 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
     async def test_the_browser_callback_completes_the_login(self) -> None:
         async def respond(query: dict) -> None:
             self.assertIn(b"400", await self._browser("code=stale&state=other&client_id=x"))
+            reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+            writer.write(b"GET /favicon.ico?error=nope HTTP/1.1\r\nHost: x\r\n\r\n")
+            self.assertIn(b"404", await reader.read())
+            writer.close()
             self.assertIn(b"200 OK", await self._browser(f"code=c0de&client_id=issued-1&state={query['state'][0]}"))
 
         with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at-1", "rt-1")) as post:
@@ -282,7 +286,7 @@ class OpenBrowserTest(unittest.TestCase):
         controller = Mock()
         controller.name = name
         controller.open.return_value = True
-        with patch("paimon.chatgpt.webbrowser.get", return_value=controller):
+        with patch("paimon.oauth.webbrowser.get", return_value=controller):
             return chatgpt.open_browser("https://example/"), controller
 
     def test_a_graphical_browser_is_opened(self) -> None:
@@ -298,5 +302,5 @@ class OpenBrowserTest(unittest.TestCase):
                 controller.open.assert_not_called()
 
     def test_no_browser_at_all_is_not_an_error(self) -> None:
-        with patch("paimon.chatgpt.webbrowser.get", side_effect=webbrowser.Error("none")):
+        with patch("paimon.oauth.webbrowser.get", side_effect=webbrowser.Error("none")):
             self.assertFalse(chatgpt.open_browser("https://example/"))

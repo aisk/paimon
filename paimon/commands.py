@@ -22,7 +22,7 @@ from typing import Optional
 
 from .config import UNSET, Config, config_path, validate_profile
 from .errors import PaimonError
-from .llm import CHATGPT_PROVIDER, build_model, is_provider_available, split_model_string
+from .llm import LOGIN_PROVIDERS, build_model, is_provider_available, split_model_string
 from .session import Session, is_synthetic_user_text
 from .tools import render_record, superseded_seqs
 
@@ -123,8 +123,9 @@ def status(argv: list) -> int:
             "sessions_here": len(Session.list(Path.cwd())),
         }, ensure_ascii=False))
     elif configured:
-        if config.model.replace("/", ":", 1).startswith(CHATGPT_PROVIDER + ":"):
-            key_note = "ChatGPT plan"
+        provider = config.model.replace("/", ":", 1).partition(":")[0]
+        if provider in LOGIN_PROVIDERS:
+            key_note = f"{LOGIN_PROVIDERS[provider]} plan"
         else:
             key_note = "api key set" if api_key else "no api key stored"
         print(f"paimon {version()}")
@@ -163,20 +164,23 @@ def _read_api_key(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
-def _chatgpt_login(profile: str) -> None:
-    """Sign in with ChatGPT from a terminal: print the address, wait for the
+def _browser_login(provider: str, profile: str) -> None:
+    """Sign in to a plan from a terminal: print the address, wait for the
     browser to come back, or for the redirect URL pasted on stdin."""
     import asyncio
+    import importlib
     import threading
 
-    from . import chatgpt
+    plan = importlib.import_module(f".{provider}", __package__)
+    if notice := getattr(plan, "NOTICE", None):
+        print(f"paimon: {notice}\n", file=sys.stderr)
 
     def show_url(url: str) -> None:
-        print(f"Open this address to sign in with ChatGPT:\n\n{url}\n", file=sys.stderr)
+        print(f"Open this address to sign in with {LOGIN_PROVIDERS[provider]}:\n\n{url}\n", file=sys.stderr)
         if sys.stdin.isatty():
             print(f"If the browser cannot reach this machine, paste the final "
-                  f"redirect URL ({chatgpt.REDIRECT_URI}...) here.", file=sys.stderr)
-        chatgpt.open_browser(url)
+                  f"redirect URL ({plan.REDIRECT_URI}...) here.", file=sys.stderr)
+        plan.open_browser(url)
 
     async def run() -> None:
         pasted = None
@@ -193,7 +197,7 @@ def _chatgpt_login(profile: str) -> None:
             # A daemon thread: a read still blocked on stdin when the browser
             # callback wins must not keep the process alive.
             threading.Thread(target=read_line, daemon=True).start()
-        await chatgpt.login(profile, show_url, pasted)
+        await plan.login(profile, show_url, pasted)
 
     asyncio.run(run())
 
@@ -229,8 +233,8 @@ def login(argv: list) -> int:
         if not is_provider_available(provider):
             raise ValueError(f"provider {provider!r} needs a dependency Paimon does not ship")
         api_key = _read_api_key(args)
-        if provider == CHATGPT_PROVIDER and (args.api_base is not None or api_key is not None):
-            raise ValueError(f"{CHATGPT_PROVIDER} signs in through the browser and takes no api base or key")
+        if provider in LOGIN_PROVIDERS and (args.api_base is not None or api_key is not None):
+            raise ValueError(f"{provider} signs in through the browser and takes no api base or key")
     except ValueError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         return 1
@@ -247,7 +251,7 @@ def login(argv: list) -> int:
                   "Every stored key and login goes with it", file=sys.stderr)
             return 1
         # Kept rather than deleted: it holds every provider's key and the
-        # ChatGPT login, which a hand repair can still get back.
+        # browser logins, which a hand repair can still get back.
         path = config_path(profile)
         aside = path.with_name(path.name + ".broken")
         try:
@@ -261,8 +265,8 @@ def login(argv: list) -> int:
             print(f"paimon: the unreadable config was kept as {aside}", file=sys.stderr)
         config = Config(profile=profile)
     try:
-        if provider == CHATGPT_PROVIDER:
-            _chatgpt_login(profile)
+        if provider in LOGIN_PROVIDERS:
+            _browser_login(provider, profile)
         config.save(
             model=args.model,
             # An absent flag keeps the stored value; only an explicit '' clears it.

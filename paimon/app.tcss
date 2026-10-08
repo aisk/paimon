@@ -144,11 +144,11 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 
 /* ---- modal screens (login, pickers) ---- */
 
-LoginScreen, ChatGPTLoginScreen, PickerScreen, PromptScreen { align: center middle; }
+LoginScreen, BrowserLoginScreen, PickerScreen, PromptScreen { align: center middle; }
 #picker-box, #prompt-screen-box, #login-status {
     width: 70%; height: auto; max-height: 70%;
     padding: 1 2; border: round $accent; background: $surface;
 }
 #picker-title, #prompt-screen-title { margin-bottom: 1; }
-#picker-filter, #chatgpt-login-status { margin-bottom: 1; }
+#picker-filter, #browser-login-notice, #browser-login-status { margin-bottom: 1; }
 #picker-list { height: auto; max-height: 20; }

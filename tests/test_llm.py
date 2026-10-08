@@ -85,5 +85,5 @@ class ProviderAvailabilityTest(unittest.TestCase):
         with patch("paimon.llm.known_models", return_value=[
             "zai:model", "anthropic:one", "bedrock:model", "anthropic:two", "unqualified",
         ]), patch("paimon.login.is_provider_available", side_effect=lambda name: name != "bedrock"):
-            self.assertEqual(_providers(), ["anthropic", "chatgpt", "zai"])
+            self.assertEqual(_providers(), ["anthropic", "antigravity", "chatgpt", "zai"])
 

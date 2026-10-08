@@ -14,6 +14,7 @@ import error later.
 from __future__ import annotations
 
 import asyncio
+import importlib
 from typing import Optional
 
 from textual import events, on, work
@@ -28,12 +29,12 @@ from textual.content import Content
 
 from paimon import llm
 from paimon.errors import PaimonError
-from paimon.llm import CHATGPT_PROVIDER, is_provider_available
+from paimon.llm import LOGIN_PROVIDERS, is_provider_available
 
 
 def _providers() -> list[str]:
     names = {name.split(":", 1)[0] for name in llm.known_models() if ":" in name}
-    return sorted(name for name in names | {CHATGPT_PROVIDER} if is_provider_available(name))
+    return sorted(name for name in names | set(LOGIN_PROVIDERS) if is_provider_available(name))
 
 
 class PickerScreen(ModalScreen[Optional[str]]):
@@ -155,21 +156,26 @@ class PromptScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class ChatGPTLoginScreen(ModalScreen[bool]):
-    """Browser sign-in for the ChatGPT plan. Returns True once the credential
-    is stored, False when cancelled or refused."""
+class BrowserLoginScreen(ModalScreen[bool]):
+    """Browser sign-in for a plan. Returns True once the credential is
+    stored, False when cancelled or refused."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(self, profile: str) -> None:
+    def __init__(self, provider: str, profile: str) -> None:
         super().__init__()
+        self._plan = importlib.import_module(f"paimon.{provider}")
+        self._name = LOGIN_PROVIDERS[provider]
         self._profile = profile
         self._pasted: asyncio.Future = asyncio.get_running_loop().create_future()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="prompt-screen-box"):
-            yield Static("Sign in with ChatGPT", id="prompt-screen-title")
-            yield Static("Opening the browser…", id="chatgpt-login-status")
+            yield Static(f"Sign in with {self._name}", id="prompt-screen-title")
+            if notice := getattr(self._plan, "NOTICE", None):
+                yield Static(Content.from_markup("[$text-warning]$notice[/]", notice=notice),
+                             id="browser-login-notice")
+            yield Static("Opening the browser…", id="browser-login-status")
             yield Input(placeholder="or paste the final redirect URL here", id="prompt-screen-input")
 
     def on_mount(self) -> None:
@@ -177,22 +183,18 @@ class ChatGPTLoginScreen(ModalScreen[bool]):
         self._flow()
 
     def _show_url(self, url: str) -> None:
-        from paimon import chatgpt
-
         lead = ("Finish signing in in the browser. If it did not open, visit:"
-                if chatgpt.open_browser(url) else "Open this address in a browser to sign in:")
-        self.query_one("#chatgpt-login-status", Static).update(
+                if self._plan.open_browser(url) else "Open this address in a browser to sign in:")
+        self.query_one("#browser-login-status", Static).update(
             Content.from_markup("$lead\n\n$url", lead=lead, url=url))
 
     @work
     async def _flow(self) -> None:
-        from paimon import chatgpt
-
         try:
-            await chatgpt.login(self._profile, self._show_url, self._pasted)
+            await self._plan.login(self._profile, self._show_url, self._pasted)
         except PaimonError as exc:
             self.app.pane.notice(Content.from_markup(  # type: ignore[attr-defined]
-                "[$text-error b]ChatGPT sign-in failed:[/] $body", body=str(exc)))
+                "[$text-error b]$name sign-in failed:[/] $body", name=self._name, body=str(exc)))
             self.dismiss(False)
             return
         self.dismiss(True)
@@ -236,10 +238,10 @@ class LoginScreen(ModalScreen[bool]):
 
         config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
         fields: dict = {"model": f"{provider}:{model}"}
-        if provider == CHATGPT_PROVIDER:
+        if provider in LOGIN_PROVIDERS:
             # The plan's credential is a browser login the sign-in stores
             # itself, so there is no endpoint or key to ask for.
-            if not await self.app.push_screen_wait(ChatGPTLoginScreen(config.profile)):
+            if not await self.app.push_screen_wait(BrowserLoginScreen(provider, config.profile)):
                 self.dismiss(False)
                 return
         else:
