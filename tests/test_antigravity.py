@@ -224,6 +224,15 @@ class RequestShapeTest(unittest.IsolatedAsyncioTestCase):
             await ask_once(model, [ModelRequest(parts=[UserPromptPart(content="hi")])], max_tokens=8)
         self.assertEqual(raised.exception.status_code, 503)
 
+    def test_every_model_knows_the_window_the_plan_gives_it(self) -> None:
+        windows = {name: _model(name, self._answering()).context_window
+                   for name in ("gemini-3.8-flash-high", "gemini-pro-agent", "claude-opus-4-6-thinking",
+                                "claude-sonnet-4-6", "gpt-oss-120b-medium")}
+        self.assertEqual(windows, {
+            "gemini-3.8-flash-high": 1_048_576, "gemini-pro-agent": 1_048_576,
+            "claude-opus-4-6-thinking": 250_000, "claude-sonnet-4-6": 200_000,
+            "gpt-oss-120b-medium": 131_072})
+
 
 class CredentialsTest(unittest.IsolatedAsyncioTestCase):
     def test_building_the_model_without_a_login_says_how_to_get_one(self) -> None:

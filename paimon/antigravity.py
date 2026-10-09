@@ -26,7 +26,8 @@ Taken from it:
 - the endpoint, the User-Agent and loadCodeAssist (src/client/client.ts)
 - the envelope around the request, without its labels (src/stream/stream.ts
   buildRequest, src/utils/util.ts antigravityRequestEnvelope)
-- thinking budgets and output limits per model family (src/models/models.ts)
+- thinking budgets, output limits and context windows per model family
+  (src/models/models.ts)
 - what the endpoint refuses or does oddly, as its CHANGELOG records: two
   turns in a row from one side (0.3.1), tool schemas for Claude and GPT-OSS
   in `parameters`, no default tool mode, the empty 200 that works on retry
@@ -233,6 +234,22 @@ def _max_output_tokens(model_name: str) -> int:
     return 65535 if "-pro" in model_name else 65536
 
 
+def _context_window(model_name: str) -> int:
+    """How much the endpoint lets a model read. The plan's Claude windows are
+    smaller than the ones the same models have elsewhere, and the names only
+    this endpoint uses are on no public record.
+
+    upstream: src/models/models.ts ANTIGRAVITY_MODELS (contextWindow).
+    """
+    if model_name.startswith("claude-opus-"):
+        return 250_000
+    if model_name.startswith("claude-"):
+        return 200_000
+    if model_name.startswith("gpt-oss-"):
+        return 131_072
+    return 1_048_576
+
+
 def _merged(contents: list) -> list:
     """Contents with neighbours of one role joined. The endpoint refuses two
     turns in a row from the same side, which an interrupted turn or a message
@@ -261,6 +278,7 @@ class AntigravityModel(GoogleModel):
         super().__init__(
             model_name,
             provider=GoogleProvider(client=genai.Client(api_key="unused")),
+            profile={"context_window": _context_window(model_name)},
             settings={"google_thinking_config": {  # type: ignore[typeddict-unknown-key]
                 "include_thoughts": True, "thinking_budget": _thinking_budget(model_name)}},
         )
