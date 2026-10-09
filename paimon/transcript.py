@@ -34,6 +34,7 @@ from .ui import (
     ToolGroup,
     ToolResult,
     UserMessage,
+    nested_calls,
 )
 
 # All three markers are East Asian Width "narrow", so the labels stay aligned on
@@ -223,10 +224,12 @@ class EventRenderer:
             entry = self._tool_entries.pop(ev.id, None)
             if entry is None:
                 # Tolerate an incomplete/old log with a result but no call.
+                if ev.calls:
+                    self._log.add(nested_calls(ev.calls), classes="tool-nested")
                 self._log.add_tool_result(ev.result, label=ev.name, denied=ev.denied)
             else:
                 label = f"{ev.name} {entry.summary}"
-                await entry.finish(ev.result, label=label, denied=ev.denied)
+                await entry.finish(ev.result, label=label, denied=ev.denied, calls=ev.calls)
                 if self._tool_group is not None:
                     self._tool_group.refresh_header()
 

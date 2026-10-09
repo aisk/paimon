@@ -30,6 +30,8 @@ def _resume_flags(args: argparse.Namespace) -> tuple[str, ...]:
         flags.append("--strict")
     if args.no_web_search:
         flags.append("--no-web-search")
+    if args.no_code_mode:
+        flags.append("--no-code-mode")
     if args.no_skills:
         flags.append("--no-skills")
     if getattr(args, "textual_debug", False):
@@ -91,6 +93,9 @@ def main() -> None:
                         help="skip the default skill locations (--skill paths still load)")
     parser.add_argument("--no-web-search", action="store_true",
                         help="do not give the model the web_search tool")
+    parser.add_argument("--no-code-mode", action="store_true",
+                        help="do not give the model the run_code tool (sandboxed Python "
+                             "scripts that call its other tools)")
     parser.add_argument("--web", action="store_true",
                         help="serve the app in a browser instead of the terminal")
     parser.add_argument("--port", type=int, default=8000,
@@ -128,6 +133,8 @@ def main() -> None:
         config.safe_commands = False  # session-only; save() never persists this key
     if args.no_web_search:
         config.web_search = False  # session-only, like --strict
+    if args.no_code_mode:
+        config.code_mode = False  # session-only as well
     if args.model is not None:
         try:
             split_model_string(args.model)
@@ -151,6 +158,8 @@ def main() -> None:
             flags += ["--strict"]
         if args.no_web_search:
             flags += ["--no-web-search"]
+        if args.no_code_mode:
+            flags += ["--no-code-mode"]
         if args.textual_debug:
             flags += ["--textual-debug"]
         if args.model:

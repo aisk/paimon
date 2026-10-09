@@ -10,6 +10,7 @@ captures just the answer.
     {"type": "reasoning_delta" | "text_delta", "text": str}
     {"type": "tool_use", "id": str, "name": str, "args": object}
     {"type": "tool_result", "id": str, "name": str, "result": str, "denied": bool}
+        (a run_code result adds "calls": [{"name", "detail", "status", "seconds"}, ...])
     {"type": "todos", "todos": array}
     {"type": "job", "text": str}
     {"type": "compacted", "tokens_before": int, "tokens_after": int}
@@ -130,6 +131,12 @@ def _write(stream, text: str) -> None:
         pass
 
 
+def denied_calls(ev: ToolEnd) -> int:
+    """The calls one tool result says were denied: its own, or the ones a
+    run_code script made (the script itself is never the denied one)."""
+    return int(ev.denied) + sum(call.get("status") == "denied" for call in ev.calls)
+
+
 class TextRenderer:
     """Human-readable rendering: answer on stdout, everything else on stderr."""
 
@@ -178,16 +185,21 @@ class TextRenderer:
             self._call_open = True
 
         elif isinstance(ev, ToolEnd):
+            denied = denied_calls(ev)
             if ev.denied:
-                self._denied += 1
                 _write(self._err, "  → denied\n" if self._call_open else "· denied\n")
                 self._call_open = False
-                if self._denied == 1:
-                    wider = "--mode yolo" if self._mode == "auto" else "--mode auto or --mode yolo"
-                    self._note("paimon: --print never asks for confirmation; "
-                               f"rerun with {wider} to allow this")
             else:
                 self._end_call()
+            for call in ev.calls:
+                seconds = call.get("seconds")
+                self._note(f"    {call.get('name')}  {call.get('detail')}  → {call.get('status')} "
+                           f"{seconds if isinstance(seconds, (int, float)) else 0:.2f}s")
+            if denied and not self._denied:
+                wider = "--mode yolo" if self._mode == "auto" else "--mode auto or --mode yolo"
+                self._note("paimon: --print never asks for confirmation; "
+                           f"rerun with {wider} to allow this")
+            self._denied += denied
 
         elif isinstance(ev, TodosUpdate):
             self._note(tools.render_todos(ev.todos))
@@ -279,9 +291,10 @@ class JsonRenderer:
             self._flush_block()
             self._emit({"type": name, "id": ev.id, "name": ev.name, "args": ev.args})
         elif isinstance(ev, ToolEnd):
-            self._denied += ev.denied
+            self._denied += denied_calls(ev)
             self._emit({"type": name, "id": ev.id, "name": ev.name,
-                        "result": ev.result, "denied": ev.denied})
+                        "result": ev.result, "denied": ev.denied,
+                        **({"calls": ev.calls} if ev.calls else {})})
         elif isinstance(ev, TodosUpdate):
             self._emit({"type": name, "todos": ev.todos})
         elif isinstance(ev, JobNotice):

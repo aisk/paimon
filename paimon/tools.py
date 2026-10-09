@@ -56,6 +56,25 @@ READ_DENIAL = ("Denied: read mode only allows reading inside the working directo
 
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
+_SHELL_STATUS = re.compile(r"\((?:exit code (-?\d+)|(timed out) after [^()]*)\)\s*$")
+
+
+def failure(result: str) -> Optional[str]:
+    """A short word for what went wrong in a tool result, None when nothing did.
+
+    Tools report failure in their text, not out of band: a leading "Error",
+    or for a command the status line that ends its output.
+    """
+    match = _SHELL_STATUS.search(result)
+    if match:
+        if match.group(2):
+            return "timed out"
+        return None if match.group(1) == "0" else f"exit {match.group(1)}"
+    if result.lstrip().lower().startswith(("error", "failed", "script failed")):
+        return "failed"
+    return None
+
+
 @dataclass
 class ToolContext:
     """Per-agent state a tool needs beyond its own arguments.
@@ -181,7 +200,7 @@ def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
     for outputs that cannot reflow (a terminal stream) unlike a TUI widget.
     """
     detail = str(args.get("command") or args.get("path") or args.get("question") or args.get("query")
-                 or json.dumps(args, ensure_ascii=False))
+                 or args.get("code") or json.dumps(args, ensure_ascii=False))
     if limit is None:
         return detail
     detail = " ".join(detail.split())
@@ -1912,6 +1931,12 @@ class StopJobArgs(TypedDict):
     """The id of an agent or a background command you started."""
 
 
+@_spec
+class RunCodeArgs(TypedDict):
+    code: str
+    """The Python script to run."""
+
+
 REGISTRY: dict[str, Tool] = {
     "read_file": Tool(
         access="read",
@@ -2126,6 +2151,16 @@ REGISTRY: dict[str, Tool] = {
             "spending tokens, and a background command keeps running."
         ),
         params=StopJobArgs,
+    ),
+    # Code mode. The loop runs it, because every call a script makes is gated
+    # and counted as that agent's own. Held only by an agent whose config turns
+    # code mode on, and that agent swaps this description for one listing the
+    # functions its scripts can call (see paimon.codemode).
+    "run_code": Tool(
+        run=None,
+        access="none",
+        description="Run a Python script in a sandbox that can call your other tools.",
+        params=RunCodeArgs,
     ),
 }
 

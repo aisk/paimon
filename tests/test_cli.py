@@ -553,3 +553,7 @@ class SkillFlagsTest(unittest.TestCase):
     def test_no_web_search_clears_the_flag_for_this_run(self) -> None:
         self.assertTrue(self._config_after().web_search)
         self.assertFalse(self._config_after("--no-web-search").web_search)
+
+    def test_no_code_mode_clears_the_flag_for_this_run(self) -> None:
+        self.assertTrue(self._config_after().code_mode)
+        self.assertFalse(self._config_after("--no-code-mode").code_mode)
