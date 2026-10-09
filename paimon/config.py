@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from . import lockfile
 from .errors import PaimonError
@@ -256,12 +256,12 @@ def update_provider(provider: str, fields: dict) -> dict:
 class Config:
     """Settings owned by whoever constructed them — no module-level state."""
 
-    model: Optional[str] = None
+    model: str | None = None
     # Per-provider credentials: {"zai": {"api_base": ..., "api_key": ...}}.
     # Keyed by provider so switching models never sends one provider's key
     # to another provider's endpoint.
     providers: dict = field(default_factory=dict)
-    theme: Optional[str] = None
+    theme: str | None = None
     # Stream reasoning expanded in the TUI (it folds once the block ends) and
     # print it in headless mode. When off the TUI folds it behind a line-count
     # stub instead; either way it is still generated, persisted and sent back.
@@ -272,7 +272,7 @@ class Config:
     # The model auto mode reviews held tool calls with, as "provider:name".
     # None takes the reviewer paired with the working model in
     # review.DEFAULT_REVIEWERS, or the working model itself. Edited by hand.
-    review_model: Optional[str] = None
+    review_model: str | None = None
     # Offer a short recap once a turn that did some work is followed by this
     # many idle seconds. Seconds rather than a count so a test can turn the
     # wait down; the TUI never writes these back, they are edited by hand.
@@ -282,7 +282,7 @@ class Config:
     compaction_reserve_tokens: int = 16_384
     compaction_keep_recent_tokens: int = 20_000
     # Stands in for the built-in window table on model names it does not know.
-    compaction_context_window: Optional[int] = None
+    compaction_context_window: int | None = None
     # Extra skill files or directories, on top of the default locations.
     # Edited by hand (or extended by --skill for one run); never written back.
     skills: list[str] = field(default_factory=list)
@@ -317,7 +317,7 @@ class Config:
             code_mode=data.get("code_mode", cls.code_mode),
         )
 
-    def provider_auth(self, model: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    def provider_auth(self, model: str | None = None) -> tuple[str | None, str | None]:
         """The stored (api_base, api_key) for the model's provider.
 
         Defaults to the configured model. A provider without a stored entry
@@ -342,7 +342,7 @@ class Config:
         theme: object = UNSET,
         show_reasoning: object = UNSET,
         recap_enabled: object = UNSET,
-        provider: Optional[str] = None,
+        provider: str | None = None,
     ) -> None:
         """Persist the fields passed to config.json and update self.
 

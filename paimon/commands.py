@@ -20,7 +20,6 @@ import os
 import sys
 from importlib import metadata
 from pathlib import Path
-from typing import Optional
 
 from .config import UNSET, Config, config_path
 from .errors import PaimonError
@@ -59,7 +58,7 @@ def version() -> str:
         return "unknown"
 
 
-def _ready_error(config: Config) -> Optional[str]:
+def _ready_error(config: Config) -> str | None:
     """Why the configured model cannot be constructed, or None when it can.
 
     Construction is offline: it resolves the provider SDK and its credentials
@@ -141,7 +140,7 @@ def status(argv: list) -> int:
     return 0 if ready else 1
 
 
-def _read_api_key(args: argparse.Namespace) -> Optional[str]:
+def _read_api_key(args: argparse.Namespace) -> str | None:
     """The key named by the flags, or None when no key flag was passed.
 
     Raises ValueError with the reason when a flag was passed but yields
@@ -304,7 +303,7 @@ def model(argv: list) -> int:
     return 0
 
 
-def _preview(text: Optional[str], limit: int = 60) -> str:
+def _preview(text: str | None, limit: int = 60) -> str:
     line = " ".join((text or "").split())
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
@@ -336,7 +335,7 @@ def sessions(argv: list) -> int:
     return 0
 
 
-def _is_turn_start(record: Optional[dict]) -> bool:
+def _is_turn_start(record: dict | None) -> bool:
     """True for a message that opens a turn: a real user prompt, not a
     compaction summary (same test as Session.first_user_text)."""
     if not record or record.get("type") != "message":

@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import Callable, Optional, Sequence, Union
+from typing import Callable, Sequence
 
 import yaml
 
@@ -49,7 +49,7 @@ class SkillBlock:
     name: str
     location: str
     body: str
-    user_message: Optional[str]
+    user_message: str | None
 
 
 # ---- parsing ---------------------------------------------------------------
@@ -88,7 +88,7 @@ def _validate_name(name: str) -> list[str]:
     return errors
 
 
-def load_skill_file(path: Path, *, declared: bool) -> tuple[Optional[Skill], list[SkillDiagnostic]]:
+def load_skill_file(path: Path, *, declared: bool) -> tuple[Skill | None, list[SkillDiagnostic]]:
     """Load one skill file.
 
     ``declared`` means the file is a ``SKILL.md``: problems are reported.
@@ -261,7 +261,7 @@ def default_skill_dirs(cwd: Path) -> list[Path]:
     return [*dirs, user_agents, config_root() / "skills"]
 
 
-def discover_skills(cwd: Path, *, extra_paths: Sequence[Union[str, Path]] = (),
+def discover_skills(cwd: Path, *, extra_paths: Sequence[str | Path] = (),
                     include_defaults: bool = True) -> tuple[list[Skill], list[SkillDiagnostic]]:
     """Load skills from ``extra_paths`` and then the default locations.
 
@@ -340,7 +340,7 @@ def format_skills_for_prompt(skills: Sequence[Skill]) -> str:
     return "\n".join(lines)
 
 
-def find_skill(name: str, skills: Sequence[Skill]) -> Optional[Skill]:
+def find_skill(name: str, skills: Sequence[Skill]) -> Skill | None:
     return next((s for s in skills if s.name == name), None)
 
 
@@ -376,7 +376,7 @@ def expand_skill_command(text: str, skills: Sequence[Skill],
     return format_invocation(skill, body, expand_args(args.strip()))
 
 
-def parse_skill_block(text: str) -> Optional[SkillBlock]:
+def parse_skill_block(text: str) -> SkillBlock | None:
     """The inverse of ``format_invocation``, for rendering a stored message.
 
     The block ends at the last ``</skill>`` line, so a body that quotes one

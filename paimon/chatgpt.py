@@ -14,7 +14,7 @@ import asyncio
 import secrets
 import time
 import uuid
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -116,8 +116,8 @@ class ChatGPTModel(OpenAIResponsesModel):
     """OpenAI Responses, restricted to what a ChatGPT plan token may send."""
 
     def prepare_request(
-        self, model_settings: Optional[ModelSettings], model_request_parameters: ModelRequestParameters,
-    ) -> tuple[Optional[ModelSettings], ModelRequestParameters]:
+        self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters,
+    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
         settings, parameters = super().prepare_request(model_settings, model_request_parameters)
         allowed = {key: value for key, value in (settings or {}).items()
                    if key not in _REJECTED_SETTINGS}
@@ -130,7 +130,7 @@ class ChatGPTModel(OpenAIResponsesModel):
         return allowed, parameters  # type: ignore[return-value]
 
     async def request(
-        self, messages: list[ModelMessage], model_settings: Optional[ModelSettings],
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         # The endpoint only answers streamed requests.
@@ -165,7 +165,7 @@ def _parse_callback(target: str, state: str) -> tuple[str, str]:
 
 
 async def login(show_url: Callable[[str], None],
-                pasted: Optional[Awaitable[str]] = None) -> None:
+                pasted: Awaitable[str] | None = None) -> None:
     """Run the browser login and store the credential.
 
     show_url receives the address to open. The browser normally ends on the

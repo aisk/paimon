@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from typing import Optional
 
 from textual import events, on, work
 from textual.app import ComposeResult
@@ -39,7 +38,7 @@ def _providers() -> list[str]:
     return sorted(name for name in names | set(LOGIN_PROVIDERS) if is_provider_available(name))
 
 
-class PickerScreen(ModalScreen[Optional[str]]):
+class PickerScreen(ModalScreen[str | None]):
     """Filterable list picker. Type to filter, Up/Down to move, Enter to select."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
@@ -119,7 +118,7 @@ class PickerScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class PromptScreen(ModalScreen[Optional[str]]):
+class PromptScreen(ModalScreen[str | None]):
     """Single-line text input. Enter returns the value, Escape cancels."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
@@ -226,7 +225,7 @@ class BrowserLoginScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class LoginScreen(ModalScreen[Optional[str]]):
+class LoginScreen(ModalScreen[str | None]):
     """Multi-step login. Returns the provider logged in to, None if cancelled anywhere."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]

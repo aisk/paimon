@@ -10,7 +10,6 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 from uuid import uuid4
 
 from pydantic_ai.messages import (
@@ -231,7 +230,7 @@ def resume_hint(session_id: str) -> str:
 class Session:
     """A session backed by an append-only JSONL event log."""
 
-    def __init__(self, path: Path, session_id: str, cwd: Path, parent_id: Optional[str] = None):
+    def __init__(self, path: Path, session_id: str, cwd: Path, parent_id: str | None = None):
         self.path = path
         self.id = session_id
         self.cwd = cwd.resolve()
@@ -269,7 +268,7 @@ class Session:
         lockfile.release(self.path)
 
     @classmethod
-    def create(cls, cwd: Path, parent_id: Optional[str] = None) -> "Session":
+    def create(cls, cwd: Path, parent_id: str | None = None) -> "Session":
         session_id = str(uuid4())
         directory = _project_dir(cwd)
         directory.mkdir(parents=True, exist_ok=True)
@@ -371,7 +370,7 @@ class Session:
     def _read_records(path: Path) -> list[dict]:
         return list(Session._iter_records(path))
 
-    def entries(self) -> list[tuple[int, Optional[dict]]]:
+    def entries(self) -> list[tuple[int, dict | None]]:
         """Every physical line of the log as ``(seq, record)``.
 
         Seq is the 1-based line number, stable because the log is append-only;
@@ -379,7 +378,7 @@ class Session:
         shifts. Unlike _iter_records this raises OSError on an unreadable
         file: every caller names this specific log and wants the failure.
         """
-        entries: list[tuple[int, Optional[dict]]] = []
+        entries: list[tuple[int, dict | None]] = []
         with self.path.open(encoding="utf-8") as file:
             for seq, line in enumerate(file, 1):
                 try:
@@ -447,14 +446,14 @@ class Session:
                 f"({type(exc).__name__}); the log was left untouched") from exc
         return _repair_orphan_tool_calls(loaded)
 
-    def system_prompt(self) -> Optional[str]:
+    def system_prompt(self) -> str | None:
         """The latest system prompt snapshot stored for this session."""
         return self.system_prompt_parts()[0]
 
-    def system_prompt_parts(self) -> tuple[Optional[str], Optional[str]]:
+    def system_prompt_parts(self) -> tuple[str | None, str | None]:
         """(latest prompt snapshot, its user-appended suffix), None when absent."""
-        content: Optional[str] = None
-        appended: Optional[str] = None
+        content: str | None = None
+        appended: str | None = None
         for record in self._iter_records(self.path):
             if record.get("type") == "system_prompt" and isinstance(record.get("content"), str):
                 content = record["content"]
@@ -462,7 +461,7 @@ class Session:
                 appended = raw if isinstance(raw, str) and raw else None
         return content, appended
 
-    def created_at(self) -> Optional[str]:
+    def created_at(self) -> str | None:
         """ISO timestamp from the session header record, if present."""
         header = next(self._iter_records(self.path), None)
         if (header is not None and header.get("type") == "session"
@@ -470,7 +469,7 @@ class Session:
             return header["created_at"]
         return None
 
-    def first_user_text(self) -> Optional[str]:
+    def first_user_text(self) -> str | None:
         """The first user message, for picker previews."""
         for record in self._iter_records(self.path):
             message = record.get("message")
@@ -485,7 +484,7 @@ class Session:
                     return content
         return None
 
-    def append_system_prompt(self, content: str, appended: Optional[str] = None) -> None:
+    def append_system_prompt(self, content: str, appended: str | None = None) -> None:
         """Persist a system prompt snapshot.
 
         ``appended`` is the user-supplied role suffix (--append-system-prompt)
@@ -503,7 +502,7 @@ class Session:
             record["appended"] = appended
         self.append(record)
 
-    def append_message(self, message: ModelMessage, replaces: Optional[str] = None) -> str:
+    def append_message(self, message: ModelMessage, replaces: str | None = None) -> str:
         record_id = str(uuid4())
         record = {"type": "message", "id": record_id, "timestamp": _now(), "message": dump_message(message)}
         if replaces:

@@ -9,7 +9,7 @@ such function and choosing between them in ``search``.
 import asyncio
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 DEFAULT_RESULTS = 5
 MAX_RESULTS = 10
@@ -105,7 +105,7 @@ def _start(backend: Backend, query: str, max_results: int) -> asyncio.Future:
     return future
 
 
-async def search(args: dict, backend: Optional[Backend] = None) -> str:
+async def search(args: dict, backend: Backend | None = None) -> str:
     query = str(args.get("query") or "").strip()
     if not query:
         return "Error: query must not be empty"

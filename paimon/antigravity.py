@@ -67,7 +67,7 @@ import json
 import secrets
 import time
 import uuid
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -255,7 +255,7 @@ class AntigravityModel(GoogleModel):
     session_setting = SESSION_SETTING
 
     def __init__(self, model_name: str, credentials: oauth.Credentials,
-                 http_client: Optional[httpx.AsyncClient] = None) -> None:
+                 http_client: httpx.AsyncClient | None = None) -> None:
         # The client is never sent through. GoogleModel maps messages with
         # its types, and the key only lets it be constructed.
         super().__init__(
@@ -268,7 +268,7 @@ class AntigravityModel(GoogleModel):
         self._http = http_client or httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
 
     async def request(
-        self, messages: list[ModelMessage], model_settings: Optional[ModelSettings],
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         # One way of sending is enough, so a plain request is a stream read to its end.
@@ -376,7 +376,7 @@ def build_model(model_name: str) -> AntigravityModel:
 
 
 async def login(show_url: Callable[[str], None],
-                pasted: Optional[Awaitable[str]] = None) -> None:
+                pasted: Awaitable[str] | None = None) -> None:
     """Run the browser login and store the credential.
 
     show_url receives the address to open. The browser normally ends on the

@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Awaitable, Callable, Literal, Optional
+from typing import Annotated, Awaitable, Callable, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, with_config
 from pydantic_ai.profiles import InlineDefsJsonSchemaTransformer
@@ -37,11 +37,11 @@ ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
 # A review callback judges a call auto mode will not let through on its own:
 # None lets it run, a string is the refusal the model is shown.
-ReviewFn = Callable[[str, dict], Awaitable[Optional[str]]]
+ReviewFn = Callable[[str, dict], Awaitable[str | None]]
 
 # An ask callback puts a question (and optional choices) to the user and
 # returns their answer, or None when they dismissed it without answering.
-AskFn = Callable[[str, list[str]], Awaitable[Optional[str]]]
+AskFn = Callable[[str, list[str]], Awaitable[str | None]]
 
 # Permission modes: read (reads inside cwd, everything else refused), auto
 # (writes inside cwd too, and a reviewer model decides the rest), yolo (no
@@ -59,7 +59,7 @@ MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 _SHELL_STATUS = re.compile(r"\((?:exit code (-?\d+)|(timed out) after [^()]*)\)\s*$")
 
 
-def failure(result: str) -> Optional[str]:
+def failure(result: str) -> str | None:
     """A short word for what went wrong in a tool result, None when nothing did.
 
     Tools report failure in their text, not out of band: a leading "Error",
@@ -89,7 +89,7 @@ class ToolContext:
     # The agent's own session log, for search_history/read_history. None where
     # there is no log to search (bare execute_tool calls, tests); the history
     # tools then return a readable error instead of failing.
-    session: Optional[Session] = None
+    session: Session | None = None
 
 
 @dataclass(frozen=True)
@@ -107,14 +107,14 @@ class Tool:
 
     description: str
     params: type
-    run: Optional[Callable[[dict, Path, str, ToolContext], object]]
+    run: Callable[[dict, Path, str, ToolContext], object] | None
     access: str = "none"
 
 
 _TODO_MARKERS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
 
 
-def normalize_todos(value: object) -> Optional[list[dict]]:
+def normalize_todos(value: object) -> list[dict] | None:
     """The ``todos`` argument as a task list, or None when it is malformed.
 
     The model writes this argument, so an unexpected shape has to become a
@@ -167,7 +167,7 @@ def _argument_path(loc: tuple) -> str:
     return path
 
 
-def validate_args(name: str, args: dict, toolset: dict) -> Optional[str]:
+def validate_args(name: str, args: dict, toolset: dict) -> str | None:
     """Why ``args`` do not fit the tool's declared arguments, or None when they do.
 
     The one validation layer every ToolCallPart passes before gating or
@@ -193,7 +193,7 @@ def validate_args(name: str, args: dict, toolset: dict) -> Optional[str]:
     return None
 
 
-def summarize_call(name: str, args: dict, limit: Optional[int] = None) -> str:
+def summarize_call(name: str, args: dict, limit: int | None = None) -> str:
     """One-line detail for a tool call, shared by the TUI and headless output.
 
     With a limit the detail is collapsed onto a single line and truncated,
@@ -294,7 +294,7 @@ def superseded_seqs(entries: list) -> dict[int, int]:
     return superseded
 
 
-def render_record(seq: int, record: Optional[dict], full: bool) -> list[str]:
+def render_record(seq: int, record: dict | None, full: bool) -> list[str]:
     if record is None:
         return [f"[{seq}] <corrupt>"]
     kind = record.get("type")
@@ -343,7 +343,7 @@ def resolve_path(path: str, cwd: Path) -> Path:
     return _resolve(path, cwd)
 
 
-def _real(path: Path) -> Optional[Path]:
+def _real(path: Path) -> Path | None:
     """The path with symlinks resolved, or None when it cannot be resolved.
 
     None never compares equal to a recorded path, so an unresolvable path
@@ -381,7 +381,7 @@ def _inside(path: Path, cwd: Path) -> bool:
 _SHELL_METACHARS = frozenset("$`<>()\\{[\n\r")
 
 
-def _split_segments(command: str) -> Optional[list[tuple[str, str]]]:
+def _split_segments(command: str) -> list[tuple[str, str]] | None:
     """Split a command at unquoted &&, ||, ";" and "|" into (operator,
     segment) pairs; the first pair's operator is "".
 
@@ -539,7 +539,7 @@ def _safe_git(argv: list[str]) -> bool:
     return True
 
 
-def _safe_cd(argv: list[str], base: Path, root: Path) -> Optional[Path]:
+def _safe_cd(argv: list[str], base: Path, root: Path) -> Path | None:
     """cd is modeled only in its plainest form: one directory argument that
     stays inside root. Bare cd goes to $HOME and "cd -" to $OLDPWD, both
     outside our view, and any flag changes semantics we do not track."""
@@ -567,7 +567,7 @@ def _safe_cd(argv: list[str], base: Path, root: Path) -> Optional[Path]:
     return target.resolve() if _inside(target, root) else None
 
 
-def _safe_simple(argv: list[str], base: Path, root: Path) -> Optional[Path]:
+def _safe_simple(argv: list[str], base: Path, root: Path) -> Path | None:
     """Check one operator-free command from a compound line.
 
     ``base`` resolves relative paths (it moves when an earlier segment was
@@ -646,9 +646,9 @@ def safe_command(command: str, cwd: Path) -> bool:
 
 
 def gate(name: str, args: dict, mode: str, cwd: Path,
-         registry: Optional[dict[str, Tool]] = None,
+         registry: dict[str, Tool] | None = None,
          safe_commands: bool = True,
-         ctx: Optional[ToolContext] = None) -> str:
+         ctx: ToolContext | None = None) -> str:
     """Decide what stands between a tool call and running it.
 
     "allow" is nothing. A call the mode does not let through on its own is
@@ -690,11 +690,11 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
 
 
 async def authorize(name: str, args: dict, mode: str, cwd: Path,
-                    confirm: Optional[ConfirmFn] = None,
-                    review: Optional[ReviewFn] = None,
-                    registry: Optional[dict[str, Tool]] = None,
+                    confirm: ConfirmFn | None = None,
+                    review: ReviewFn | None = None,
+                    registry: dict[str, Tool] | None = None,
                     safe_commands: bool = True,
-                    ctx: Optional[ToolContext] = None) -> Optional[str]:
+                    ctx: ToolContext | None = None) -> str | None:
     """Gate a tool call and put it to whoever decides: None when it may run,
     else the refusal the model is shown.
 
@@ -715,11 +715,11 @@ async def authorize(name: str, args: dict, mode: str, cwd: Path,
 
 
 async def run_tool(name: str, args: dict, cwd: Path, mode: str,
-                   confirm: Optional[ConfirmFn] = None,
-                   registry: Optional[dict[str, Tool]] = None,
+                   confirm: ConfirmFn | None = None,
+                   registry: dict[str, Tool] | None = None,
                    safe_commands: bool = True,
-                   ctx: Optional[ToolContext] = None,
-                   review: Optional[ReviewFn] = None) -> tuple[str, bool]:
+                   ctx: ToolContext | None = None,
+                   review: ReviewFn | None = None) -> tuple[str, bool]:
     """Authorize, then execute a tool call. Returns ``(result, denied)``.
 
     ``registry`` narrows the available tools (an agent's own set); None means
@@ -847,7 +847,7 @@ _GREP_MAX_LINE = 300  # chars of a matched line shown before it is clipped
 _GREP_MAX_FILE_BYTES = 10_000_000
 
 
-def _grep_files(base: Path, name_filter: Optional[str], sandboxed: bool):
+def _grep_files(base: Path, name_filter: str | None, sandboxed: bool):
     """Files under ``base``, in stable directory and filename order."""
     # Prune before descent; sort only one directory at a time. Directory
     # symlinks are not followed, including cycles.
@@ -1194,8 +1194,8 @@ class _OutputTail:
         self._newlines = 0
         self._open_line = False
         self._line_bytes = 0
-        self._fd: Optional[int] = None
-        self.path: Optional[Path] = None
+        self._fd: int | None = None
+        self.path: Path | None = None
         self.total_bytes = 0
 
     @property
@@ -1385,7 +1385,7 @@ async def _pump(stream: asyncio.StreamReader, tail: _OutputTail) -> None:
 
 
 @cache
-def shell_executable() -> Optional[str]:
+def shell_executable() -> str | None:
     """The shell the shell tool actually runs commands with.
 
     Bash is preferred when installed, so the bashisms models habitually write
@@ -1422,7 +1422,7 @@ def _output_pipe():
 
 
 async def _spawn_shell(
-    command: str, cwd: Path, env: Optional[dict] = None
+    command: str, cwd: Path, env: dict | None = None
 ) -> tuple[asyncio.subprocess.Process, asyncio.StreamReader, asyncio.ReadTransport]:
     """Start ``command`` with its output on a pipe asyncio does not manage.
 
@@ -1540,7 +1540,7 @@ async def _collect(
         await _stop_reader(reader, transport)
 
 
-async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> str:
+async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> str:
     proc, stream, transport = await _spawn_shell(args["command"], cwd)
     # The child leads its own group, so the group id is its pid. Recorded here
     # because os.getpgid() stops working the moment that leader is reaped.
@@ -1570,7 +1570,7 @@ async def _shell(args: dict, cwd: Path, ctx: Optional[ToolContext] = None) -> st
     return f"{out}\n{status}" if out.strip() else status
 
 
-async def user_shell(command: str, cwd: Path, ctx: Optional[ToolContext] = None) -> str:
+async def user_shell(command: str, cwd: Path, ctx: ToolContext | None = None) -> str:
     """Run a command the user typed themselves, with no permission gate.
 
     The TUI's "!" prefix. Same execution as the shell tool — same timeout, the
@@ -1667,14 +1667,14 @@ class BackgroundCommand:
     ) -> None:
         self.command = command
         self.output = _TaskOutput()
-        self.exit_code: Optional[int] = None
+        self.exit_code: int | None = None
         self.killed = False
         self._proc = proc
         self._stream = stream
         self._transport = transport
         self._pgid = pgid
         self._reading = asyncio.ensure_future(self._read())
-        self._killing: Optional[asyncio.Future] = None
+        self._killing: asyncio.Future | None = None
 
     @property
     def running(self) -> bool:
@@ -1689,7 +1689,7 @@ class BackgroundCommand:
             await _stop_reader(reader, self._transport)
             self.exit_code = self._proc.returncode
 
-    async def wait(self) -> Optional[int]:
+    async def wait(self) -> int | None:
         """Block until the command has exited and its output has been drained.
 
         Shielded, because whoever waits is liable to be cancelled — a job being
@@ -1766,8 +1766,8 @@ def tail_text(data: bytes, dropped: int = 0, limit: int = _SHELL_MAX_BYTES) -> s
 
 
 async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
-                       registry: Optional[dict[str, Tool]] = None,
-                       ctx: Optional[ToolContext] = None) -> str:
+                       registry: dict[str, Tool] | None = None,
+                       ctx: ToolContext | None = None) -> str:
     """Run a registered tool. Always returns a string for the model."""
     tool = (REGISTRY if registry is None else registry).get(name)
     if tool is None or tool.run is None:

@@ -12,7 +12,6 @@ tested against a plain sink instead of a driven terminal.
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 from .agent import UserInput
 
@@ -66,11 +65,11 @@ class TurnDriver:
 
     def __init__(self, agent) -> None:
         self.agent = agent
-        self.result: Optional[Result] = None
+        self.result: Result | None = None
         self.killed = False
         # Called, with no arguments, whenever the state changes.
         self.on_change = None
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         # Called with each event of the running turn, awaited. The pane's
         # renderer; None while nobody is showing this agent, which then runs
         # unwatched rather than having to stop.
@@ -80,7 +79,7 @@ class TurnDriver:
         # removing the panel that asked is asynchronous.
         self.blocked = 0
         self._inbox: asyncio.Queue = asyncio.Queue()
-        self._turn: Optional[asyncio.Task] = None
+        self._turn: asyncio.Task | None = None
 
     # ---- lifecycle ----------------------------------------------------------
 

@@ -15,7 +15,6 @@ import platform
 import threading
 import time
 import uuid
-from typing import Optional
 
 from .config import config_root
 
@@ -71,7 +70,7 @@ def _version() -> str:
         return "unknown"
 
 
-def _language() -> Optional[str]:
+def _language() -> str | None:
     lang = os.environ.get("LC_ALL") or os.environ.get("LANG") or ""
     lang = lang.split(".")[0].replace("_", "-").lower()
     return lang if lang and lang != "c" else None
@@ -89,7 +88,7 @@ def _user_agent() -> str:
     return f"Mozilla/5.0 ({token}) paimon/{_version()}"
 
 
-def _prepare(mode: str, model: Optional[str] = None) -> Optional[dict]:
+def _prepare(mode: str, model: str | None = None) -> dict | None:
     """Advance the on-disk state and build one event's query parameters.
 
     Returns None when telemetry is off. Each invocation is its own GA
@@ -147,7 +146,7 @@ def _send(params: dict) -> None:
         pass
 
 
-def record_launch(mode: str, model: Optional[str] = None) -> None:
+def record_launch(mode: str, model: str | None = None) -> None:
     """Count this invocation under the given mode (tui, headless, web, or a
     subcommand name), optionally tagged with the qualified model in use.
     Never raises and never blocks the caller."""

@@ -15,7 +15,6 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from pydantic_ai.messages import (
     ModelMessage,
@@ -103,7 +102,7 @@ _REVIEWED_BY = {
 DEFAULT_REVIEWERS = {name: reviewer for reviewer, names in _REVIEWED_BY.items() for name in names}
 
 
-def default_model(model: str) -> Optional[str]:
+def default_model(model: str) -> str | None:
     """The reviewer DEFAULT_REVIEWERS pairs with ``model``, as "provider:name"."""
     try:
         provider, name = split_model_string(model)

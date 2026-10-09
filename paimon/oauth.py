@@ -16,7 +16,7 @@ import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Iterator, Optional, TypeVar
+from typing import Awaitable, Callable, Iterator, TypeVar
 from urllib.parse import parse_qs, urlsplit
 
 from . import lockfile
@@ -174,7 +174,7 @@ class Credentials:
 
 
 async def redirected(host: str, port: int, path: str, parse: Callable[[str], T], show: Callable[[], None],
-                     pasted: Optional[Awaitable[str]] = None, *, done: str, busy: PaimonError) -> T:
+                     pasted: Awaitable[str] | None = None, *, done: str, busy: PaimonError) -> T:
     """Wait on a loopback port for the browser to come back from a sign-in.
 
     ``show`` is called once the port is listening. ``parse`` turns a request

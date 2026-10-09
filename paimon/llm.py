@@ -17,7 +17,7 @@ import platform
 import typing
 from functools import cache
 from importlib import metadata
-from typing import Optional, Sequence
+from typing import Sequence
 
 from pydantic_ai.direct import model_request
 from pydantic_ai.messages import ModelMessage, TextPart
@@ -182,7 +182,7 @@ def _provider_resolved_key(provider_cls) -> str:
         return "unset"
 
 
-def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[str] = None) -> Model:
+def build_model(model: str, api_base: str | None = None, api_key: str | None = None) -> Model:
     provider_name, model_name = split_model_string(model)
     if provider_name == CHATGPT_PROVIDER:
         from . import chatgpt
@@ -215,7 +215,7 @@ def build_model(model: str, api_base: Optional[str] = None, api_key: Optional[st
     return infer_model(f"{provider_name}:{model_name}", provider_factory=lambda _: provider)
 
 
-def request_settings(model: Model, cache_key: Optional[str] = None) -> dict:
+def request_settings(model: Model, cache_key: str | None = None) -> dict:
     """The settings every request carries.
 
     ``cache_key`` names the conversation the request belongs to. OpenAI
@@ -232,7 +232,7 @@ def request_settings(model: Model, cache_key: Optional[str] = None) -> dict:
 
 
 async def ask_once(model: Model, messages: list[ModelMessage], *, max_tokens: int,
-                   tools: Sequence = (), cache_key: Optional[str] = None) -> str:
+                   tools: Sequence = (), cache_key: str | None = None) -> str:
     """One request outside the turn loop, answered as plain text.
 
     Not streamed and not retried: the callers are a checkpoint summary and a

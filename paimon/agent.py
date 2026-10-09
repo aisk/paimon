@@ -10,7 +10,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Optional, Sequence
+from typing import AsyncIterator, Awaitable, Callable, Sequence
 from uuid import uuid4
 
 from pydantic_ai.direct import model_request_stream
@@ -248,7 +248,7 @@ def _nested_calls(part: ToolReturnPart) -> list[dict]:
     return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
 
 
-def _held(toolset: Optional[dict[str, tools.Tool]], config: Config) -> dict[str, tools.Tool]:
+def _held(toolset: dict[str, tools.Tool] | None, config: Config) -> dict[str, tools.Tool]:
     """The tools an agent opened with ``toolset`` under ``config`` really holds.
 
     The config's switches are applied here rather than by each caller, so
@@ -375,19 +375,19 @@ class Job:
 
     kind: str  # "agent" or "command"
     label: str = ""
-    agent: Optional["Agent"] = None
-    command: Optional[tools.BackgroundCommand] = None
+    agent: "Agent | None" = None
+    command: tools.BackgroundCommand | None = None
     # What ends with the job: the child's one turn, or the wait for the
     # command to exit. Cancelling it is how a job is stopped without a notice.
     # None only until the job has been put on screen, which comes first.
-    task: Optional[asyncio.Task] = None
+    task: asyncio.Task | None = None
     # How much of the command's output read_job has already handed over.
     cursor: int = 0
     # Set by whoever shows an agent. The sink is awaited with every event of
     # its turn, so drawing them is what paces it; on_done is called once when
     # its task is over, however it ended.
-    sink: Optional[Callable[[AgentEvent], Awaitable[None]]] = None
-    on_done: Optional[Callable[[], None]] = None
+    sink: Callable[[AgentEvent], Awaitable[None]] | None = None
+    on_done: Callable[[], None] | None = None
 
     @property
     def running(self) -> bool:
@@ -442,11 +442,11 @@ class Agent:
                 ...
     """
 
-    def __init__(self, session: Session, system_prompt: str, *, cwd: Optional[Path] = None,
-                 confirm: Optional[ConfirmFn] = None, ask: Optional[AskFn] = None,
-                 mode: str = "yolo", config: Optional[Config] = None,
-                 toolset: Optional[dict[str, tools.Tool]] = None,
-                 model_override: Optional[str] = None,
+    def __init__(self, session: Session, system_prompt: str, *, cwd: Path | None = None,
+                 confirm: ConfirmFn | None = None, ask: AskFn | None = None,
+                 mode: str = "yolo", config: Config | None = None,
+                 toolset: dict[str, tools.Tool] | None = None,
+                 model_override: str | None = None,
                  skills: Sequence[Skill] = (),
                  skill_diagnostics: Sequence[SkillDiagnostic] = ()):
         self.cwd = Path(cwd or Path.cwd())
@@ -474,18 +474,18 @@ class Agent:
         self.notices: list[str] = []
         # Set by the UI. Called whenever a job starts or ends or a notice
         # arrives, so it can redraw and wake an idle conversation.
-        self.on_jobs_changed: Optional[Callable[[], None]] = None
+        self.on_jobs_changed: Callable[[], None] | None = None
         # Set by the UI: puts a job on screen before it gets under way,
         # awaited with (job id, job). None where there is no tab to show it
         # in: an agent then runs unseen, and run_background refuses.
-        self.open_job: Optional[Callable[[str, Job], Awaitable[None]]] = None
+        self.open_job: Callable[[str, Job], Awaitable[None]] | None = None
         self._closed = False
         # The tool budget of the turn in flight, which the agents it starts
         # inherit: an unattended run bounded for one agent is bounded for all.
-        self._max_tool_calls: Optional[int] = None
+        self._max_tool_calls: int | None = None
         # Set by the UI too: the hook the loop pulls queued user messages from.
         # None where nobody can type while a turn runs (headless, tests).
-        self.pending: Optional[PendingFn] = None
+        self.pending: PendingFn | None = None
         # Per-agent tool state, kept off the tool functions so one agent's
         # shell overflow files stay invisible to the next one. The session
         # rides along for the history tools.
@@ -498,8 +498,8 @@ class Agent:
         self.toolset = _held(toolset, self.config)
         self.tool_schemas = tools.schemas(self.toolset)
         self._tool_definitions = tools.definitions(self.toolset)
-        self._cached_model: Optional[tuple[tuple, Model]] = None
-        self._cached_review_model: Optional[tuple[tuple, Model]] = None
+        self._cached_model: tuple[tuple, Model] | None = None
+        self._cached_review_model: tuple[tuple, Model] | None = None
         # Refusals in a row from the auto-mode reviewer; see _review.
         self._review_blocks = 0
         # (history length, provider-reported tokens) after the last completed
@@ -507,16 +507,16 @@ class Agent:
         # count_context_tokens so the chars/4 heuristic only covers what was
         # appended since. None until a request reports usage, and again after
         # compaction reshapes the history.
-        self._usage_anchor: Optional[tuple[int, int]] = None
+        self._usage_anchor: tuple[int, int] | None = None
 
     @classmethod
-    def open(cls, cwd: Optional[Path] = None, *, session: Optional[Session] = None,
-             confirm: Optional[ConfirmFn] = None, ask: Optional[AskFn] = None,
-             mode: str = "yolo", config: Optional[Config] = None,
-             append_system_prompt: Optional[str] = None,
-             toolset: Optional[dict[str, tools.Tool]] = None,
-             model_override: Optional[str] = None,
-             parent_session_id: Optional[str] = None) -> "Agent":
+    def open(cls, cwd: Path | None = None, *, session: Session | None = None,
+             confirm: ConfirmFn | None = None, ask: AskFn | None = None,
+             mode: str = "yolo", config: Config | None = None,
+             append_system_prompt: str | None = None,
+             toolset: dict[str, tools.Tool] | None = None,
+             model_override: str | None = None,
+             parent_session_id: str | None = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
 
         ``append_system_prompt`` is added to the end of a new session's system
@@ -624,7 +624,7 @@ class Agent:
                 job.agent.mode = mode
 
     @property
-    def model_name(self) -> Optional[str]:
+    def model_name(self) -> str | None:
         """The model this agent talks to: its own override, else the config's."""
         return self.model_override or self.config.model
 
@@ -645,7 +645,7 @@ class Agent:
         self._cached_review_model = self._built(name, self._cached_review_model)
         return self._cached_review_model[1]
 
-    def _built(self, name: str, cached: Optional[tuple[tuple, Model]]) -> tuple[tuple, Model]:
+    def _built(self, name: str, cached: tuple[tuple, Model] | None) -> tuple[tuple, Model]:
         """``cached`` if it still matches the config, else ``name`` built anew."""
         api_base, api_key = self.config.provider_auth(name)
         key = (name, api_base, api_key)
@@ -653,7 +653,7 @@ class Agent:
             cached = (key, build_model(*key))
         return cached
 
-    def context_window(self) -> Optional[int]:
+    def context_window(self) -> int | None:
         """The context window compaction works against, None when unknown."""
         try:
             model = self._model()
@@ -673,7 +673,7 @@ class Agent:
         """Persist the final version of a message already present in ``self.history``."""
         self.session.append_message(message, replaces=record_id)
 
-    async def _maybe_compact(self, *, force: bool = False) -> Optional[compaction.CompactionResult]:
+    async def _maybe_compact(self, *, force: bool = False) -> compaction.CompactionResult | None:
         """Compact the context if it is close to full.
 
         ``force`` is the manual path: the user asked for it, so neither the
@@ -741,7 +741,7 @@ class Agent:
         return await asyncio.to_thread(
             compaction.count_tokens, list(self.history), self.tool_schemas, self.system_prompt)
 
-    async def compact_now(self) -> Optional[compaction.CompactionResult]:
+    async def compact_now(self) -> compaction.CompactionResult | None:
         """Compact on demand; None when the history is too short to be worth it."""
         return await self._maybe_compact(force=True)
 
@@ -878,7 +878,7 @@ class Agent:
         persist()
         yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
 
-    async def _refusal(self, name: str, args: dict) -> Optional[str]:
+    async def _refusal(self, name: str, args: dict) -> str | None:
         """Authorize a tool the loop runs itself, the way run_tool does the rest:
         None when it may run, else what the model is told."""
         return await tools.authorize(name, args, self.mode, self.cwd, self.confirm,
@@ -886,7 +886,7 @@ class Agent:
                                      safe_commands=self.config.safe_commands,
                                      ctx=self.tool_context)
 
-    async def _review(self, name: str, args: dict) -> Optional[str]:
+    async def _review(self, name: str, args: dict) -> str | None:
         """Put a call auto mode holds to the reviewer model.
 
         The user is the fallback, never the first stop: they are asked when no
@@ -1045,7 +1045,7 @@ class Agent:
                 + "\n".join(lines)
                 + "\nOther models of the same providers work too, when named exactly.")
 
-    def _no_room(self, kind: str) -> Optional[str]:
+    def _no_room(self, kind: str) -> str | None:
         """The refusal for a job that would exceed a cap, or None when there is room."""
         live = [job for job in self.jobs.values() if job.running]
         agents = sum(1 for job in live if job.kind == "agent")
@@ -1069,7 +1069,7 @@ class Agent:
             if job_id not in self.jobs:
                 return job_id
 
-    def _notify(self, notice: Optional[str] = None) -> None:
+    def _notify(self, notice: str | None = None) -> None:
         """Queue ``notice`` for the model, and tell the UI the jobs moved."""
         if self._closed:
             return
@@ -1078,7 +1078,7 @@ class Agent:
         if self.on_jobs_changed is not None:
             self.on_jobs_changed()
 
-    async def _spawn(self, prompt: str, model: Optional[str]) -> str:
+    async def _spawn(self, prompt: str, model: str | None) -> str:
         """Start a child agent on ``prompt`` as a task of its own; returns its id."""
         job_id = self._new_job_id()
 
@@ -1198,7 +1198,7 @@ class Agent:
         return [JobNotice(text) for text in notices]
 
     async def _run_code(self, code: str,
-                        spend: Callable[[], Optional[str]]) -> tuple[str, bool, list[dict]]:
+                        spend: Callable[[], str | None]) -> tuple[str, bool, list[dict]]:
         """Run a run_code script: (result, completed, the calls it made).
 
         Each call a script makes is this agent's own: it comes off the turn's
@@ -1262,8 +1262,8 @@ class Agent:
         # Unchanged (the same object back) means it was not a skill command.
         return mentions(text) if expanded is text else expanded
 
-    async def run(self, user_input: Optional[str], *, expand: bool = True,
-                  max_tool_calls: Optional[int] = None) -> AsyncIterator[AgentEvent]:
+    async def run(self, user_input: str | None, *, expand: bool = True,
+                  max_tool_calls: int | None = None) -> AsyncIterator[AgentEvent]:
         """Run one user turn to completion, yielding events along the way.
 
         ``user_input`` may be None: a wake-up turn, run so the model reacts to
@@ -1302,8 +1302,8 @@ class Agent:
         # replayed to the model as a normal assistant response.
         outcome_recorded = False
 
-        def record_outcome(outcome: str, *, error: Optional[str] = None,
-                           partial_text: Optional[str] = None) -> None:
+        def record_outcome(outcome: str, *, error: str | None = None,
+                           partial_text: str | None = None) -> None:
             nonlocal outcome_recorded
             if outcome_recorded:
                 return
@@ -1329,7 +1329,7 @@ class Agent:
             raise
 
     async def _run(self, record_outcome: Callable[..., None],
-                   max_tool_calls: Optional[int]) -> AsyncIterator[AgentEvent]:
+                   max_tool_calls: int | None) -> AsyncIterator[AgentEvent]:
         """The model/tool loop of one turn; ``run`` wraps it to guarantee the
         terminal ``turn_end`` record whatever way the turn ends."""
         # A compaction that failed for a transient reason is retried on the
@@ -1342,7 +1342,7 @@ class Agent:
         calls_made = 0  # every dispatched ToolCallPart counts, whatever its kind
         budget_hit = False
 
-        def spend() -> Optional[str]:
+        def spend() -> str | None:
             """Take one call off the turn's budget: None, or the refusal when
             there is none left. Shared by the calls the model makes and the
             ones its run_code scripts make, so neither can slip past it."""
@@ -1403,11 +1403,11 @@ class Agent:
 
             content = ""  # accumulated text, kept if the stream is interrupted
             attempt = 0
-            stats: Optional[RequestStats] = None
+            stats: RequestStats | None = None
 
             while True:
                 started = False  # this attempt has yielded something to the caller
-                first_event_at: Optional[float] = None
+                first_event_at: float | None = None
                 try:
                     async with model_request_stream(
                         model,

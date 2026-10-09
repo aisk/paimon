@@ -45,7 +45,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Sequence
 
 from . import tools
 from .agent import (
@@ -140,7 +140,7 @@ def denied_calls(ev: ToolEnd) -> int:
 class TextRenderer:
     """Human-readable rendering: answer on stdout, everything else on stderr."""
 
-    def __init__(self, out=None, err=None, config: Optional[Config] = None) -> None:
+    def __init__(self, out=None, err=None, config: Config | None = None) -> None:
         self._out = sys.stdout if out is None else out
         self._err = sys.stderr if err is None else err
         self._config = config or Config()
@@ -148,8 +148,8 @@ class TextRenderer:
         self._out_open = False  # stdout has an unterminated line
         self._call_open = False  # a progress line awaits its outcome
         self._denied = 0
-        self._session_id: Optional[str] = None
-        self._mode: Optional[str] = None
+        self._session_id: str | None = None
+        self._mode: str | None = None
 
     def _note(self, text: str) -> None:
         self._end_call()
@@ -160,9 +160,9 @@ class TextRenderer:
             _write(self._err, "\n")
             self._call_open = False
 
-    def begin(self, session_id: Optional[str] = None, model: Optional[str] = None,
-              mode: Optional[str] = None, cwd: Optional[Path] = None,
-              log_path: Optional[Path] = None) -> None:
+    def begin(self, session_id: str | None = None, model: str | None = None,
+              mode: str | None = None, cwd: Path | None = None,
+              log_path: Path | None = None) -> None:
         self._session_id = session_id
         self._mode = mode
 
@@ -231,7 +231,7 @@ class TextRenderer:
             _write(self._out, "\n")
             self._out_open = False
 
-    def finish(self, subtype: str = "success", error: Optional[str] = None) -> None:
+    def finish(self, subtype: str = "success", error: str | None = None) -> None:
         if error:
             self._note(f"paimon: {error}")
         if subtype == "interrupted":
@@ -255,21 +255,21 @@ class JsonRenderer:
         ModelRetry: "retry",
     }
 
-    def __init__(self, out=None, config: Optional[Config] = None) -> None:
+    def __init__(self, out=None, config: Config | None = None) -> None:
         self._out = sys.stdout if out is None else out
         self._blocks: list[str] = []
         self._current = ""
         self._denied = 0
-        self._session_id: Optional[str] = None
-        self._log_path: Optional[Path] = None
+        self._session_id: str | None = None
+        self._log_path: Path | None = None
 
     def _emit(self, payload: dict) -> None:
         # default=str keeps malformed tool arguments from aborting the run.
         _write(self._out, json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
-    def begin(self, session_id: Optional[str] = None, model: Optional[str] = None,
-              mode: Optional[str] = None, cwd: Optional[Path] = None,
-              log_path: Optional[Path] = None) -> None:
+    def begin(self, session_id: str | None = None, model: str | None = None,
+              mode: str | None = None, cwd: Path | None = None,
+              log_path: Path | None = None) -> None:
         self._session_id = session_id
         self._log_path = log_path
         self._emit({"type": "init", "session_id": session_id, "model": model,
@@ -317,7 +317,7 @@ class JsonRenderer:
     async def close(self) -> None:
         self._flush_block()  # no await here; see TextRenderer.close
 
-    def _log_end(self) -> Optional[int]:
+    def _log_end(self) -> int | None:
         """Line count of the session log, the cursor for ``paimon log --after``."""
         if self._log_path is None:
             return None
@@ -327,7 +327,7 @@ class JsonRenderer:
         except OSError:
             return None
 
-    def finish(self, subtype: str = "success", error: Optional[str] = None) -> None:
+    def finish(self, subtype: str = "success", error: str | None = None) -> None:
         self._flush_block()
         self._emit({"type": "result", "subtype": subtype, "is_error": subtype != "success",
                     "session_id": self._session_id, "text": "\n\n".join(self._blocks),
@@ -393,8 +393,8 @@ class _ToolBudgetExceeded(Exception):
     """
 
 
-async def _run_turn(agent: Agent, renderer, text: Optional[str],
-                    max_tool_calls: Optional[int] = None) -> None:
+async def _run_turn(agent: Agent, renderer, text: str | None,
+                    max_tool_calls: int | None = None) -> None:
     try:
         # The budget itself is enforced inside Agent.run, at the point every
         # tool call is dispatched — counting renderer events here would miss
@@ -425,8 +425,8 @@ async def _run_turn(agent: Agent, renderer, text: Optional[str],
 
 
 async def _drive(agent: Agent, renderer, text: str, *,
-                 timeout: Optional[float] = None,
-                 max_tool_calls: Optional[int] = None) -> int:
+                 timeout: float | None = None,
+                 max_tool_calls: int | None = None) -> int:
     turn = asyncio.ensure_future(_run_turn(agent, renderer, text, max_tool_calls))
     _install_interrupt(turn)
     try:
@@ -452,7 +452,7 @@ async def _drive(agent: Agent, renderer, text: str, *,
     return 0
 
 
-def fail(message: str, output_format: str = "text", config: Optional[Config] = None) -> int:
+def fail(message: str, output_format: str = "text", config: Config | None = None) -> int:
     """Report a failure that happened before a turn could start."""
     renderer = _make_renderer(output_format, config or Config())
     renderer.begin()
@@ -471,11 +471,11 @@ def _relax_encoding() -> None:
             stream.reconfigure(errors="replace")
 
 
-def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Optional[Session],
-        output_format: str = "text", config: Optional[Config] = None,
-        model: Optional[str] = None, timeout: Optional[float] = None,
-        max_tool_calls: Optional[int] = None,
-        append_system_prompt: Optional[str] = None) -> int:
+def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Session | None,
+        output_format: str = "text", config: Config | None = None,
+        model: str | None = None, timeout: float | None = None,
+        max_tool_calls: int | None = None,
+        append_system_prompt: str | None = None) -> int:
     """Run one prompt to its end and return the process exit code.
 
     That is one turn, plus one more for every batch of answers from agents it

@@ -9,7 +9,6 @@ import asyncio
 import json
 import weakref
 from dataclasses import dataclass
-from typing import Optional
 
 from genai_prices.data_snapshot import get_snapshot
 from pydantic_ai.messages import (
@@ -75,7 +74,7 @@ class CompactionResult:
         return [summary_message(self.summary), *self.kept_messages]
 
 
-def _window_by_name(model_name: str) -> Optional[int]:
+def _window_by_name(model_name: str) -> int | None:
     """The window genai-prices records for this model name under any provider.
 
     pydantic-ai matches on the provider as well, which misses a known model
@@ -88,7 +87,7 @@ def _window_by_name(model_name: str) -> Optional[int]:
     return info.context_window
 
 
-def context_window(model: Optional[Model], fallback: Optional[int] = None) -> Optional[int]:
+def context_window(model: Model | None, fallback: int | None = None) -> int | None:
     """The window to compact against: what is on record, else the fallback.
 
     The record is pydantic-ai's own profile for the model, filled from
@@ -104,8 +103,8 @@ def context_window(model: Optional[Model], fallback: Optional[int] = None) -> Op
     return fallback if fallback and fallback > 0 else None
 
 
-def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]] = None,
-                 system_prompt: Optional[str] = None) -> int:
+def count_tokens(messages: list[ModelMessage], tool_schemas: list[dict] | None = None,
+                 system_prompt: str | None = None) -> int:
     """Approximate context tokens as serialized UTF-8 bytes / 4.
 
     Bytes rather than characters: CJK text runs about one token per
@@ -122,7 +121,7 @@ def count_tokens(messages: list[ModelMessage], tool_schemas: Optional[list[dict]
     return max(1, (len(payload.encode("utf-8")) + 3) // 4)
 
 
-def should_compact(tokens: int, window: Optional[int], reserve_tokens: int) -> bool:
+def should_compact(tokens: int, window: int | None, reserve_tokens: int) -> bool:
     return window is not None and tokens > window - reserve_tokens
 
 
@@ -171,7 +170,7 @@ def _serialize_messages(messages: list[ModelMessage]) -> str:
     return "\n".join(serialized)
 
 
-def _bounded(serialized: str, window: Optional[int]) -> str:
+def _bounded(serialized: str, window: int | None) -> str:
     """Fit the serialized conversation into the summary request's own window.
 
     The compaction request must never itself overflow — it is what runs when
@@ -208,10 +207,10 @@ async def compact(
     model: Model,
     keep_recent_tokens: int,
     tokens_before: int,
-    tool_schemas: Optional[list[dict]] = None,
-    system_prompt: Optional[str] = None,
-    window: Optional[int] = None,
-) -> Optional[CompactionResult]:
+    tool_schemas: list[dict] | None = None,
+    system_prompt: str | None = None,
+    window: int | None = None,
+) -> CompactionResult | None:
     """Summarize the old prefix and return a new effective context.
 
     ``window`` bounds the summary request's own input (see ``_bounded``); when

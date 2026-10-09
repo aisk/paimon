@@ -19,7 +19,7 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Mapping
 
 # Both the integration's identity and the name users see. Herdr reserves the
 # "herdr:" prefix for its own integrations.
@@ -41,7 +41,7 @@ _MAX_BYTES = 8 * 1024
 @dataclass(frozen=True)
 class Report:
     state: str
-    session_id: Optional[str] = None
+    session_id: str | None = None
     # The command that reopens the session, or empty when there is nothing to
     # reopen yet.
     resume: tuple[str, ...] = ()
@@ -69,14 +69,14 @@ class Reporter:
         self._binary = binary
         self._pane_id = pane_id
         self._cond = threading.Condition()
-        self._latest: Optional[Report] = None
-        self._pending: Optional[Report] = None
+        self._latest: Report | None = None
+        self._pending: Report | None = None
         self._closed = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._seq = 0
 
     @classmethod
-    def from_env(cls, env: Optional[Mapping[str, str]] = None) -> Optional["Reporter"]:
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "Reporter | None":
         """A reporter for the surrounding Herdr pane, or None outside Herdr."""
         env = os.environ if env is None else env
         binary = env.get("HERDR_BIN_PATH")

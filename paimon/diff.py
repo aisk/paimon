@@ -8,7 +8,6 @@ edited line pairs. No external tools involved.
 
 import difflib
 from pathlib import Path
-from typing import Optional
 
 from rich.padding import Padding
 from rich.style import Style
@@ -41,7 +40,7 @@ _REFINE_THRESHOLD = 0.5
 
 
 def render_diff(old: str, new: str, *, path: str = "",
-                start_line: Optional[int] = None,
+                start_line: int | None = None,
                 theme: str = "", dark: bool = True) -> Table:
     """``start_line`` is where the diffed region starts in the file; None
     means unknown, which drops the line numbers rather than showing wrong
@@ -97,7 +96,7 @@ def render_diff(old: str, new: str, *, path: str = "",
 
 
 def locate_line(path: str, old: str, new: str,
-                cwd: Optional[Path] = None) -> Optional[int]:
+                cwd: Path | None = None) -> int | None:
     """1-based line where the edited region starts in the file, else None.
 
     ``old`` is searched first; when the edit already ran (session replay) the

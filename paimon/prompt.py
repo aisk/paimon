@@ -10,7 +10,7 @@ import os
 import platform
 from datetime import date
 from pathlib import Path
-from typing import Collection, Optional, Sequence
+from typing import Collection, Sequence
 
 from .skills import Skill, format_skills_for_prompt
 
@@ -62,7 +62,7 @@ _GUIDELINES: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
-def instructions(tool_names: Optional[Collection[str]] = None) -> str:
+def instructions(tool_names: Collection[str] | None = None) -> str:
     """The fixed part of the prompt, for an agent holding ``tool_names``.
 
     None keeps every guideline, for callers with no toolset to narrow by.
@@ -158,7 +158,7 @@ def load_context_files(cwd: Path) -> list[tuple[Path, str]]:
 
 
 def build_system_prompt(cwd: Path, skills: Sequence[Skill] = (),
-                        tool_names: Optional[Collection[str]] = None) -> str:
+                        tool_names: Collection[str] | None = None) -> str:
     prompt = instructions(tool_names)
 
     context_files = load_context_files(cwd)
