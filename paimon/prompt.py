@@ -34,6 +34,10 @@ _GUIDELINES: tuple[tuple[tuple[str, ...], str], ...] = (
      "Use glob to find files by name pattern and grep to search file contents."),
     (("shell",),
      "Use the shell tool for git, running tests and anything the other tools do not cover."),
+    (("run_code",),
+     "Call tools directly by default. Use run_code when a script saves steps or context: "
+     "three or more independent calls, a loop over many files or results, or output that "
+     "should be filtered before it reaches you."),
     (("write_todos",),
      "For tasks with several steps, call write_todos first to lay out a plan, then keep "
      "it updated as you go (one task in_progress at a time). Skip it for simple tasks."),

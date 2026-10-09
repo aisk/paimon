@@ -177,7 +177,7 @@ class _Recorder:
 class ResumeFlagsTest(unittest.TestCase):
     @staticmethod
     def _flags(**given) -> tuple[str, ...]:
-        args = {"strict": False, "no_web_search": False, "no_skills": False, "skills": [],
+        args = {"strict": False, "no_web_search": False, "no_code_mode": False, "no_skills": False, "skills": [],
                 "model": "zai:glm-4.7", "mode": "auto"}
         return cli._resume_flags(argparse.Namespace(**{**args, **given}))
 

@@ -290,6 +290,9 @@ class Config:
     include_default_skills: bool = True
     # Cleared by --no-web-search for one run; not a config file setting.
     web_search: bool = True
+    # Give the model the run_code tool (see paimon.codemode). Turned off by
+    # "code_mode": false in the config file, or for one run by --no-code-mode.
+    code_mode: bool = True
 
     @classmethod
     def load(cls) -> "Config":
@@ -311,6 +314,7 @@ class Config:
             compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
             compaction_context_window=compaction.get("context_window"),
             skills=[str(p) for p in skills] if isinstance(skills, list) else [],
+            code_mode=data.get("code_mode", cls.code_mode),
         )
 
     def provider_auth(self, model: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:

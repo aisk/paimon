@@ -3,7 +3,6 @@
 import asyncio
 import difflib
 import json
-import re
 from collections import Counter
 from pathlib import Path
 
@@ -18,7 +17,7 @@ from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static, TextArea
 
 from .diff import locate_line, render_diff
-from .tools import resolve_path
+from .tools import failure, resolve_path
 
 
 def abbreviate(text: str, limit: int) -> str:
@@ -291,16 +290,34 @@ def _result_summary(result: str, denied: bool) -> tuple[str, str]:
     """Return (status word, CSS class) for a finished entry."""
     if denied:
         return "denied", "-denied"
-    match = re.search(r"\(exit code (-?\d+)\)\s*$", result)
-    if match:
-        code = int(match.group(1))
-        return ("✓", "-done") if code == 0 else (f"exit {code}", "-failed")
-    if result.lstrip().lower().startswith(("error", "failed")):
-        return "failed", "-failed"
+    problem = failure(result)
+    if problem is not None:
+        return problem, "-failed"
+    if result.rstrip().endswith("(exit code 0)"):
+        return "✓", "-done"
     lines = len(result.splitlines())
     if lines > 1:
         return f"{lines} lines", "-done"
     return "✓", "-done"
+
+
+def _seconds(call: dict) -> float:
+    """How long a nested call took; 0 for a log that does not say."""
+    seconds = call.get("seconds")
+    return seconds if isinstance(seconds, (int, float)) else 0.0
+
+
+def nested_calls(calls: list[dict]) -> Content:
+    """What a run_code script called, one line per call."""
+    lines, values = [], {}
+    for index, call in enumerate(calls):
+        status = str(call.get("status"))
+        style = "$text-muted" if status == "ok" else "$text-warning"
+        values[f"name{index}"] = _TOOL_LABELS.get(call.get("name"), str(call.get("name")))
+        values[f"detail{index}"] = _one_line(call.get("detail"))
+        values[f"status{index}"] = f"{'✓' if status == 'ok' else status} {_seconds(call):.2f}s"
+        lines.append(f"[$text-accent]$name{index}[/]  $detail{index}  [{style}]$status{index}[/]")
+    return Content.from_markup("\n".join(lines), **values)
 
 
 class _ToggleLine(Static, can_focus=True):
@@ -368,11 +385,16 @@ class ToolEntry(Vertical):
         self.query_one(".tool-entry-detail", Vertical).display = self._expanded
         self.query_one(".tool-entry-header", Static).update(self._header())
 
-    async def finish(self, result: str, *, label: str = "", denied: bool = False) -> None:
+    async def finish(self, result: str, *, label: str = "", denied: bool = False,
+                     calls: list[dict] | None = None) -> None:
         self.remove_class(self._status_class)
         self._status, self._status_class = _result_summary(result, denied)
         self.add_class(self._status_class)
-        await self.query_one(".tool-entry-detail", Vertical).mount(
+        detail = self.query_one(".tool-entry-detail", Vertical)
+        if calls:
+            # Between the script and its output, which is where they happened.
+            await detail.mount(Static(nested_calls(calls), classes="tool-nested"))
+        await detail.mount(
             ToolResult(result, label=label, denied=denied, expanded=True)
         )
         self.query_one(".tool-entry-header", Static).update(self._header())

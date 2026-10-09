@@ -8,7 +8,7 @@ import asyncio
 import dataclasses
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Optional, Sequence
 from uuid import uuid4
@@ -31,7 +31,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import compaction, retry, review, tools
+from . import codemode, compaction, retry, review, tools
 from .config import Config
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string)
@@ -108,6 +108,10 @@ class ToolEnd:
     name: str
     result: str
     denied: bool = False
+    # What a run_code script called, in call order: one dict per nested call
+    # with its tool "name", one-line "detail", "status" (ok, error, denied or
+    # cancelled) and "seconds". Empty for every other tool.
+    calls: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -238,6 +242,29 @@ def _parse_args(args: object) -> dict:
     return {}
 
 
+def _nested_calls(part: ToolReturnPart) -> list[dict]:
+    """The nested calls persisted with a run_code result, tolerating old logs."""
+    calls = part.metadata.get("calls") if isinstance(part.metadata, dict) else None
+    return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+
+
+def _held(toolset: Optional[dict[str, tools.Tool]], config: Config) -> dict[str, tools.Tool]:
+    """The tools an agent opened with ``toolset`` under ``config`` really holds.
+
+    The config's switches are applied here rather than by each caller, so
+    --no-web-search and code mode reach every agent opened with it: new
+    sessions, forks, subagents.
+    """
+    held = dict(tools.REGISTRY if toolset is None else toolset)
+    if not config.web_search:
+        held.pop("web_search", None)
+    if not config.code_mode:
+        held.pop(codemode.NAME, None)
+    if codemode.NAME in held:
+        held[codemode.NAME] = codemode.tool(held)
+    return held
+
+
 def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     """Persisted messages replayed as the events a live ``Agent.run`` yields.
 
@@ -270,7 +297,8 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                     # better an unpaired result than a silent hole.
                     events.append(ToolEnd(part.tool_call_id, part.tool_name,
                                           str(part.content or "(no output)"),
-                                          denied=part.outcome == "denied"))
+                                          denied=part.outcome == "denied",
+                                          calls=_nested_calls(part)))
         elif isinstance(message, ModelResponse):
             following = messages[index + 1] if index + 1 < len(messages) else None
             returns: dict[str, ToolReturnPart] = {}
@@ -299,7 +327,8 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                     if result is not None:
                         events.append(ToolEnd(part.tool_call_id, part.tool_name,
                                               str(result.content or "(no output)"),
-                                              denied=result.outcome == "denied"))
+                                              denied=result.outcome == "denied",
+                                              calls=_nested_calls(result)))
     return events
 
 
@@ -466,11 +495,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.history: list[ModelMessage] = session.messages()
         # This agent's tool set; None means everything in tools.REGISTRY.
-        self.toolset = dict(tools.REGISTRY if toolset is None else toolset)
-        # Dropped here rather than by each caller, so --no-web-search reaches
-        # every agent opened with this config: new sessions, forks, subagents.
-        if not self.config.web_search:
-            self.toolset.pop("web_search", None)
+        self.toolset = _held(toolset, self.config)
         self.tool_schemas = tools.schemas(self.toolset)
         self._tool_definitions = tools.definitions(self.toolset)
         self._cached_model: Optional[tuple[tuple, Model]] = None
@@ -519,7 +544,7 @@ class Agent:
         skills, skill_diagnostics = discover_skills(
             cwd, extra_paths=config.skills, include_defaults=config.include_default_skills)
         # The prompt only mentions tools this agent will actually be offered.
-        tool_names = frozenset(tools.REGISTRY if toolset is None else toolset)
+        tool_names = frozenset(_held(toolset, config))
         is_new = session is None
         if session is None:
             session = Session.create(cwd, parent_session_id)
@@ -1172,6 +1197,50 @@ class Agent:
             self._append_message(job_message(text))
         return [JobNotice(text) for text in notices]
 
+    async def _run_code(self, code: str,
+                        spend: Callable[[], Optional[str]]) -> tuple[str, bool, list[dict]]:
+        """Run a run_code script: (result, completed, the calls it made).
+
+        Each call a script makes is this agent's own: it comes off the turn's
+        budget through ``spend`` and passes the same validation and gate as
+        one the model made directly. A call that does not get through raises
+        inside the script, with the refusal as its message.
+        """
+        calls: list[dict] = []
+        # Gathered calls reach the gate together, and two of them asking the
+        # user at once would put one prompt over the other. Only the asking
+        # is serialized; what was let through runs concurrently.
+        asking = asyncio.Lock()
+
+        async def call(name: str, args: dict) -> str:
+            # "cancelled" is what stays when the script ends before the call does.
+            record = {"name": name, "status": "cancelled", "seconds": 0.0,
+                      "detail": tools.summarize_call(name, args, limit=tools.LOG_DETAIL_WIDTH)}
+            calls.append(record)
+            started = time.perf_counter()
+            try:
+                problem = spend()
+                if problem is None:
+                    invalid = tools.validate_args(name, args, self.toolset)
+                    problem = invalid and f"invalid arguments for {name}: {invalid}"
+                if problem is not None:
+                    record["status"] = "error"
+                    raise codemode.ToolCallError(problem)
+                async with asking:
+                    refusal = await self._refusal(name, args)
+                if refusal is not None:
+                    record["status"] = "denied"
+                    raise codemode.ToolCallError(refusal)
+                result = await tools.execute_tool(name, args, self.cwd, mode=self.mode,
+                                                  registry=self.toolset, ctx=self.tool_context)
+                record["status"] = "ok" if tools.failure(result) is None else "error"
+                return result
+            finally:
+                record["seconds"] = round(time.perf_counter() - started, 3)
+
+        result, completed = await codemode.run(code, self.toolset, call)
+        return result, completed, calls
+
     _AGENT_HANDLED = {
         "write_todos": _run_write_todos,
         "ask_user": _run_ask_user,
@@ -1271,6 +1340,20 @@ class Agent:
         compaction_off = False
         compaction_failures = 0
         calls_made = 0  # every dispatched ToolCallPart counts, whatever its kind
+        budget_hit = False
+
+        def spend() -> Optional[str]:
+            """Take one call off the turn's budget: None, or the refusal when
+            there is none left. Shared by the calls the model makes and the
+            ones its run_code scripts make, so neither can slip past it."""
+            nonlocal calls_made, budget_hit
+            if max_tool_calls is not None and calls_made >= max_tool_calls:
+                budget_hit = True
+                return (f"Not executed: the run reached its tool call "
+                        f"budget (max_tool_calls={max_tool_calls}).")
+            calls_made += 1
+            return None
+
         # A provider context-overflow error triggers one forced compaction and
         # one retry per turn; a second overflow means compaction cannot make
         # the request fit, and retrying again would loop.
@@ -1440,7 +1523,6 @@ class Agent:
                 """Re-persist the tool request with the slots filled so far."""
                 self._replace_message(record_id, tool_request)
 
-            budget_hit = False
             for slot, call in zip(returns, calls):
                 args = _parse_args(call.args)
                 name = call.tool_name
@@ -1448,15 +1530,12 @@ class Agent:
                 # The budget check comes before any dispatch, agent-handled
                 # tools included: a refused call never executes, and its slot
                 # records why instead of a generic interrupted placeholder.
-                if max_tool_calls is not None and calls_made >= max_tool_calls:
-                    budget_hit = True
+                if (refused := spend()) is not None:
                     yield ToolStart(call.tool_call_id, name, args)
-                    slot.content = (f"Not executed: the run reached its tool call "
-                                    f"budget (max_tool_calls={max_tool_calls}).")
+                    slot.content = refused
                     persist()
                     yield ToolEnd(call.tool_call_id, name, slot.content)
                     continue
-                calls_made += 1
 
                 # A name outside this agent's tool set is rejected before the
                 # agent-handled table below, so excluding write_todos or
@@ -1480,6 +1559,21 @@ class Agent:
                     slot.outcome = "failed"
                     persist()
                     yield ToolEnd(call.tool_call_id, name, slot.content)
+                    continue
+
+                if name == codemode.NAME:
+                    # Not in the table below: it needs the turn's budget, which
+                    # only this scope holds. An interrupt leaves the slot its
+                    # placeholder, like any other tool cut short.
+                    yield ToolStart(call.tool_call_id, name, args)
+                    result, completed, nested = await self._run_code(args["code"], spend)
+                    slot.content = result
+                    slot.outcome = "success" if completed else "failed"
+                    # Kept beside the result, where it is persisted for replay
+                    # and never sent to the model.
+                    slot.metadata = {"calls": nested}
+                    persist()
+                    yield ToolEnd(call.tool_call_id, name, result, calls=nested)
                     continue
 
                 handler = self._AGENT_HANDLED.get(name)

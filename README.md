@@ -93,6 +93,7 @@ paimon log a1b2c3    # what a session did, one line per event
 paimon --mode read                  # start in a more cautious permission mode (yolo is the default)
 paimon --strict                     # hold every command, even read-only ones
 paimon --no-web-search              # take the web search tool away for this run
+paimon --no-code-mode               # take the run_code tool away (or "code_mode": false in config.json)
 paimon --web                        # the same UI in a browser (--port, default 8000)
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"
