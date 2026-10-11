@@ -102,7 +102,7 @@ paimon --model zai:glm-4.7          # this model for this run only
 
 `-p` never stops to ask, so with the default `yolo` mode it can already write files and run commands. Add `--output-format result` for a single JSON object with the outcome, which is what a calling program should read. `paimon --help` lists the rest.
 
-Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume command to Herdr on its own, with nothing to install.
+Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume command to Herdr on its own, with nothing to install. It also reports its state to the terminal itself with [OSC 7501](https://mitchellh.com/writing/program-status-osc7501), for terminals that show it.
 
 ### Debugging the Textual UI
 

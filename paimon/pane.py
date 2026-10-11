@@ -119,6 +119,8 @@ class Pane(Vertical):
     # what is true of it. Subclasses carry two attributes besides: ``cwd`` and
     # ``mode``, which is what a pane opened in place of this one inherits.
     needs_confirm = False
+    # The panel that is waiting, while ``needs_confirm`` is true.
+    asking: BlockingPanel | None = None
     is_busy = False
     is_running = False
     _last_focus: Widget | None = None
@@ -600,10 +602,12 @@ class SessionPane(Pane):
             # Counted on the driver rather than here: removing the panel is
             # asynchronous, and the tab badge has to clear the moment the
             # answer is in, not whenever the widget finally goes.
+            self.asking = panel
             driver.mark_blocked(True)
             try:
                 return await future
             finally:
+                self.asking = None
                 driver.mark_blocked(False)
                 focused = self.app.focused if self.app.screen_stack else None
                 restore = focused is panel or (focused is not None and panel in focused.ancestors)
