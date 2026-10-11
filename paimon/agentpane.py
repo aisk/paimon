@@ -121,11 +121,13 @@ class AgentPane(Pane):
             # A panel in a background pane must not grab the keyboard: the
             # user's next keystroke would answer a question they never saw.
             self._request_focus(panel)
+            self.asking = panel
             self.needs_confirm = True
             self._notify_state()
             try:
                 return await future == "allow"
             finally:
+                self.asking = None
                 self.needs_confirm = False
                 focused = self.app.focused if self.app.screen_stack else None
                 restore = focused is panel or (focused is not None and panel in focused.ancestors)

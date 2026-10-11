@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import commands
 from . import headless as headless_mode
-from . import herdr
+from . import herdr, progstatus
 from . import telemetry
 from . import textual_debug
 from . import tools
@@ -231,7 +231,8 @@ def main() -> None:
     # Not under --tui: there the Herdr pane holds the web server, not the agent.
     reporter = None if args.tui else herdr.Reporter.from_env()
     app = PaimonApp(agent, resumed=resume_session is not None, pick_session=args.resume == "",
-                    reporter=reporter, resume_flags=_resume_flags(args))
+                    reporter=reporter, resume_flags=_resume_flags(args),
+                    program_status=not args.tui)
     if debug_bridge is not None:
         debug_bridge.attach(app)
     try:
@@ -241,6 +242,11 @@ def main() -> None:
         # conversation back matters most. Skipped under --tui, where the
         # streams belong to textual-serve rather than to a user.
         if not args.tui:
+            # The stream Textual's driver wrote the reports to.
+            terminal = sys.__stdout__ if sys.platform == "win32" else sys.__stderr__
+            if terminal is not None and terminal.isatty():
+                terminal.write(progstatus.CLEAR)
+                terminal.flush()
             for pane in app.sessions:
                 if pane.agent.history:
                     print(f"resume: {resume_hint(pane.agent.session.id)}", file=sys.stderr)

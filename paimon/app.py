@@ -17,7 +17,7 @@ from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
 
-from . import herdr, llm
+from . import herdr, llm, progstatus
 from .agent import Agent, Job
 from .agentpane import AgentPane
 from .errors import PaimonError
@@ -26,6 +26,7 @@ from .pane import Pane, SessionPane
 from .session import SessionError
 from .tabs import PaneTabs
 from .commandpane import CommandPane
+from .turns import Outcome, TurnDriver
 from .ui import BlockingPanel, PromptInput
 
 # Every pane holds a live agent and its context, or a live process, so panes
@@ -137,7 +138,8 @@ class PaimonApp(App):
         pane._request_focus(prompt)
 
     def __init__(self, agent: Agent, *, resumed: bool = False, pick_session: bool = False,
-                 reporter: herdr.Reporter | None = None, resume_flags: tuple[str, ...] = ()) -> None:
+                 reporter: herdr.Reporter | None = None, resume_flags: tuple[str, ...] = (),
+                 program_status: bool = False) -> None:
         self._persist_theme_changes = False
         super().__init__()
         self.config = agent.config
@@ -146,6 +148,14 @@ class PaimonApp(App):
         self._herdr = reporter
         self._resume_flags = resume_flags
         self._resume_pane: SessionPane | None = None
+        # Whether to tell the terminal itself, with OSC 7501.
+        self._program_status = program_status
+        self._status_sent = ""
+        # The drivers with a turn under way at the last report, and the one
+        # whose turn ended most recently: its result is what paimon is while
+        # at rest.
+        self._turns: set[TurnDriver] = set()
+        self._rested: TurnDriver | None = None
         pane = SessionPane(agent, resumed=resumed, id="pane-1")
         self._panes = [pane]
         self._current = pane
@@ -197,6 +207,51 @@ class PaimonApp(App):
             self.screen.set_class(self._tabs.display, "-tabs-bottom")
         self.refresh_statusbar()
         self._report_herdr()
+        self._report_program_status()
+
+    def _is_working(self) -> bool:
+        """Whether any conversation has work under way.
+
+        An agent still running in the background counts: its caller is woken
+        when it ends, so "idle" now would announce the work done twice. A
+        background command does not, or a dev server left running would never
+        let the pane go idle.
+        """
+        return any(pane.is_busy or any(job.agent is not None and job.running
+                                       for job in pane.agent.jobs.values()) for pane in self.sessions)
+
+    def _report_program_status(self) -> None:
+        """Tell the terminal what this process as a whole is doing.
+
+        One state for many conversations, chosen the way Herdr's is. At rest
+        the turn that ended last decides between finished, failed and idle.
+        """
+        if not self._program_status or self._driver is None:
+            return
+        drivers = {pane.driver for pane in self.sessions}
+        turns = {driver for driver in drivers if driver.is_busy}
+        if ended := self._turns - turns:
+            self._rested = next(iter(ended))
+        self._turns = turns
+        # Only while that conversation is still open: a closed tab or a
+        # session swapped out was the user's doing, and what it last said is
+        # no longer anything to come back to.
+        result = self._rested.result if self._rested in drivers else None
+        asking = next((pane.asking for pane in self._panes if pane.needs_confirm and pane.asking), None)
+        if asking is not None:
+            sequence = progstatus.encode(progstatus.BLOCKED, kind=asking.kind, msg=asking.summary)
+        elif self._is_working():
+            sequence = progstatus.encode(progstatus.WORKING)
+        elif result is not None and result.outcome is Outcome.FAILED:
+            sequence = progstatus.encode(progstatus.ERROR, msg=result.error)
+        elif result is not None and result.finished:
+            sequence = progstatus.encode(progstatus.DONE)
+        else:
+            # Nothing has run yet, or the user stopped what did.
+            sequence = progstatus.encode(progstatus.IDLE)
+        if sequence != self._status_sent:
+            self._status_sent = sequence
+            self._driver.write(sequence)
 
     def _report_herdr(self) -> None:
         """Tell Herdr what this process as a whole is doing.
@@ -210,12 +265,7 @@ class PaimonApp(App):
         sessions = self.sessions
         if any(pane.needs_confirm for pane in self._panes):
             state = herdr.BLOCKED
-        elif any(pane.is_busy or any(job.agent is not None and job.running
-                                     for job in pane.agent.jobs.values()) for pane in sessions):
-            # An agent still running in the background counts: its caller is
-            # woken when it ends, so "idle" now would announce the work done
-            # twice. A background command does not, or a dev server left
-            # running would never let the pane go idle.
+        elif self._is_working():
             state = herdr.WORKING
         else:
             state = herdr.IDLE

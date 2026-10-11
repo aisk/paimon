@@ -16,8 +16,9 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static, TextArea
 
+from . import progstatus
 from .diff import locate_line, render_diff
-from .tools import failure, resolve_path
+from .tools import failure, resolve_path, summarize_call
 
 
 def abbreviate(text: str, limit: int) -> str:
@@ -566,6 +567,11 @@ class BlockingPanel(Vertical, can_focus=True):
     conversation it takes the prompt's place, and the keyboard with it.
     """
 
+    # What the turn is waiting for, in the words of the program status
+    # protocol, and one line saying so.
+    kind = ""
+    summary = ""
+
     def _focus_control(self, widget: Widget) -> None:
         for pane in self.app.panes:
             if pane in self.ancestors:
@@ -606,6 +612,7 @@ class ConfirmPanel(BlockingPanel):
         ("allow", "Yes"),
         ("deny", "No (esc)"),
     ]
+    kind = progstatus.PERMISSION
 
     def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]",
                  cwd: Path | None = None) -> None:
@@ -614,6 +621,7 @@ class ConfirmPanel(BlockingPanel):
         super().__init__(classes="blocking-panel confirm-panel")
         self.tool_name = tool_name
         self.args = args
+        self.summary = f"{tool_name}: {summarize_call(tool_name, args, limit=200)}"
         # The agent's cwd: previews resolve paths against it, exactly like the
         # execution will, so the file shown is the file touched.
         self._cwd = cwd
@@ -751,10 +759,12 @@ class QuestionPanel(BlockingPanel):
     Navigate with Up/Down or 1-9, Enter to pick, Esc to dismiss.
     """
 
+    kind = progstatus.QUESTION
+
     def __init__(self, question: str, options: list[str],
                  future: "asyncio.Future[str | None]") -> None:
         super().__init__(classes="blocking-panel question-panel")
-        self.question = question
+        self.question = self.summary = question
         self.options = list(options)
         self._future = future
         self._selected = 0
