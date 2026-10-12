@@ -29,7 +29,7 @@ from pydantic_ai.profiles import InlineDefsJsonSchemaTransformer
 from pydantic_ai.tools import GenerateToolJsonSchema, ToolDefinition
 from typing_extensions import NotRequired, TypedDict
 
-from . import websearch
+from . import history, websearch
 from .session import Session, data_dir
 
 # A confirm callback returns True to allow a dangerous tool, False to deny.
@@ -191,142 +191,6 @@ def validate_args(name: str, args: dict, toolset: dict) -> str | None:
         problem = error["msg"].replace("Input should be", "must be", 1)
         return f"'{_argument_path(error['loc'])}' {problem}"
     return None
-
-
-def summarize_call(name: str, args: dict, limit: int | None = None) -> str:
-    """One-line detail for a tool call, shared by the TUI and headless output.
-
-    With a limit the detail is collapsed onto a single line and truncated,
-    for outputs that cannot reflow (a terminal stream) unlike a TUI widget.
-    """
-    detail = str(args.get("command") or args.get("path") or args.get("question") or args.get("query")
-                 or args.get("code") or json.dumps(args, ensure_ascii=False))
-    if limit is None:
-        return detail
-    detail = " ".join(detail.split())
-    return detail if len(detail) <= limit else detail[: limit - 1] + "…"
-
-
-# Session-log record rendering, shared by ``paimon log`` (commands.py) and the
-# read_history tool. Seq is the record's 1-based physical line number.
-
-LOG_DETAIL_WIDTH = 120
-
-
-def _chars(text: str) -> str:
-    n = len(text)
-    return f"{n / 1000:.1f}k chars" if n >= 1000 else f"{n} chars"
-
-
-def _clip(text: object, full: bool) -> str:
-    if full:
-        return str(text)
-    line = " ".join(str(text).split())
-    return line if len(line) <= LOG_DETAIL_WIDTH else line[: LOG_DETAIL_WIDTH - 1] + "…"
-
-
-def _render_message(seq: int, record: dict, full: bool) -> list[str]:
-    lines = []
-    for part in (record.get("message") or {}).get("parts") or []:
-        if not isinstance(part, dict):
-            continue
-        kind = part.get("part_kind")
-        content = part.get("content")
-        if kind == "user-prompt":
-            label, detail = "user", _clip(content, full)
-        elif kind == "text":
-            label, detail = "assistant", _clip(content, full)
-        elif kind == "thinking":
-            text = str(content or "")
-            label, detail = "thinking", text if full else f"({_chars(text)})"
-        elif kind == "tool-call":
-            args = part.get("args")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {"args": args}
-            name = str(part.get("tool_name") or "?")
-            detail = summarize_call(name, args if isinstance(args, dict) else {},
-                                    limit=None if full else LOG_DETAIL_WIDTH)
-            label = f"tool_call {name}"
-        elif kind == "tool-return":
-            text = content if isinstance(content, str) else json.dumps(
-                content, ensure_ascii=False, default=str)
-            label = f"tool_result {part.get('tool_name') or '?'}"
-            detail = text if full else f"({_chars(text)}) {_clip(text, False)}"
-        elif kind == "retry-prompt":
-            label, detail = "retry_prompt", _clip(content, full)
-        else:
-            label, detail = str(kind or "?"), ""
-        lines.append(f"[{seq}] {label}  {detail}".rstrip())
-    replaces = record.get("replaces")
-    if lines and isinstance(replaces, str):
-        lines[0] += f" (replaces {replaces[:8]})"
-    return lines
-
-
-def superseded_seqs(entries: list) -> dict[int, int]:
-    """Seq of every message revision a later record replaced → the final seq.
-
-    The log is append-only, so a tool result exists first as the pre-seeded
-    "Interrupted by user." placeholder and then as one replacement per
-    completed tool. Only the last revision reflects what actually happened;
-    anything rendering the log as events must skip the seqs mapped here or it
-    shows interruptions and intermediate snapshots that never occurred.
-    """
-    id_seq: dict[str, int] = {}
-    replacements: dict[str, list[int]] = {}
-    for seq, record in entries:
-        if not isinstance(record, dict) or record.get("type") != "message":
-            continue
-        if isinstance(record.get("id"), str):
-            id_seq[record["id"]] = seq
-        replaced = record.get("replaces")
-        if isinstance(replaced, str):
-            replacements.setdefault(replaced, []).append(seq)
-    superseded: dict[int, int] = {}
-    for replaced_id, seqs in replacements.items():
-        final = seqs[-1]
-        for seq in (id_seq.get(replaced_id), *seqs[:-1]):
-            if seq is not None:
-                superseded[seq] = final
-    return superseded
-
-
-def render_record(seq: int, record: dict | None, full: bool) -> list[str]:
-    if record is None:
-        return [f"[{seq}] <corrupt>"]
-    kind = record.get("type")
-    if kind == "message":
-        return _render_message(seq, record, full)
-    if kind == "session":
-        return [f"[{seq}] session {str(record.get('id') or '')[:8]} "
-                f"created {record.get('created_at') or '?'}"]
-    if kind == "system_prompt":
-        content = str(record.get("content") or "")
-        return [f"[{seq}] system_prompt {content if full else f'({_chars(content)})'}"]
-    if kind == "compaction":
-        kept = record.get("kept_messages")
-        return [f"[{seq}] compacted: {record.get('tokens_before') or 0:,} tokens "
-                f"→ summary + {len(kept) if isinstance(kept, list) else 0} kept"]
-    if kind == "turn_end":
-        line = f"[{seq}] turn_end {record.get('outcome') or '?'}"
-        error = record.get("error")
-        if isinstance(error, str) and error:
-            line += f"  {_clip(error, full)}"
-        lines = [line]
-        partial = record.get("partial_text")
-        if isinstance(partial, str) and partial:
-            lines.append(f"[{seq}] partial  "
-                         + (partial if full else f"({_chars(partial)}) {_clip(partial, False)}"))
-        return lines
-    if kind == "model_retry":
-        return [f"[{seq}] model_retry attempt {record.get('attempt') or '?'}  "
-                f"{_clip(record.get('error') or '', full)}".rstrip()]
-    if kind == "compaction_failed":
-        return [f"[{seq}] compaction_failed  {_clip(record.get('error') or '', full)}".rstrip()]
-    return [f"[{seq}] {kind or '?'}"]
 
 
 def _resolve(path: str, cwd: Path) -> Path:
@@ -965,156 +829,21 @@ async def _grep_async(args: dict, cwd: Path, sandboxed: bool = False) -> str:
         await proc.wait()
 
 
-# The session log is append-only, so everything compaction dropped from the
-# model's context is still on disk. search_history greps that log and
-# read_history returns full records by seq — the same 1-based line numbers
-# ``paimon log`` prints.
-
-_HISTORY_TOOLS = ("search_history", "read_history")
-_SEARCH_CONTEXT = 100  # chars of context shown on each side of a match
-_DEFAULT_SEARCH_RESULTS = 20
-_MAX_SEARCH_RESULTS = 100
-_MAX_READ_RECORDS = 20
 # Self-truncation headroom: read_history cuts at record boundaries with a note
 # naming the seq it stopped at, which execute_tool's generic chop cannot do.
 _READ_BUDGET = MAX_OUTPUT - 1_000
 
 
-def _surviving_entries(session: Session) -> list[tuple[int, dict]]:
-    """Message and compaction records with ``replaces`` applied, seq attached.
-
-    Unlike Session.messages(), a compaction record does not reset the list:
-    recovering what compaction dropped is the whole point here. A replaced
-    record keeps its original position but carries the replacement's seq, so
-    read_history on that seq returns exactly what search matched.
-    """
-    survivors: list[tuple[int, dict]] = []
-    positions: dict[str, int] = {}
-    for seq, record in session.entries():
-        if record is None:
-            continue
-        kind = record.get("type")
-        if kind == "compaction":
-            survivors.append((seq, record))
-        elif kind == "message" and isinstance(record.get("message"), dict):
-            replaced = record.get("replaces")
-            if isinstance(replaced, str) and replaced in positions:
-                survivors[positions[replaced]] = (seq, record)
-            else:
-                if isinstance(record.get("id"), str):
-                    positions[record["id"]] = len(survivors)
-                survivors.append((seq, record))
-    return survivors
-
-
-def _searchable_parts(record: dict):
-    """(label, text) for each part of a message record worth searching.
-
-    The history tools' own calls and results are skipped: they quote earlier
-    matches, so searching them would return every past search over again.
-    """
-    for part in (record.get("message") or {}).get("parts") or []:
-        if not isinstance(part, dict):
-            continue
-        kind = part.get("part_kind")
-        content = part.get("content")
-        if kind == "user-prompt":
-            yield "user", str(content or "")
-        elif kind == "text":
-            yield "assistant", str(content or "")
-        elif kind == "thinking":
-            yield "thinking", str(content or "")
-        elif kind in ("tool-call", "tool-return"):
-            name = str(part.get("tool_name") or "?")
-            if name in _HISTORY_TOOLS:
-                continue
-            if kind == "tool-call":
-                args = part.get("args")
-                if not isinstance(args, str):
-                    args = json.dumps(args, ensure_ascii=False, default=str)
-                yield f"tool_call {name}", f"{name} {args}"
-            else:
-                text = content if isinstance(content, str) else json.dumps(
-                    content, ensure_ascii=False, default=str)
-                yield f"tool_result {name}", text
-
-
-def _snippet(text: str, match: re.Match) -> str:
-    start = max(0, match.start() - _SEARCH_CONTEXT)
-    end = min(len(text), match.end() + _SEARCH_CONTEXT)
-    piece = " ".join(text[start:end].split())
-    return f"{'…' if start > 0 else ''}{piece}{'…' if end < len(text) else ''}"
-
-
 def _search_history(args: dict, ctx: ToolContext) -> str:
     if ctx.session is None:
         return "Error: no session log available"
-    query = str(args.get("query") or "")
-    if not query:
-        return "Error: query must not be empty"
-    try:
-        limit = max(1, min(int(args.get("max_results") or _DEFAULT_SEARCH_RESULTS), _MAX_SEARCH_RESULTS))
-    except (TypeError, ValueError):
-        return "Error: max_results must be an integer"
-    note = ""
-    try:
-        pattern = re.compile(query, re.IGNORECASE)
-    except re.error:
-        pattern = re.compile(re.escape(query), re.IGNORECASE)
-        note = " (query is not a valid regex; searched literally)"
-    hits = []
-    for seq, record in _surviving_entries(ctx.session):
-        if record.get("type") == "compaction":
-            parts = [("compaction summary", str(record.get("summary") or ""))]
-        else:
-            parts = _searchable_parts(record)
-        for label, text in parts:
-            match = pattern.search(text)
-            if match:
-                hits.append(f"[{seq}] {label}: {_snippet(text, match)}")
-    if not hits:
-        return f"No matches in the session log{note}."
-    shown = hits[:limit]
-    header = (f"{len(hits)} matching parts{note}"
-              + (f", showing the first {len(shown)}" if len(hits) > len(shown) else "")
-              + ". Use read_history with a seq to see a full record.")
-    return "\n".join([header, *shown])
+    return history.search(ctx.session, args)
 
 
 def _read_history(args: dict, ctx: ToolContext) -> str:
     if ctx.session is None:
         return "Error: no session log available"
-    try:
-        seq = int(args["seq"])
-        count = max(1, min(int(args.get("count") or 1), _MAX_READ_RECORDS))
-    except (KeyError, TypeError, ValueError):
-        return "Error: seq (and optional count) must be integers"
-    entries = ctx.session.entries()
-    if seq < 1 or seq > len(entries):
-        return f"Error: seq out of range (the log has {len(entries)} records)"
-    superseded = superseded_seqs(entries)
-    lines: list[str] = []
-    used = 0
-    for number, record in entries[seq - 1 : seq - 1 + count]:
-        if number in superseded:
-            # The content at this seq was replaced later (a placeholder or an
-            # intermediate snapshot); returning it would present a result that
-            # never happened as real.
-            lines.append(f"[{number}] (superseded revision; the final version "
-                         f"is at seq {superseded[number]})")
-            continue
-        rendered = "\n".join(render_record(number, record, full=True))
-        if used + len(rendered) > _READ_BUDGET:
-            if not lines:
-                rendered = rendered[:_READ_BUDGET] + "\n... (record truncated)"
-                lines.append(rendered)
-            else:
-                lines.append(f"... (stopped before seq {number}: output budget reached, "
-                             "read fewer records at once)")
-            break
-        lines.append(rendered)
-        used += len(rendered)
-    return "\n".join(lines)
+    return history.read(ctx.session, args, _READ_BUDGET)
 
 
 _COMMAND_TIMEOUT = 120.0

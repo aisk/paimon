@@ -18,7 +18,8 @@ from textual.widgets import Input, Markdown, Static, TextArea
 
 from . import progstatus
 from .diff import locate_line, render_diff
-from .tools import failure, resolve_path, summarize_call
+from .logtext import summarize_call
+from .tools import failure, resolve_path
 
 
 def abbreviate(text: str, limit: int) -> str:

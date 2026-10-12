@@ -24,8 +24,8 @@ from pathlib import Path
 from .config import UNSET, Config, config_path
 from .errors import PaimonError
 from .llm import LOGIN_PROVIDERS, build_model, require_provider, signed_in_plans, split_model_string
+from .logtext import render_record, superseded_seqs
 from .session import Session, is_synthetic_user_text
-from .tools import render_record, superseded_seqs
 
 
 def resolve_session(prefix: str) -> Session:

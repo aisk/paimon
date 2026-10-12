@@ -31,7 +31,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import codemode, compaction, retry, review, tools
+from . import codemode, compaction, logtext, retry, review, tools
 from .config import Config
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string)
@@ -1175,7 +1175,7 @@ class Agent:
         async def call(name: str, args: dict) -> str:
             # "cancelled" is what stays when the script ends before the call does.
             record = {"name": name, "status": "cancelled", "seconds": 0.0,
-                      "detail": tools.summarize_call(name, args, limit=tools.LOG_DETAIL_WIDTH)}
+                      "detail": logtext.summarize_call(name, args, limit=logtext.LOG_DETAIL_WIDTH)}
             calls.append(record)
             started = time.perf_counter()
             try:
