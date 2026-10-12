@@ -15,17 +15,14 @@ from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.config import Config
-from paimon.turns import TurnDriver, Outcome
 from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen, PromptScreen
 from paimon.pane import _session_label
 from paimon.ui import (
     AssistantMessage,
-    PromptInput,
     ToolResult,
     UserMessage,
 )
-from tests.support.agent import stub_model
-from tests.support.app import AppTestCase, end_turn, hold_turn
+from tests.support.app import AppTestCase, hold_turn
 
 
 class ResumeSessionTest(AppTestCase):
@@ -133,86 +130,6 @@ class ForkSessionTest(AppTestCase):
             await pilot.pause()
             self.assertIs(app.pane.agent, before)
 
-
-class HandoffTest(AppTestCase):
-    """start_new_session in the TUI: confirm (even in yolo), switch, resume hint."""
-
-    @staticmethod
-    def _log_text(app: PaimonApp) -> str:
-        return " ".join(str(widget.render())
-                         for widget in app.query_one("#log").walk_children())
-
-    async def test_approved_handoff_switches_to_a_new_session(self) -> None:
-        app = self.make_app(mode="yolo")
-        old = app.pane.agent.session
-        with patch("paimon.agent.build_model",
-                   return_value=stub_model("start_new_session", '{"prompt": "carry on"}')):
-            async with app.run_test() as pilot:
-                app.pane.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for_panel(app, pilot)
-                await pilot.press("enter")
-                await self._wait_for(pilot, lambda: app.pane.agent.session.id != old.id
-                                     and not app.pane.is_busy)
-
-                log = self._log_text(app)
-                self.assertIn("Started new session", log)
-                self.assertIn("Handed off", log)
-                self.assertIn(old.id[:8], log, "resume hint names the old session")
-                self.assertIn("carry on", log, "handoff prompt submitted as the first message")
-                self.assertTrue(old.path.exists())
-                self.assertIsNone(app.pane._pending_handoff)
-
-    async def test_denied_handoff_keeps_the_session(self) -> None:
-        app = self.make_app(mode="yolo")
-        old_id = app.pane.agent.session.id
-        with patch("paimon.agent.build_model",
-                   return_value=stub_model("start_new_session", '{"prompt": "carry on"}')):
-            async with app.run_test() as pilot:
-                app.pane.handle_submit(PromptInput.Submitted("go"))
-                await self._wait_for_panel(app, pilot)
-                await pilot.press("escape")
-                await self._wait_for(pilot, lambda: not app.pane.is_busy)
-
-                self.assertEqual(app.pane.agent.session.id, old_id)
-                self.assertIsNone(app.pane._pending_handoff)
-                self.assertTrue(app.query(AssistantMessage), "turn continued after the denial")
-
-    async def test_queued_messages_return_to_input_on_handoff(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            hold_turn(app.pane)
-            app.pane.handle_submit(PromptInput.Submitted("for the old context"))
-            app.pane._pending_handoff = "next phase"
-            old_id = app.pane.agent.session.id
-
-            # Patched on the class, not the instance: the handoff opens a new
-            # session, and with it the new job the prompt actually lands in.
-            started: list[str] = []
-            with patch.object(TurnDriver, "submit",
-                              lambda self, text: started.append(text) or True):
-                await end_turn(app.pane)
-                await pilot.pause()
-
-            self.assertEqual(started, ["next phase"])
-            self.assertNotEqual(app.pane.agent.session.id, old_id)
-            self.assertEqual(app.query_one(PromptInput).text, "for the old context")
-            self.assertFalse(app.pane._queue)
-            self.assertIsNone(app.pane._pending_handoff)
-
-    async def test_failed_turn_clears_pending_handoff_without_switching(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            app.pane._pending_handoff = "next phase"
-            started: list[str] = []
-            app.pane.driver.submit = started.append
-            old_id = app.pane.agent.session.id
-
-            await end_turn(app.pane, Outcome.FAILED, error="provider failed")
-            await pilot.pause()
-
-            self.assertIsNone(app.pane._pending_handoff)
-            self.assertFalse(started)
-            self.assertEqual(app.pane.agent.session.id, old_id)
 
 class LoginTest(AppTestCase):
     async def test_login_is_refused_while_a_turn_is_running(self) -> None:

@@ -115,7 +115,7 @@ class SpawnAgentTest(JobsTestCase):
             await self.turn(agent)
             (child,) = opened
             for name in ("spawn_agent", "list_models", "stop_job", "run_background", "read_job",
-                         "ask_user", "start_new_session"):
+                         "ask_user"):
                 self.assertNotIn(name, child.toolset)
             self.assertIn("shell", child.toolset)
             self.assertEqual(child.session.parent_id, agent.session.id)

@@ -1892,12 +1892,6 @@ class AskUserArgs(TypedDict):
 
 
 @_spec
-class StartNewSessionArgs(TypedDict):
-    prompt: str
-    """The first user message for the new session; must be self-contained."""
-
-
-@_spec
 class SpawnAgentArgs(TypedDict):
     prompt: str
     """The new agent's only user message; must be self-contained."""
@@ -2053,23 +2047,6 @@ REGISTRY: dict[str, Tool] = {
         ),
         params=AskUserArgs,
     ),
-    # Stateful: ends the session, so the agent loop handles it, and asks the
-    # user itself, whatever the mode.
-    "start_new_session": Tool(
-        run=None,
-        access="none",
-        description=(
-            "Hand off to a fresh session: end this one and start a new empty session "
-            "whose first user message is your prompt. Use when most of the conversation "
-            "so far is irrelevant to the next phase of work — a focused handoff prompt "
-            "beats carrying a long history forward. The prompt must be self-contained: "
-            "state the goal, key file paths, decisions already made, and current status; "
-            "the new session has no memory of this one. Requires explicit user "
-            "confirmation and only works in the interactive UI (always denied in "
-            "non-interactive runs)."
-        ),
-        params=StartNewSessionArgs,
-    ),
     # The rest of the registry is stateful in the same way: each of them acts
     # on the jobs the calling agent started, which the agent itself holds, so
     # the loop runs them instead of this module.
@@ -2170,19 +2147,14 @@ REGISTRY: dict[str, Tool] = {
 BACKGROUND_TOOLS = ("run_background", "read_job")
 
 # Tools that need a user at the keyboard. Headless has nobody to answer, so it
-# leaves them out rather than offering the model a question it cannot ask or a
-# handoff nobody can approve, which would only ever come back denied.
-INTERACTIVE_TOOLS = ("ask_user", "start_new_session")
+# leaves them out rather than offering the model a question it cannot ask.
+INTERACTIVE_TOOLS = ("ask_user",)
 
-# What a spawned agent must not be given: every job tool, the handoff and the
-# question.
+# What a spawned agent must not be given: every job tool and the question.
 #
 # Every job tool, because depth stays 1: only the conversation the user is
 # actually in starts agents and leaves processes running behind it, and an
 # agent that can start nothing has nothing to read or stop either.
-#
-# The handoff, because it would swap the session out from under the id the
-# parent holds, and the parent is never told.
 #
 # The question, because a subagent works for the agent that started it, not
 # for the user: what it cannot settle belongs in its report, where the parent

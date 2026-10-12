@@ -13,7 +13,6 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from paimon import tools
 from paimon.agent import (
     Agent,
-    SessionHandoff,
     TextDelta,
     TodosUpdate,
     ToolBudgetExhausted,
@@ -405,77 +404,6 @@ class AskUserTest(unittest.IsolatedAsyncioTestCase):
             ask.assert_not_awaited()
             end = next(e for e in events if isinstance(e, ToolEnd))
             self.assertEqual(end.result, "Error: question is required.")
-
-
-class SessionHandoffTest(unittest.IsolatedAsyncioTestCase):
-    """start_new_session ends the turn on approval without another model
-    request; without a confirm hook it is denied even in yolo mode."""
-
-    @staticmethod
-    async def _run(agent: Agent, arguments: str = '{"prompt": "next phase"}') -> list:
-        with patch("paimon.agent.build_model",
-                   return_value=stub_model("start_new_session", arguments)):
-            return [event async for event in agent.run("go")]
-
-    async def test_approval_ends_the_turn_with_a_handoff(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
-            confirm = AsyncMock(return_value=True)
-            agent = open_agent(cwd, confirm=confirm, mode="yolo")
-
-            events = await self._run(agent)
-
-            confirm.assert_awaited_once()
-            end = next(e for e in events if isinstance(e, ToolEnd))
-            self.assertFalse(end.denied)
-            self.assertIsInstance(events[-1], SessionHandoff)
-            self.assertEqual(events[-1].prompt, "next phase")
-            self.assertFalse([e for e in events if isinstance(e, (TurnEnd, TextDelta))],
-                             "no second model request after the handoff")
-            returns = [part for message in agent.session.messages()
-                       if isinstance(message, ModelRequest)
-                       for part in message.parts if isinstance(part, ToolReturnPart)]
-            self.assertIn("Handoff accepted", returns[-1].content)
-
-    async def test_denial_continues_the_turn(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
-            confirm = AsyncMock(return_value=False)
-            agent = open_agent(cwd, confirm=confirm, mode="read")
-
-            events = await self._run(agent)
-
-            end = next(e for e in events if isinstance(e, ToolEnd))
-            self.assertTrue(end.denied)
-            self.assertFalse([e for e in events if isinstance(e, SessionHandoff)])
-            self.assertTrue([e for e in events if isinstance(e, TextDelta)])
-            self.assertIsInstance(events[-1], TurnEnd)
-
-    async def test_without_confirm_hook_denied_even_in_yolo(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
-            agent = open_agent(cwd, mode="yolo")
-
-            events = await self._run(agent)
-
-            end = next(e for e in events if isinstance(e, ToolEnd))
-            self.assertTrue(end.denied)
-            self.assertFalse([e for e in events if isinstance(e, SessionHandoff)])
-            self.assertIsInstance(events[-1], TurnEnd)
-
-    async def test_empty_prompt_is_an_error_without_confirmation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            cwd = Path(directory)
-            confirm = AsyncMock(return_value=True)
-            agent = open_agent(cwd, confirm=confirm, mode="read")
-
-            events = await self._run(agent, '{"prompt": "  "}')
-
-            confirm.assert_not_awaited()
-            end = next(e for e in events if isinstance(e, ToolEnd))
-            self.assertIn("prompt is required", end.result)
-            self.assertFalse([e for e in events if isinstance(e, SessionHandoff)])
-            self.assertIsInstance(events[-1], TurnEnd)
 
 
 class JobToolsTest(unittest.IsolatedAsyncioTestCase):

@@ -31,7 +31,6 @@ from .agent import (
     ModelRetry,
     ReasoningDelta,
     RequestStats,
-    SessionHandoff,
     TodosUpdate,
     ToolEnd,
     ToolStart,
@@ -41,7 +40,7 @@ from .agent import (
 )
 from .turns import TurnDriver, Outcome, Result, TurnOver
 from .login import PickerScreen
-from .session import Session, SessionError, resume_hint, shell_message
+from .session import Session, SessionError, shell_message
 from .transcript import EventRenderer, Transcript
 from .ui import (
     BlockingPanel,
@@ -206,7 +205,6 @@ class SessionPane(Pane):
         # can take back.
         self._pending_shell: list[tuple[str, str]] = []
         self._shell_worker = None
-        self._pending_handoff: str | None = None
         self._tps: float | None = None
         # Cumulative over the session: single-request rates swing with each
         # round's tool output size, while the running rate reflects what the
@@ -851,10 +849,6 @@ class SessionPane(Pane):
             if self._cache_reported and self._cache_inputs:
                 self._cache_hit = self._cache_reads / self._cache_inputs
             self._sync_statusbar(tokens=True)
-        elif isinstance(ev, SessionHandoff):
-            # the switch happens once the turn is over, in _end_turn, since
-            # new_session refuses to run while one is in flight
-            self._pending_handoff = ev.prompt
         elif not isinstance(ev, UserInput):
             self._set_state(None)
 
@@ -893,11 +887,6 @@ class SessionPane(Pane):
         elif result.outcome is Outcome.FAILED:
             self.transcript.add(Content.from_markup("[$text-error b]Error:[/] $body", body=result.error))
         # Finishing a turn must not steal focus from reading or a modal.
-        if self._pending_handoff is not None:
-            prompt, self._pending_handoff = self._pending_handoff, None
-            if result.finished:
-                self._complete_handoff(prompt)
-                return
         if self._queue:
             text = "\n\n".join(self._queue)
             self._queue.clear()
@@ -915,31 +904,11 @@ class SessionPane(Pane):
         # stopped or that failed: the notice waits for whatever runs next.
         if result.finished and self.agent.notices:
             self.driver.wake()
-        # Last, so a turn started just above (a queued message, a handoff) is
+        # Last, so a turn started just above (a queued message) is
         # already busy and arms nothing. Only for a turn that ran to its own
         # end: recapping work the user just stopped is not what they asked for.
         if result.finished:
             self._arm_recap()
-
-    def _complete_handoff(self, prompt: str) -> None:
-        """Switch to a fresh session and submit the approved handoff prompt.
-
-        Queued messages were typed against the old context, so they go back
-        to the input instead of being fired at the new session.
-        """
-        if self._queue:
-            text = "\n\n".join(self._queue)
-            self._queue.clear()
-            self._refresh_queued()
-            prompt_input = self.query_one(PromptInput)
-            draft = prompt_input.text
-            prompt_input.load_text(f"{text}\n{draft}" if draft else text)
-            prompt_input.move_cursor(prompt_input.document.end)
-        hint = resume_hint(self.agent.session.id)
-        self.new_session()
-        self.transcript.add(Content.from_markup(
-            "[$text-muted]Handed off — previous session: $hint[/]", hint=hint))
-        self.driver.submit(prompt)
 
     # ---- the spinner --------------------------------------------------------
 

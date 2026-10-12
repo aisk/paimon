@@ -120,16 +120,6 @@ class TodosUpdate:
 
 
 @dataclass
-class SessionHandoff:
-    """The user approved start_new_session: the turn ends here and the UI
-    should open a fresh session whose first user message is ``prompt``.
-    Never fires without a confirm hook (headless), where the call is denied.
-    """
-
-    prompt: str
-
-
-@dataclass
 class RequestStats:
     """Output speed and cache usage of one finished model request, from
     provider-reported usage. ``input_tokens`` includes the cached portion
@@ -223,7 +213,7 @@ class ShellRun:
 # on isinstance; the alias exists so a type checker can flag an unhandled one.
 AgentEvent = (
     TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
-    | SessionHandoff | RequestStats | ToolBudgetExhausted | TurnEnd
+    | RequestStats | ToolBudgetExhausted | TurnEnd
     | ContextCompacted | ContextCompactionFailed | ModelRetry | UserInput
     | CompactionNotice | JobNotice | ShellRun
 )
@@ -792,10 +782,10 @@ class Agent:
         self._append_message(shell_message(command, output))
 
     # ---- Tools the agent loop runs itself ----------------------------------
-    # These mutate agent-held state or end the turn, so they cannot go through
+    # These mutate agent-held state, so they cannot go through
     # the stateless tools.run_tool. Each handler fills ``slot`` with the tool
     # result, calls ``persist()`` after every slot update, and yields the
-    # events to forward; yielding SessionHandoff ends the whole turn.
+    # events to forward.
 
     async def _run_write_todos(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
                                persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
@@ -817,36 +807,6 @@ class Agent:
         slot.outcome = "success"
         persist()
         yield TodosUpdate(list(self.todos))
-
-    async def _run_start_new_session(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
-                                     persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
-        # On approval the turn ends without another model request: the whole
-        # point is to stop spending tokens on this history. The result is
-        # still written into its pre-seeded slot first, so the session stays
-        # valid and resumable.
-        yield ToolStart(call.tool_call_id, call.tool_name, args)
-        prompt_text = str(args.get("prompt") or "").strip()
-        if not prompt_text:
-            slot.content = "Error: prompt is required."
-            slot.outcome = "failed"
-            persist()
-            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
-            return
-        # Only the user decides this, in every mode: the prompt is all the
-        # next session will know, and reading it is what the confirmation is
-        # for. No confirm hook means nobody to ask, so the call is refused.
-        if self.confirm is None or not await self.confirm(call.tool_name, args):
-            slot.content = tools.USER_DENIAL
-            slot.outcome = "denied"
-            persist()
-            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
-            return
-        slot.content = ("Handoff accepted: this session ended here and a new "
-                        "session continued with the provided prompt.")
-        slot.outcome = "success"
-        persist()
-        yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
-        yield SessionHandoff(prompt_text)
 
     async def _run_ask_user(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
                             persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
@@ -1244,7 +1204,6 @@ class Agent:
     _AGENT_HANDLED = {
         "write_todos": _run_write_todos,
         "ask_user": _run_ask_user,
-        "start_new_session": _run_start_new_session,
         "spawn_agent": _run_job_tool,
         "list_models": _run_job_tool,
         "run_background": _run_job_tool,
@@ -1314,9 +1273,6 @@ class Agent:
         try:
             async for event in self._run(record_outcome, max_tool_calls):
                 yield event
-            # A session handoff is the one path that ends the loop without
-            # its own record; it ended the turn deliberately.
-            record_outcome("success")
         except asyncio.CancelledError:
             record_outcome("interrupted")
             raise
@@ -1539,7 +1495,7 @@ class Agent:
 
                 # A name outside this agent's tool set is rejected before the
                 # agent-handled table below, so excluding write_todos or
-                # start_new_session from a toolset actually disables them.
+                # ask_user from a toolset actually disables them.
                 if name not in self.toolset:
                     yield ToolStart(call.tool_call_id, name, args)
                     slot.content = f"Error: unknown tool {name!r}"
@@ -1580,10 +1536,6 @@ class Agent:
                 if handler is not None:
                     async for event in handler(self, call, args, slot, persist):
                         yield event
-                        if isinstance(event, SessionHandoff):
-                            # Any later calls in this response keep their
-                            # "Interrupted by user." placeholders.
-                            return
                     continue
 
                 yield ToolStart(call.tool_call_id, name, args)

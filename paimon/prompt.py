@@ -45,10 +45,6 @@ _GUIDELINES: tuple[tuple[tuple[str, ...], str], ...] = (
      "When different readings of the request would lead to materially different work "
      "and nothing in the code settles it, call ask_user before building; for routine "
      "calls decide yourself and say what you assumed."),
-    (("start_new_session",),
-     "When the earlier conversation is mostly irrelevant to the next phase of work, "
-     "call start_new_session with a self-contained handoff prompt instead of "
-     "continuing in a bloated context."),
     (("search_history", "read_history"),
      "Details lost to context compaction are not gone: the session log keeps the "
      "full history. Use search_history to find them and read_history to read the "

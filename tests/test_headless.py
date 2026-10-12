@@ -421,8 +421,6 @@ class HeadlessToolsetTest(unittest.TestCase):
             for name in tools.BACKGROUND_TOOLS:
                 self.assertNotIn(name, agent.toolset)
             self.assertNotIn("ask_user", agent.toolset, "nobody is there to answer")
-            self.assertNotIn("start_new_session", agent.toolset, "nobody is there to approve")
-            self.assertNotIn("start_new_session", agent.system_prompt)
             self.assertNotIn("ask_user", agent.system_prompt)
             names = [schema["function"]["name"] for schema in agent.tool_schemas]
             self.assertIn("spawn_agent", names, "the run waits for the agents it starts")

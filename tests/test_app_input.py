@@ -122,16 +122,6 @@ class ConfirmPanelTest(AppTestCase):
                 await pilot.press("escape")
                 self.assertFalse(await task)
 
-    async def test_start_new_session_detail_shows_the_prompt(self) -> None:
-        app = self.make_app()
-        async with app.run_test() as pilot:
-            task = await self._open_confirm(app, pilot, "start_new_session", {"prompt": "carry on"})
-            detail = str(app.query_one("#confirm-detail Static", Static).render())
-            self.assertIn("carry on", detail)
-            self.assertIn("fresh one", detail)
-            await pilot.press("escape")
-            self.assertFalse(await task)
-
 
 class QuestionPanelTest(AppTestCase):
     """ask_user in the TUI: the panel replaces the prompt until answered."""
