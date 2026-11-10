@@ -114,9 +114,19 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
         _, history, name, args, _ = judge.await_args.args
         self.assertIs(history, agent.history)
         self.assertEqual((name, args["path"]), ("write_file", "../a.txt"))
+        self.assertFalse(judge.await_args.kwargs["subagent"])
         confirm.assert_not_awaited()
         self.assertFalse(end.denied)
         self.assertEqual((cwd.parent / "a.txt").read_text(), "hi")
+
+    async def test_a_subagents_review_says_its_prompt_came_from_the_parent(self) -> None:
+        agent = open_agent(self._cwd(), mode="auto")
+        agent.session.parent_id = "parent-session"
+
+        with patch("paimon.review.judge", AsyncMock(return_value=Verdict(True))) as judge:
+            await self._run_tool_turn(agent, "write_file", self.HELD)
+
+        self.assertTrue(judge.await_args.kwargs["subagent"])
 
     async def test_a_blocked_call_is_denied_with_the_reason(self) -> None:
         cwd = self._cwd()

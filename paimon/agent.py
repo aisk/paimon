@@ -855,7 +855,8 @@ class Agent:
         """
         try:
             verdict = await asyncio.wait_for(
-                review.judge(self._review_model(), self.history, name, args, self.cwd),
+                review.judge(self._review_model(), self.history, name, args, self.cwd,
+                             subagent=self.session.parent_id is not None),
                 review.TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — any failure means no verdict
             verdict = None
