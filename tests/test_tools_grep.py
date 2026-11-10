@@ -169,6 +169,30 @@ class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("a.txt:1:needle", proc.stdout, "the worker ran a real search")
 
+    async def test_the_worker_imports_nothing_from_the_project(self) -> None:
+        """A json.py the agent wrote must not run in place of the standard
+        library's: grep is never held for review, so that would be code
+        execution with no one asked. The project is both the process's
+        current directory, as it is in a real session, and on PYTHONPATH."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory).resolve()
+            (cwd / "a.txt").write_text("needle\n")
+            for name in ("json", "re", "fnmatch", "codecs", "sitecustomize"):
+                (cwd / f"{name}.py").write_text(
+                    "import pathlib\n"
+                    f"pathlib.Path(r'{cwd}', 'hijacked-{name}').write_text('x')\n"
+                    "raise SystemExit(3)\n"
+                )
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                with patch.dict(os.environ, {"PYTHONPATH": str(cwd)}):
+                    result = await _grep_async({"pattern": "needle"}, cwd)
+            finally:
+                os.chdir(previous)
+            self.assertEqual(sorted(p.name for p in cwd.glob("hijacked-*")), [])
+        self.assertEqual(result, f"{cwd / 'a.txt'}:1:needle")
+
     async def test_registered_tool_searches_in_requested_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)

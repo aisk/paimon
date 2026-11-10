@@ -118,6 +118,72 @@ def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
 
 _GREP_TIMEOUT = 10.0
 
+# How the worker is started: "python -m paimon._grep_worker" would put the
+# current directory first on sys.path, and the current directory is the
+# project, where the agent may have just written a json.py or an re.py that
+# would then run in place of the standard library's — and grep is never held
+# for review. -I or -P would avoid that, but -P needs 3.11 and -I also drops
+# the user site directory and PYTHONPATH, which is where some installs keep
+# paimon itself. So the worker gets a sys.path with no entry in or under the
+# project (argv[2]), and paimon's own import root (argv[1]) appended last: it
+# is only there for a paimon that is run from a source tree, and last, it can
+# shadow nothing in the standard library. Only modules already imported at
+# startup (sys, os) are used before the path is cleaned. PYTHONPATH entries
+# in the project are dropped from the worker's environment as well (see
+# _worker_env), since the interpreter imports codecs, encodings and
+# sitecustomize from them before any of this runs.
+_WORKER_BOOTSTRAP = """\
+import os, sys
+root, project = sys.argv[1], os.path.normcase(os.path.realpath(sys.argv[2]))
+def outside(entry):
+    if not entry:
+        return False
+    entry = os.path.normcase(os.path.realpath(entry))
+    try:
+        return os.path.commonpath([entry, project]) != project
+    except ValueError:
+        return True
+sys.path[:] = [entry for entry in sys.path if outside(entry)] + [root]
+from paimon._grep_worker import main
+main()
+"""
+
+
+def _import_root() -> str:
+    """The directory paimon is imported from: the one holding the package."""
+    return str(Path(__file__).resolve().parent.parent.parent)
+
+
+def _outside(entry: str, project: Path) -> bool:
+    """Whether a search path entry lies outside ``project`` (the bootstrap's
+    own test, for the environment)."""
+    if not entry:
+        return False  # an empty entry is the current directory
+    try:
+        real = Path(os.path.realpath(Path(project, entry)))
+        real.relative_to(os.path.realpath(project))
+    except ValueError:
+        return True
+    return False
+
+
+def _worker_env(project: Path) -> dict[str, str] | None:
+    """The environment for a worker: the inherited one, minus any PYTHONPATH
+    entry in the project; None when there is nothing to drop."""
+    value = os.environ.get("PYTHONPATH")
+    if not value:
+        return None
+    entries = value.split(os.pathsep)
+    kept = [entry for entry in entries if _outside(entry, project)]
+    if kept == entries:
+        return None
+    env = dict(os.environ)
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        del env["PYTHONPATH"]
+    return env
+
 
 async def _grep_async(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     """Use a killable process: a regex can hold the GIL indefinitely.
@@ -125,11 +191,17 @@ async def _grep_async(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     The worker writes the result text as a JSON string, or an object with the
     error text when the search failed (see paimon._grep_worker).
     """
+    root = _import_root()
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "paimon._grep_worker",
+        sys.executable, "-c", _WORKER_BOOTSTRAP, root, str(cwd),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_worker_env(cwd),
+        # Not the project either: a relative PYTHONPATH entry is made absolute
+        # against the directory the interpreter starts in, and Python reads
+        # sitecustomize from sys.path before the bootstrap above can run.
+        cwd=root,
     )
     try:
         payload = json.dumps([args, str(cwd), sandboxed]).encode("utf-8")
