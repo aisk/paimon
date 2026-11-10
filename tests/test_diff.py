@@ -20,6 +20,24 @@ class RenderDiffTest(unittest.TestCase):
         self.assertEqual(left_numbers, ["10", "11"])
         self.assertEqual(right_numbers, ["10", "11"])
 
+    def test_only_a_newline_ends_a_line(self) -> None:
+        """Form feeds, \\x1c-\\x1e, NEL and the Unicode separators are text
+        inside a line, the way the file numbers it and the highlighter
+        splits it; CRLF is one line end."""
+        for separator in ("\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "):
+            with self.subTest(separator=repr(separator)):
+                old = f"keep{separator}this\r\nold\r\n"
+                new = f"keep{separator}this\r\nnew\r\n"
+                table = render_diff(old, new, start_line=7)
+                left_numbers = [str(cell) for cell in table.columns[0]._cells]
+                self.assertEqual(left_numbers, ["7", "8"])
+                # A changed line's cell is padded to paint its background.
+                contents = [getattr(cell, "renderable", cell).plain
+                            for cell in table.columns[1]._cells]
+                self.assertTrue(contents[0].startswith("keep"))
+                self.assertTrue(contents[0].endswith("this"), "the row holds its whole line")
+                self.assertEqual(contents[1], "old")
+
     def test_no_line_numbers_when_start_unknown(self) -> None:
         table = render_diff("a\nb", "a\nx")
         self.assertEqual(len(table.columns), 3)

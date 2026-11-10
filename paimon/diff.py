@@ -46,7 +46,7 @@ def render_diff(old: str, new: str, *, path: str = "",
     means unknown, which drops the line numbers rather than showing wrong
     ones. ``theme`` is the textual theme name and ``dark`` its darkness,
     steering the syntax colors toward the app's."""
-    a, b = old.splitlines(), new.splitlines()
+    a, b = _lines(old), _lines(new)
     style = _SYNTAX_THEMES.get(theme, "monokai" if dark else "default")
     a_text = _highlight(old, path, style)
     b_text = _highlight(new, path, style)
@@ -117,13 +117,29 @@ def locate_line(path: str, old: str, new: str,
     return None
 
 
+def _lines(text: str) -> list[str]:
+    r"""``text`` split into lines on "\n" alone, the way a file's lines are
+    numbered (see locate_line) and the highlighted text is split.
+
+    Not str.splitlines, which also breaks at form feeds, \x1c-\x1e, NEL and
+    the Unicode line and paragraph separators: a row would then no longer be
+    the line its number says, nor the highlighted line drawn in it. A "\r"
+    ending a line goes with its "\n", and a final newline opens no empty
+    last line, as with splitlines.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def _highlight(code: str, path: str, theme: str) -> list[Text]:
     """Per-line syntax-highlighted text, plain when no lexer matches.
 
     Token backgrounds are stripped so the pygments style's page color does
     not paint over the app background or the added/removed line tints.
     """
-    src = code.splitlines()
+    src = _lines(code)
     lexer = Syntax.guess_lexer(path, code)
     highlighted = Syntax(code, lexer, theme=theme).highlight(code)
     # the page color hides in two places: the base style of the returned Text
