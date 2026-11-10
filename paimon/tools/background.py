@@ -12,6 +12,7 @@ from .shell import (
     _SHELL_MAX_BYTES,
     _drain,
     _format_size,
+    _from_char_start,
     _kill_tree,
     _pump,
     _signal_group,
@@ -208,6 +209,12 @@ def tail_text(data: bytes, dropped: int = 0, limit: int = _SHELL_MAX_BYTES) -> s
     if trimmed > 0:
         data = data[-limit:]
         dropped += trimmed
+    if dropped > 0:
+        # Wherever the earlier output was cut, it was not where a character
+        # ended.
+        kept = _from_char_start(data)
+        dropped += len(data) - len(kept)
+        data = kept
     text = decode_output(data)
     if dropped > 0:
         text = f"[{_format_size(dropped)} of earlier output dropped]\n{text}"

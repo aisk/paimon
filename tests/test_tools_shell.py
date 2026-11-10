@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -11,9 +12,12 @@ from unittest.mock import patch
 from paimon.tools.background import BackgroundCommand, _TaskOutput, start_background, tail_text
 from paimon.tools.base import MAX_OUTPUT
 from paimon.tools.shell import (
+    _SHELL_MAX_BYTES,
     _kill_tree,
+    _OutputTail,
     _shell,
     _signal_group,
+    decode_output,
     find_git_bash,
     git_bash_root,
     shell_executable,
@@ -218,6 +222,79 @@ class BackgroundCommandTest(unittest.IsolatedAsyncioTestCase):
         text = tail_text(b"x" * 100 + b"end", limit=10)
         self.assertTrue(text.endswith("xxxxxxxend"))
         self.assertIn("dropped", text.splitlines()[0])
+
+
+class OutputDecodingTest(unittest.TestCase):
+    """A cut lands inside a character more often than not; neither the cut
+    nor one stray byte may turn the rest of the output into garbage."""
+
+    LINE = ("中文输出" * 10 + "\n").encode("utf-8")
+
+    def test_a_tail_cut_inside_a_character_decodes_cleanly(self) -> None:
+        lines = self.LINE * (_SHELL_MAX_BYTES // len(self.LINE) + 50)
+        # A last line just long enough to put the cut inside a character.
+        data = next(lines + b"a" * pad + b"\n" for pad in range(3)
+                    if 0x80 <= (lines + b"a" * pad + b"\n")[-_SHELL_MAX_BYTES] <= 0xBF)
+        tail = _OutputTail()
+        try:
+            tail.append(data)
+            text = tail.render()
+        finally:
+            tail.close()
+            if tail.path is not None:
+                tail.path.unlink()
+        body = text.rpartition("\n\n[")[0]
+        self.assertNotIn("�", body)
+        self.assertEqual(set(body.split("\n")[:-1]), {"中文输出" * 10})
+
+    def test_one_huge_line_cut_inside_a_character_decodes_cleanly(self) -> None:
+        line = "中文".encode("utf-8") * _SHELL_MAX_BYTES
+        data = next(line + b"a" * pad for pad in range(3)
+                    if 0x80 <= (line + b"a" * pad)[-_SHELL_MAX_BYTES] <= 0xBF)
+        tail = _OutputTail()
+        try:
+            tail.append(data)
+            text = tail.render()
+        finally:
+            tail.close()
+            if tail.path is not None:
+                tail.path.unlink()
+        self.assertTrue(text.startswith("中文") or text.startswith("文"), text[:20])
+        self.assertNotIn("�", text)
+
+    def test_the_models_tail_of_a_background_command_decodes_cleanly(self) -> None:
+        data = b"x" + self.LINE * 1000
+        text = tail_text(data, limit=10_000)
+        first, _, rest = text.partition("\n")
+        self.assertIn("dropped", first)
+        self.assertNotIn("�", rest)
+        self.assertTrue(rest.endswith("中文输出\n"))
+        # Read where an earlier read stopped mid-character.
+        self.assertNotIn("�", tail_text(self.LINE[1:], dropped=1))
+
+    @unittest.skipUnless(os.name == "nt", "the OEM code page is Windows'")
+    def test_utf8_with_a_stray_or_cut_byte_is_still_utf8(self) -> None:
+        body = self.LINE * 20
+        self.assertEqual(decode_output(body + "中".encode("utf-8")[:2]), self.LINE.decode() * 20 + "�")
+        self.assertEqual(decode_output(body + b"\xff" + body).count("�"), 1)
+
+    @unittest.skipUnless(os.name == "nt", "the OEM code page is Windows'")
+    def test_output_in_the_oem_code_page_is_read_as_such(self) -> None:
+        """What cmd.exe writes into a pipe, in whatever code page this
+        machine's console uses."""
+        for char in ("é", "ü", "ж", "中"):
+            try:
+                if char.encode("oem") != char.encode("utf-8"):
+                    break
+            except UnicodeEncodeError:
+                continue
+        else:
+            self.skipTest("no test character in this OEM code page")
+        proc = subprocess.run(["cmd", "/d", "/c", f"echo {char * 3} done"],
+                              capture_output=True, timeout=30)
+        self.assertEqual(proc.stdout, f"{char * 3} done\r\n".encode("oem"))
+        self.assertEqual(decode_output(proc.stdout), f"{char * 3} done\r\n")
+        self.assertEqual(decode_output(f"ok\n{char}\n".encode("oem") * 50), f"ok\n{char}\n" * 50)
 
 
 class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):

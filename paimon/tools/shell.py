@@ -1,7 +1,9 @@
 """The shell tool: spawning a command, collecting its output, killing its tree."""
 
 import asyncio
+import codecs
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -49,21 +51,53 @@ def _format_size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f}MB"
 
 
+# A byte the UTF-8 decoder could not place, as the surrogateescape handler
+# writes it.
+_ESCAPED_BYTE = re.compile("[\udc80-\udcff]")
+
+
 def decode_output(data: bytes) -> str:
     """Command output as text.
 
     Git Bash and the programs Git for Windows ships write UTF-8, but Windows
     console programs (cmd.exe built-ins above all, and native programs run
-    from either shell) write in the OEM code page, so output that is not
-    valid UTF-8 is read as that instead of being turned into replacement
-    marks.
+    from either shell) write in the OEM code page, so output that is mostly
+    not UTF-8 is read as that instead of being turned into replacement marks.
+
+    Mostly, not entirely: one stray byte, or a character cut in half where a
+    command was killed mid-write, must not turn a whole page of UTF-8 into
+    mojibake. Text in an OEM code page does form a valid UTF-8 sequence now
+    and then (about a third of GBK's non-ASCII bytes do), but its invalid
+    bytes outnumber those, while UTF-8 output with a few bad bytes has a
+    handful of them against thousands of valid ones. So it is UTF-8 when the
+    bytes of valid multibyte characters are at least twice the invalid ones.
+    A sequence left incomplete at the very end counts for neither: it is a
+    cut, not evidence.
     """
-    if os.name == "nt":
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError:
+    if os.name != "nt":
+        return data.decode("utf-8", errors="replace")
+    decoder = codecs.getincrementaldecoder("utf-8")("surrogateescape")
+    text = decoder.decode(data)  # not final: an incomplete last character is held back
+    invalid = len(_ESCAPED_BYTE.findall(text))
+    if invalid:
+        ascii_bytes = len(text.encode("ascii", errors="ignore"))
+        multibyte = len(data) - len(decoder.getstate()[0]) - ascii_bytes - invalid
+        if multibyte < 2 * invalid:
             return data.decode("oem", errors="replace")
     return data.decode("utf-8", errors="replace")
+
+
+def _from_char_start(data: bytes) -> bytes:
+    """``data`` without the UTF-8 continuation bytes a cut left at its start.
+
+    At most three: a longer run is not the remains of one character. In OEM
+    output these may be whole characters of their own, and losing up to three
+    at the edge of a cut costs nothing the cut did not already take.
+    """
+    skip = 0
+    while skip < min(3, len(data)) and 0x80 <= data[skip] <= 0xBF:
+        skip += 1
+    return data[skip:]
 
 
 def _prune_overflow(directory: Path) -> None:
@@ -140,16 +174,21 @@ class _OutputTail:
         if len(data) > _SHELL_MAX_BYTES:
             data = data[len(data) - _SHELL_MAX_BYTES:]
             trimmed = True
-        text = decode_output(data)
         partial_line = False
         if trimmed:
-            newline = text.find("\n")
+            # Cut in bytes, before decoding: the cut lands anywhere, usually
+            # inside a character, and the stray bytes it leaves are text in no
+            # encoding. A newline byte ends a line in UTF-8 and in every OEM
+            # code page alike.
+            newline = data.find(b"\n")
             if newline == -1:
                 # A single line longer than the whole budget: its end is all we
                 # can keep, and the end is where the message usually is.
                 partial_line = True
+                data = _from_char_start(data)
             else:
-                text = text[newline + 1:]  # drop the fragment the cut left behind
+                data = data[newline + 1:]  # drop the fragment the cut left behind
+        text = decode_output(data)
         lines = text.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
