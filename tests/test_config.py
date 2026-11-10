@@ -138,6 +138,39 @@ class ConfigTest(unittest.TestCase):
         config.save(model="test:stub")
         self.assertFalse(json.loads(path.read_text())["safe_commands"])
 
+    def test_a_setting_of_the_wrong_type_is_refused_by_name(self) -> None:
+        """A string "false" is truthy: taken as it is, it would switch
+        safe_commands on, the opposite of what was written."""
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for stored, name in (({"safe_commands": "false"}, "safe_commands"),
+                             ({"show_reasoning": 1}, "show_reasoning"),
+                             ({"code_mode": None}, "code_mode"),
+                             ({"recap_idle_seconds": "30"}, "recap_idle_seconds"),
+                             ({"recap_idle_seconds": True}, "recap_idle_seconds"),
+                             ({"model": 5}, "model"),
+                             ({"theme": False}, "theme"),
+                             ({"compaction": {"reserve_tokens": 1.5}}, "compaction.reserve_tokens"),
+                             ({"compaction": {"reserve_tokens": None}}, "compaction.reserve_tokens"),
+                             ({"compaction": {"enabled": "yes"}}, "compaction.enabled"),
+                             ({"compaction": {"context_window": "128k"}}, "compaction.context_window")):
+            path.write_text(json.dumps(stored))
+            with self.assertRaisesRegex(ConfigError, name.replace(".", r"\.")):
+                Config.load()
+            self.assertEqual(json.loads(path.read_text()), stored, "the file is left as it was")
+
+    def test_settings_of_the_right_type_load(self) -> None:
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "model": "test:m", "theme": None, "review_model": None, "safe_commands": False,
+            "recap_idle_seconds": 5, "compaction": {"reserve_tokens": 100, "context_window": None},
+        }))
+        config = Config.load()
+        self.assertEqual((config.model, config.theme, config.safe_commands, config.recap_idle_seconds,
+                          config.compaction_reserve_tokens, config.compaction_context_window),
+                         ("test:m", None, False, 5.0, 100, None))
+
 
 class ConfigDurableWriteTest(unittest.TestCase):
     """CFG-2: concurrent writers and dying writers must not lose fields."""
@@ -177,7 +210,7 @@ class ConfigDurableWriteTest(unittest.TestCase):
 
         ctx = multiprocessing.get_context("spawn")
         workers = [ctx.Process(target=_hammer_save, args=(home, field, 6))
-                   for field in ("theme", "api_base", "show_reasoning")]
+                   for field in ("theme", "api_base", "api_key")]
         for worker in workers:
             worker.start()
         for worker in workers:
@@ -186,9 +219,9 @@ class ConfigDurableWriteTest(unittest.TestCase):
 
         stored = json.loads(config_path().read_text())
         self.assertEqual(stored["model"], "test:base")
-        for field in ("theme", "show_reasoning"):
-            self.assertTrue(str(stored[field]).startswith(f"{field}-"), stored)
-        self.assertTrue(stored["providers"]["test"]["api_base"].startswith("api_base-"), stored)
+        self.assertTrue(stored["theme"].startswith("theme-"), stored)
+        for field in ("api_base", "api_key"):
+            self.assertTrue(stored["providers"]["test"][field].startswith(f"{field}-"), stored)
 
     def test_interrupted_write_leaves_previous_config_intact(self) -> None:
         config = Config.load()

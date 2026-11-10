@@ -365,6 +365,21 @@ class GuardRailTest(CliTestCase):
         self.assertEqual(result["subtype"], "error")
         self.assertIn("not valid JSON", result["error"])
 
+    def test_a_setting_of_the_wrong_type_is_reported_without_a_traceback(self) -> None:
+        config_home = self.cwd / "confighome"
+        config_home.mkdir(parents=True)
+        (config_home / "config.json").write_text('{"safe_commands": "false"}')
+        out, err = io.StringIO(), io.StringIO()
+        self._set_stdin(tty=True)
+        with patch.dict("os.environ", {"PAIMON_CONFIG_HOME": str(config_home)}), \
+                patch("sys.argv", ["paimon", "-p", "hi"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("safe_commands must be true or false", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
     def test_timeout_without_print_is_rejected(self) -> None:
         code, stderr = self._main_exit("--timeout", "5")
         self.assertEqual(code, 2)

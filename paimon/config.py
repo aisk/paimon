@@ -252,6 +252,34 @@ def update_provider(provider: str, fields: dict) -> dict:
     return dict(data.get("providers", {}).get(provider, {}))
 
 
+# What each kind of setting accepts, and how a refusal names it. A JSON
+# true/false is a bool and never a number here, though Python counts it as
+# one; text, and an integer where so marked, may also be null (unset).
+_KINDS = {
+    "bool": ("true or false", lambda value: isinstance(value, bool)),
+    "int": ("a whole number",
+            lambda value: isinstance(value, int) and not isinstance(value, bool)),
+    "int or null": ("a whole number or null",
+                    lambda value: value is None or (isinstance(value, int) and not isinstance(value, bool))),
+    "number": ("a number",
+               lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)),
+    "text": ("a string or null", lambda value: value is None or isinstance(value, str)),
+}
+
+
+def _typed(path: Path, name: str, value: object, kind: str) -> object:
+    """A stored setting, refused when it has the wrong JSON type.
+
+    Taken as it was, "false" (a string) would switch safe_commands on, being
+    truthy, and a number written as a string would fail far from here.
+    """
+    expected, accepts = _KINDS[kind]
+    if not accepts(value):
+        raise ConfigError(f"{path}: {name} must be {expected}, not {json.dumps(value)}. "
+                          "The file was left untouched, fix it")
+    return float(value) if kind == "number" else value
+
+
 @dataclass
 class Config:
     """What config.json holds, and nothing else — no module-level state.
@@ -297,24 +325,34 @@ class Config:
     @classmethod
     def load(cls) -> "Config":
         _adopt_default_profile()
-        data = _read_file_config(config_path())
+        path = config_path()
+        data = _read_file_config(path)
         compaction = data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
         skills = data.get("skills")
+
+        def setting(source: dict, key: str, kind: str, default: object, name: str = "") -> object:
+            return _typed(path, name or key, source.get(key, default), kind)
+
         return cls(
-            model=data.get("model"),
+            model=setting(data, "model", "text", None),
             providers=_parse_providers(data.get("providers")),
-            theme=data.get("theme"),
-            show_reasoning=data.get("show_reasoning", cls.show_reasoning),
-            safe_commands=data.get("safe_commands", cls.safe_commands),
-            review_model=data.get("review_model"),
-            recap_enabled=data.get("recap_enabled", cls.recap_enabled),
-            recap_idle_seconds=data.get("recap_idle_seconds", cls.recap_idle_seconds),
-            compaction_enabled=compaction.get("enabled", cls.compaction_enabled),
-            compaction_reserve_tokens=compaction.get("reserve_tokens", cls.compaction_reserve_tokens),
-            compaction_keep_recent_tokens=compaction.get("keep_recent_tokens", cls.compaction_keep_recent_tokens),
-            compaction_context_window=compaction.get("context_window"),
+            theme=setting(data, "theme", "text", None),
+            show_reasoning=setting(data, "show_reasoning", "bool", cls.show_reasoning),
+            safe_commands=setting(data, "safe_commands", "bool", cls.safe_commands),
+            review_model=setting(data, "review_model", "text", None),
+            recap_enabled=setting(data, "recap_enabled", "bool", cls.recap_enabled),
+            recap_idle_seconds=setting(data, "recap_idle_seconds", "number", cls.recap_idle_seconds),
+            compaction_enabled=setting(compaction, "enabled", "bool", cls.compaction_enabled,
+                                       "compaction.enabled"),
+            compaction_reserve_tokens=setting(compaction, "reserve_tokens", "int",
+                                              cls.compaction_reserve_tokens, "compaction.reserve_tokens"),
+            compaction_keep_recent_tokens=setting(compaction, "keep_recent_tokens", "int",
+                                                  cls.compaction_keep_recent_tokens,
+                                                  "compaction.keep_recent_tokens"),
+            compaction_context_window=setting(compaction, "context_window", "int or null", None,
+                                              "compaction.context_window"),
             skills=[str(p) for p in skills] if isinstance(skills, list) else [],
-            code_mode=data.get("code_mode", cls.code_mode),
+            code_mode=setting(data, "code_mode", "bool", cls.code_mode),
         )
 
     def provider_auth(self, model: str | None = None) -> tuple[str | None, str | None]:
