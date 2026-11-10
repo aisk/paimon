@@ -11,7 +11,6 @@ import random
 import time
 from datetime import datetime
 
-from pydantic_ai.messages import ModelRequest
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -39,9 +38,9 @@ from .agent import (
     replay_events,
 )
 from .tools.permissions import MODES
-from .turns import TurnDriver, Outcome, Result, TurnOver
+from .turns import CompactionOver, CompactionStarted, Outcome, Result, TurnDriver, TurnOver
 from .login import PickerScreen
-from .session import Session, SessionError, shell_message
+from .session import Session, SessionError
 from .transcript import EventRenderer, Transcript
 from .ui import (
     BlockingPanel,
@@ -174,7 +173,6 @@ class SessionPane(Pane):
         self._panel_lock = asyncio.Lock()
         # Made here rather than in compose: _adopt points a renderer at it.
         self.transcript = Transcript(id="log")
-        self._compacting = False
         # Set before _adopt, which cancels whatever recap the pane had armed.
         self._recap_timer = None
         # Whether the turn now running has called a tool. A turn that only
@@ -200,11 +198,6 @@ class SessionPane(Pane):
         self._turn_started = 0.0
         self._status_timer = None
         self._queue: list[str] = []
-        # Finished "!" runs waiting for a gap in the running turn to be
-        # appended to the history. Kept apart from ``_queue``: these already
-        # happened and are on screen, so they are not pending work the user
-        # can take back.
-        self._pending_shell: list[tuple[str, str]] = []
         self._shell_worker = None
         self._tps: float | None = None
         # Cumulative over the session: single-request rates swing with each
@@ -233,7 +226,8 @@ class SessionPane(Pane):
 
     @property
     def is_busy(self) -> bool:
-        """Whether a turn is running, or one is already queued behind it.
+        """Whether a turn or a compaction is running, or one is already
+        queued behind it.
 
         What every guard asks. Taken from the driver rather than from a worker's
         status: the driver accepts a prompt the instant it is submitted, so
@@ -364,17 +358,19 @@ class SessionPane(Pane):
         self.agent = agent
         agent.confirm = self._confirm
         agent.ask = self._ask
-        agent.pending = self._take_queued
-        agent.on_jobs_changed = self._jobs_changed
         agent.open_job = self._open_job
         # One renderer per conversation rather than one per turn: a turn now
         # opens with a UserInput event, which is what resets it. A new one per
         # agent, so a swapped-out session cannot leave a live markdown stream
         # pointing at a log that has just been emptied.
         self._renderer = EventRenderer(self.transcript, self.agent)
+        # The driver takes the agent's history hooks (queued input, job
+        # moves) and decides when the agent wakes; the pane is told after.
         self.driver = TurnDriver(agent)
         self.driver.sink = self._on_event
         self.driver.on_change = self._on_change
+        self.driver.take_queued = self._take_queued
+        self.driver.on_jobs_changed = self._jobs_changed
 
     def _swap_agent(self, agent: Agent) -> None:
         """Put a different conversation in this pane, under a driver of its own."""
@@ -446,7 +442,6 @@ class SessionPane(Pane):
         self._reset_measurements()
         self.transcript.clear()
         self._queue.clear()
-        self._pending_shell.clear()
         self._refresh_queued()
         self.transcript.add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._report_killed(killed)
@@ -506,7 +501,6 @@ class SessionPane(Pane):
         self._reset_measurements()
         self.transcript.clear()
         self._queue.clear()
-        self._pending_shell.clear()
         self._refresh_queued()
         await self._show_resumed()
         self._report_killed(killed)
@@ -514,35 +508,15 @@ class SessionPane(Pane):
         self._notify_state()
         self._focus_input()
 
-    @work(exclusive=True, group="compact")
-    async def compact(self) -> None:
-        if self.is_busy:
+    def compact(self) -> None:
+        """Compact the context, as an item of the driver's like a turn.
+
+        Through the driver so that nothing else writes the history while the
+        summary request is out: a prompt typed meanwhile queues behind it, and
+        Esc stops it. What it shows comes back through the sink.
+        """
+        if not self.driver.compact():
             self.transcript.add(Content.from_markup("[$text-muted]Busy — compact the context after this turn[/]"))
-            return
-        self._set_status(True, " Compacting context")
-        self._compacting = True
-        try:
-            result = await self.agent.compact_now()
-        except Exception as exc:  # noqa: BLE001 — the session is still usable
-            self.transcript.add(Content.from_markup("[$text-error b]Compaction failed:[/] $body", body=str(exc)))
-            return
-        finally:
-            self._compacting = False
-            self._set_status(False)
-            # Completion is not a user request to move the keyboard.
-            # A job that ended meanwhile was held back; report it now.
-            self._jobs_changed()
-        if result is None:
-            self.transcript.add(Content.from_markup("[$text-muted]Nothing to compact yet — the context is still short[/]"))
-            return
-        self.transcript.add(
-            Content.from_markup(
-                "[$text-muted]Context compacted: $before → ~$after tokens[/]",
-                before=f"{result.tokens_before:,}",
-                after=f"{result.tokens_after:,}",
-            )
-        )
-        self._sync_statusbar(tokens=True)
 
     # ---- permission mode ----------------------------------------------------
 
@@ -660,10 +634,8 @@ class SessionPane(Pane):
         """One "!" run: the command line goes up first, the output when it ends.
 
         Not a turn, so it neither waits for one nor blocks one. Where the
-        result lands does depend on a turn: between turns it is appended to
-        the history at once, and during one it waits for the gap between
-        steps, since a message inserted between a tool call and its result is
-        the one shape providers reject.
+        result lands is the driver's call (see TurnDriver.record_shell), since
+        it owns everything that writes the history.
         """
         step = await self.transcript.add_shell_call(command)
         try:
@@ -681,10 +653,7 @@ class SessionPane(Pane):
             return
         self.transcript.add_tool_result(output, label=command, container=step)
         if record:
-            if self.is_busy:
-                self._pending_shell.append((command, output))
-            else:
-                self.agent.record_shell(command, output)
+            self.driver.record_shell(command, output)
 
     def _refresh_queued(self) -> None:
         widget = self.query_one("#queued", Static)
@@ -696,31 +665,33 @@ class SessionPane(Pane):
         lines = "\n".join(f"[$text-muted]⏸ ${key}[/]" for key in kwargs)
         widget.update(Content.from_markup(lines, **kwargs))
 
-    def _take_queued(self) -> list[str | ModelRequest]:
+    def _take_queued(self) -> list[str]:
         """Hand the queued messages to the running turn, which injects them.
 
-        Called from the agent loop, which runs on this app's event loop, so
-        touching the panel from here is safe. Finished "!" runs go first: they
-        happened before anything still sitting in the queue was typed.
+        Called from the agent loop through the driver, on this app's event
+        loop, so touching the panel from here is safe.
         """
-        if self._pane_closing or not (self._queue or self._pending_shell):
+        if self._pane_closing or not self._queue:
             return []
-        runs, self._pending_shell = self._pending_shell, []
         texts, self._queue = self._queue, []
         self._refresh_queued()
-        return [shell_message(*run) for run in runs] + texts
+        return texts
 
-    def _flush_pending_shell(self) -> None:
-        """Append "!" runs the turn ended before it came back for.
-
-        The loop drains the queue between steps, so a command that finished
-        during the last step of a turn is still waiting when it ends.
-        """
-        if self._pane_closing or not self._pending_shell:
+    def _release_queue(self, *, send: bool) -> None:
+        """Deal with what was typed while the driver was busy: send it as the
+        next turn, or hand it back to the input box."""
+        if not self._queue:
             return
-        runs, self._pending_shell = self._pending_shell, []
-        for command, output in runs:
-            self.agent.record_shell(command, output)
+        text = "\n\n".join(self._queue)
+        self._queue.clear()
+        self._refresh_queued()
+        if send:
+            self.driver.submit(text)
+            return
+        prompt_input = self.query_one(PromptInput)
+        draft = prompt_input.text
+        prompt_input.load_text(f"{text}\n{draft}" if draft else text)
+        prompt_input.move_cursor(prompt_input.document.end)
 
     def interrupt(self) -> None:
         # Esc stops whatever this pane is doing on its own, a recap included.
@@ -772,6 +743,9 @@ class SessionPane(Pane):
         conversation, so a resumed session does not replay it.
         """
         self._recap_timer = None
+        # The history is only a complete request between turns.
+        if self.is_busy:
+            return
         try:
             text = await self.agent.recap()
         except Exception:  # noqa: BLE001 — nobody asked for this, so nobody hears about it
@@ -783,19 +757,11 @@ class SessionPane(Pane):
     # ---- the agent's job hooks ----------------------------------------------
 
     def _jobs_changed(self) -> None:
-        """An agent or command this conversation started moved.
-
-        A notice that arrives while the conversation is idle starts a turn for
-        it; one that arrives mid-turn is picked up between steps, and wake()
-        refuses.
-        """
+        """An agent or command this conversation started moved. Whether the
+        agent wakes for it is the driver's business; this only redraws."""
         if self._pane_closing or not self.is_mounted:
             return
         self._sync_statusbar()
-        # Not during a manual compaction, which runs outside the driver: a
-        # turn started under it would append to a history about to be replaced.
-        if self.agent.notices and not self._compacting:
-            self.driver.wake()
 
     async def _open_job(self, job_id: str, job: Job) -> None:
         await self.app.open_job(self, job_id, job)
@@ -823,6 +789,13 @@ class SessionPane(Pane):
             return
         if isinstance(ev, TurnOver):
             await self._end_turn(ev.result)
+            return
+        if isinstance(ev, CompactionStarted):
+            self._cancel_recap()
+            self._set_status(True, " Compacting context")
+            return
+        if isinstance(ev, CompactionOver):
+            self._end_compaction(ev)
             return
         if isinstance(ev, UserInput):
             self._begin_turn(ev.text)
@@ -880,13 +853,11 @@ class SessionPane(Pane):
         Queued messages were typed against a turn that then stopped or failed,
         so they go back to the input rather than at a model the user just
         interrupted. That is a decision about a text box, which is why it lives
-        here and not in the driver's inbox.
+        here and not in the driver's inbox. Waking the agent for a job that
+        reported meanwhile is the driver's, once this returns.
         """
         await self._renderer.close()
         self._set_state(None)
-        # Before the queue below, which may start the next turn: a "!" run
-        # from during this one belongs to the history it happened in.
-        self._flush_pending_shell()
         if self._status_timer is not None:
             self._status_timer.stop()
             self._status_timer = None
@@ -895,28 +866,38 @@ class SessionPane(Pane):
         elif result.outcome is Outcome.FAILED:
             self.transcript.add(Content.from_markup("[$text-error b]Error:[/] $body", body=result.error))
         # Finishing a turn must not steal focus from reading or a modal.
-        if self._queue:
-            text = "\n\n".join(self._queue)
-            self._queue.clear()
-            self._refresh_queued()
-            if result.finished:
-                self.driver.submit(text)
-            else:
-                prompt_input = self.query_one(PromptInput)
-                draft = prompt_input.text
-                prompt_input.load_text(f"{text}\n{draft}" if draft else text)
-                prompt_input.move_cursor(prompt_input.document.end)
-        # A job that ended during the last step has not been reported: the
-        # loop only looks between steps. Refused when a queued message just
-        # started a turn, which reports it anyway. Not after a turn the user
-        # stopped or that failed: the notice waits for whatever runs next.
-        if result.finished and self.agent.notices:
-            self.driver.wake()
+        self._release_queue(send=result.finished)
         # Last, so a turn started just above (a queued message) is
         # already busy and arms nothing. Only for a turn that ran to its own
         # end: recapping work the user just stopped is not what they asked for.
         if result.finished:
             self._arm_recap()
+
+    def _end_compaction(self, over: CompactionOver) -> None:
+        """Report how a compaction went, and send what was typed meanwhile.
+
+        Prompts queued behind it were typed against the conversation, not
+        against the compaction, so they go out after a failed one too; only
+        Esc, which stops everything this pane is doing, hands them back.
+        """
+        self._set_status(False)
+        result, compacted = over.result, over.compacted
+        if result.outcome is Outcome.INTERRUPTED:
+            self.transcript.add(Content.from_markup("[$text-warning]⏹ Compaction stopped[/]"))
+        elif result.outcome is Outcome.FAILED:
+            self.transcript.add(Content.from_markup("[$text-error b]Compaction failed:[/] $body",
+                                                    body=result.error))
+        elif compacted is None:
+            self.transcript.add(Content.from_markup(
+                "[$text-muted]Nothing to compact yet — the context is still short[/]"))
+        else:
+            self.transcript.add(Content.from_markup(
+                "[$text-muted]Context compacted: $before → ~$after tokens[/]",
+                before=f"{compacted.tokens_before:,}",
+                after=f"{compacted.tokens_after:,}",
+            ))
+            self._sync_statusbar(tokens=True)
+        self._release_queue(send=result.outcome is not Outcome.INTERRUPTED)
 
     # ---- the spinner --------------------------------------------------------
 

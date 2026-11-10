@@ -14,7 +14,7 @@ from pydantic_ai.messages import (
 from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.config import Config
-from paimon.turns import Outcome, Result
+from paimon.turns import Outcome, Result, TurnOver
 from paimon.pane import SessionPane
 from paimon.session import (
     Session,
@@ -117,10 +117,10 @@ def hold_turn(pane) -> None:
     The driver is parked on its inbox, so a stand-in for the turn task is all
     is_busy needs; submitting a prompt would really run one.
     """
-    pane.driver._turn = _HeldTurn()
+    pane.driver._item = _HeldTurn()
 
 
 async def end_turn(pane, outcome: Outcome = Outcome.SUCCESS, error: str = "") -> None:
-    """Finish the held turn the way the driver would."""
-    pane.driver._turn = None
-    await pane._end_turn(Result(outcome, error=error))
+    """Finish the held turn the way the driver would, waking included."""
+    pane.driver.result = Result(outcome, error=error)
+    await pane.driver._close(TurnOver(pane.driver.result))

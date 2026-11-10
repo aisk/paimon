@@ -400,33 +400,24 @@ class _ToolBudgetExceeded(Exception):
 
 async def _run_turn(agent: Agent, renderer, text: str | None,
                     max_tool_calls: int | None = None) -> None:
+    budget_hit = False
     try:
-        # The budget itself is enforced inside Agent.run, at the point every
-        # tool call is dispatched — counting renderer events here would miss
-        # the agent-handled tools that never produce a ToolStart.
-        async for ev in agent.run(text, expand=False, max_tool_calls=max_tool_calls):
-            await renderer.handle(ev)
-            if isinstance(ev, ToolBudgetExhausted):
-                raise _ToolBudgetExceeded
         # Agents the turn started outlive it, and nobody is here to come back
-        # for their answers: wait for them and let the model react, until
-        # there is nothing left running and nothing left unsaid. Each of
-        # these turns, and each agent, gets the tool budget afresh.
-        changed = asyncio.Event()
-        agent.on_jobs_changed = changed.set
-        while True:
-            if not agent.notices:
-                if not any(job.kind == "agent" for job in agent.jobs.values()):
-                    break
-                changed.clear()
-                await changed.wait()
-                continue
-            async for ev in agent.run(None, max_tool_calls=max_tool_calls):
+        # for their answers, so the run goes on until they have all reported
+        # (see Agent.run_until_idle). The budget itself is enforced inside
+        # Agent.run, at the point every tool call is dispatched — counting
+        # renderer events here would miss the agent-handled tools that never
+        # produce a ToolStart.
+        async with contextlib.aclosing(agent.run_until_idle(
+                text, expand=False, max_tool_calls=max_tool_calls)) as events:
+            async for ev in events:
                 await renderer.handle(ev)
-                if isinstance(ev, ToolBudgetExhausted):
-                    raise _ToolBudgetExceeded
+                # The last event: run_until_idle ends the run after it.
+                budget_hit = budget_hit or isinstance(ev, ToolBudgetExhausted)
     finally:
         await renderer.close()
+    if budget_hit:
+        raise _ToolBudgetExceeded
 
 
 async def _drive(agent: Agent, renderer, text: str, *,

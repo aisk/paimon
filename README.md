@@ -57,7 +57,7 @@ npx skills add aisk/paimon            # the same skill, via skills.sh
 
 ## Using Paimon as a library
 
-The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and `agent.run()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes:
+The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and `agent.run_until_idle()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes. It returns once the agent is done, including any agents it started along the way: their answers come back later, and it runs the model again on each of them until nothing is left running:
 
 ```python
 import asyncio
@@ -66,12 +66,14 @@ from paimon.agent import Agent, TextDelta
 
 async def main():
     agent = Agent.open(mode="auto")
-    async for event in agent.run("summarize the tests in this directory"):
+    async for event in agent.run_until_idle("summarize the tests in this directory"):
         if isinstance(event, TextDelta):
             print(event.text, end="", flush=True)
 
 asyncio.run(main())
 ```
+
+`agent.run()` runs exactly one turn and returns with those agents possibly still at work; it is the call for a program that wants to decide itself when to run the model again, with `agent.run(None)`. An agent runs one turn or compaction at a time, and starting a second while one is under way raises `AgentBusyError`.
 
 `Agent.open()` also takes a working directory, an async `confirm` callback for the permission prompts that are left, and a `toolset` to hand the model fewer tools or tools of your own. An agent holds its session until it goes away; to give it back at a definite moment, call `close()` or use the agent as a context manager. It writes the same session files as the CLI, so a run started in code can be resumed later with `paimon -r`.
 

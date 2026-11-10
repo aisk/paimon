@@ -9,12 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pydantic_ai.messages import UserPromptPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from paimon import agent as agent_module
 from paimon import headless, lockfile
-from paimon.agent import Agent, JobNotice, TextDelta, ToolEnd, UserInput
+from paimon.agent import Agent, AgentBusyError, JobNotice, TextDelta, ToolEnd, UserInput
 from paimon.config import Config
 from paimon.session import Session, job_text, synthetic_kind
 from paimon.tools.result import ToolError
@@ -533,6 +533,106 @@ class BackgroundCommandTest(JobsTestCase):
         (job_id,) = agent.jobs
         with self.assertRaisesRegex(ToolError, "is an agent"):
             await agent._job_tool("read_job", {"job_id": job_id})
+
+
+class RunUntilIdleTest(JobsTestCase):
+    """A library caller gets its agents' answers without looping on run(None)."""
+
+    async def test_the_answer_of_a_spawned_agent_reaches_the_model(self) -> None:
+        agent = self.agent()
+        gate = asyncio.Event()
+        seen: list[list[str]] = []
+        model = spawning_model(["check the parser"], gate=gate, answer="parser is fine")
+        stream = model.stream_function
+
+        async def watching(messages, info):
+            # What each of the parent's requests carried, notices included.
+            seen.append([part.content for message in messages for part in message.parts
+                         if isinstance(part, UserPromptPart)])
+            async for chunk in stream(messages, info):
+                yield chunk
+
+        events: list = []
+
+        async def consume() -> None:
+            async for event in agent.run_until_idle("go"):
+                events.append(event)
+
+        with patch("paimon.agent.build_model", return_value=FunctionModel(stream_function=watching)):
+            task = asyncio.ensure_future(consume())
+            await self.until(lambda: bool(agent.jobs))
+            await settle()
+            self.assertFalse(task.done(), "it waits while the agent it started runs")
+            gate.set()
+            await asyncio.wait_for(task, 5)
+
+        (notice,) = [event for event in events if isinstance(event, JobNotice)]
+        self.assertTrue(notice.text.endswith("finished:\nparser is fine"))
+        self.assertTrue(any(notice.text in prompt for prompts in seen for prompt in prompts),
+                        "the model was asked again with the answer in front of it")
+        self.assertIsInstance(agent.history[-1], ModelResponse)
+        self.assertEqual(agent.history[-1].parts, [TextPart(content="ok")])
+        self.assertEqual((agent.jobs, agent.notices), ({}, []), "and it returned once idle")
+
+    async def test_a_turn_that_started_nothing_is_one_turn(self) -> None:
+        agent = self.agent()
+        with patch("paimon.agent.build_model", return_value=stub_model()):
+            events = [event async for event in agent.run_until_idle("go")]
+        self.assertEqual([e.text for e in events if isinstance(e, TextDelta)], ["done"])
+
+    async def test_the_tool_budget_ends_it_with_an_answer_still_owed(self) -> None:
+        agent = self.agent()
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["one", "two"], gate=gate)):
+            # One call allowed: the first agent starts, the second is refused.
+            events = [event async for event in agent.run_until_idle("go", max_tool_calls=1)]
+            self.assertEqual(type(events[-1]).__name__, "ToolBudgetExhausted")
+            self.assertEqual(len(agent.jobs), 1, "it returned without waiting for the agent")
+            gate.set()
+
+
+class OneWriterTest(JobsTestCase):
+    """The history has one writer at a time, even for a careless caller."""
+
+    async def test_a_second_turn_or_a_compaction_meanwhile_is_refused(self) -> None:
+        agent = self.agent()
+        gate = asyncio.Event()
+        streaming = asyncio.Event()
+
+        async def stream(messages, info):
+            streaming.set()
+            await gate.wait()
+            yield "done"
+
+        with patch("paimon.agent.build_model", return_value=FunctionModel(stream_function=stream)):
+            first = asyncio.ensure_future(self.turn(agent, "one"))
+            await asyncio.wait_for(streaming.wait(), 5)
+
+            with self.assertRaises(AgentBusyError):
+                await agent.run("two").__anext__()
+            with self.assertRaises(AgentBusyError):
+                await agent.compact_now()
+            with self.assertRaises(AgentBusyError):
+                agent.record_shell("ls", "a.txt")
+
+            gate.set()
+            await asyncio.wait_for(first, 5)
+            prompts = [part.content for message in agent.history if isinstance(message, ModelRequest)
+                       for part in message.parts if isinstance(part, UserPromptPart)]
+            self.assertEqual(prompts, ["one"], "the refused calls wrote nothing")
+            self.assertEqual(agent.history, agent.session.messages())
+
+            # Free again once the first is over.
+            await self.turn(agent, "three")
+
+    async def test_a_turn_abandoned_mid_event_and_closed_frees_the_agent(self) -> None:
+        agent = self.agent()
+        with patch("paimon.agent.build_model", return_value=stub_model()):
+            run = agent.run("one")
+            await run.__anext__()
+            await run.aclose()
+            await self.turn(agent, "two")
 
 
 class HeadlessTest(JobsTestCase):

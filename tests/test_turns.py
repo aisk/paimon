@@ -1,7 +1,7 @@
 import unittest
 
 from paimon.agent import UserInput
-from paimon.turns import Outcome, TurnDriver, TurnOver
+from paimon.turns import CompactionOver, CompactionStarted, Outcome, TurnDriver, TurnOver
 from tests.support.turns import FakeAgent, settle
 
 
@@ -159,3 +159,170 @@ class TurnDriverTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(job.is_running, "stuck on the user, so no spinner")
         job.mark_blocked(False)
         self.assertTrue(job.is_running)
+
+    # ---- waking on its own --------------------------------------------------
+
+    async def test_a_notice_that_arrives_while_idle_wakes_the_agent(self) -> None:
+        job = self.make()
+        self.agent.report("agent a1f2 finished:\nfound it")
+        self.assertTrue(job.is_busy, "the wake-up is queued the moment the notice lands")
+        await self.finish(job)
+        self.assertEqual(self.agent.prompts, [None])
+
+    async def test_a_notice_mid_turn_waits_for_the_turn_and_then_wakes_it(self) -> None:
+        job = self.make()
+        job.submit("go")
+        await settle()
+        self.agent.report("agent a1f2 finished:\nfound it")
+        await settle()
+        self.assertEqual(self.agent.prompts, ["go"], "picked up between steps, not as a turn")
+
+        # The fake takes notices only as a turn starts, so this one is still
+        # waiting once the turn is over, as one from its last step would be.
+        await self.finish(job)
+        self.assertEqual(self.agent.prompts, ["go", None])
+
+    async def test_a_turn_that_did_not_finish_does_not_wake(self) -> None:
+        for stop in ("interrupt", "fail"):
+            with self.subTest(stop):
+                job = self.make()
+                job.submit("go")
+                await settle()
+                self.agent.notices.append("agent a1f2 finished:\nfound it")
+                if stop == "interrupt":
+                    job.interrupt()
+                else:
+                    self.agent.fail = "boom"
+                    self.agent.finish()
+                await settle()
+                self.assertFalse(job.is_busy, "the notice waits for whatever runs next")
+                self.assertEqual(self.agent.prompts, ["go"])
+                job.cancel()
+
+    async def test_a_queued_prompt_wins_over_the_wake_up(self) -> None:
+        job = self.make()
+
+        async def sink(event) -> None:
+            # What the pane does with a queue at the end of a finished turn.
+            if isinstance(event, TurnOver):
+                job.submit("queued meanwhile")
+
+        job.sink = sink
+        job.submit("go")
+        await settle()
+        self.agent.notices.append("agent a1f2 finished:\nfound it")
+        await self.finish(job)
+        await settle()
+        self.assertEqual(self.agent.prompts, ["go", "queued meanwhile"],
+                         "the next turn reports the notice anyway")
+
+    async def test_a_notice_during_a_compaction_waits_for_it(self) -> None:
+        job = self.make()
+        self.assertTrue(job.compact())
+        await settle()
+        self.agent.report("agent a1f2 finished:\nfound it")
+        await settle()
+        self.assertEqual(self.agent.prompts, [], "nothing runs under a compaction")
+
+        self.agent.finish()
+        await settle()
+        self.assertEqual(self.agent.prompts, [None], "reported once it is over")
+
+    async def test_a_cancelled_driver_does_not_wake(self) -> None:
+        job = self.make()
+        job.cancel()
+        self.agent.report("agent a1f2 finished:\nfound it")
+        self.assertFalse(job.is_busy)
+
+    # ---- compaction as an item ----------------------------------------------
+
+    async def test_a_compaction_is_an_item_like_a_turn(self) -> None:
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+
+        job.sink = sink
+        self.assertTrue(job.compact())
+        job.submit("go")
+        await settle()
+        self.assertTrue(job.is_busy)
+        self.assertEqual(self.agent.compactions, 1)
+        self.assertEqual(self.agent.prompts, [], "the prompt waits for the compaction")
+
+        await self.finish(job)
+        self.assertEqual(self.agent.prompts, ["go"])
+        self.assertIsInstance(seen[0], CompactionStarted)
+        over = seen[1]
+        self.assertIsInstance(over, CompactionOver)
+        self.assertIs(over.result.outcome, Outcome.SUCCESS)
+        self.assertIsNone(over.compacted, "the fake had nothing to compact")
+        self.assertIsNone(job.result, "a compaction is not the last turn")
+
+    async def test_a_compaction_is_refused_while_busy(self) -> None:
+        job = self.make()
+        job.submit("go")
+        self.assertFalse(job.compact())
+
+    async def test_an_interrupted_compaction_says_so_and_frees_the_driver(self) -> None:
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+
+        job.sink = sink
+        job.compact()
+        await settle()
+        job.interrupt()
+        await settle()
+        self.assertIs(seen[-1].result.outcome, Outcome.INTERRUPTED)
+        self.assertFalse(job.is_busy)
+
+    async def test_a_failed_compaction_is_reported_not_propagated(self) -> None:
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+
+        job.sink = sink
+        self.agent.fail = "summary request failed"
+        job.compact()
+        await self.finish(job)
+        self.assertIs(seen[-1].result.outcome, Outcome.FAILED)
+        self.assertEqual(seen[-1].result.error, "summary request failed")
+        self.assertFalse(job.is_busy)
+
+    # ---- "!" runs -----------------------------------------------------------
+
+    async def test_a_shell_run_while_idle_is_recorded_at_once(self) -> None:
+        job = self.make()
+        job.record_shell("ls", "a.txt")
+        self.assertEqual(self.agent.shell_runs, [("ls", "a.txt")])
+
+    async def test_a_shell_run_during_an_item_is_held_until_it_is_over(self) -> None:
+        for item in ("turn", "compaction"):
+            with self.subTest(item):
+                job = self.make()
+                job.submit("go") if item == "turn" else job.compact()
+                await settle()
+                job.record_shell("ls", "a.txt")
+                self.assertEqual(self.agent.shell_runs, [])
+                await self.finish(job)
+                self.assertEqual(self.agent.shell_runs, [("ls", "a.txt")])
+                job.cancel()
+
+    async def test_a_running_turn_takes_held_runs_before_queued_prompts(self) -> None:
+        job = self.make()
+        job.take_queued = lambda: ["and now this"]
+        job.submit("go")
+        await settle()
+        job.record_shell("ls", "a.txt")
+        pending = self.agent.pending()
+        self.assertEqual(len(pending), 2)
+        self.assertEqual(pending[1], "and now this")
+        self.assertEqual(self.agent.pending(), ["and now this"], "a run is taken once")
+        await self.finish(job)
+        self.assertEqual(self.agent.shell_runs, [], "the turn took it, so nothing is left over")

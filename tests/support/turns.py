@@ -15,7 +15,7 @@ async def settle(times: int = 8) -> None:
 
 
 class FakeAgent:
-    """An Agent whose turns end when the test says so."""
+    """An Agent whose turns and compactions end when the test says so."""
 
     def __init__(self) -> None:
         self.history: list = []
@@ -25,9 +25,18 @@ class FakeAgent:
         self.answer = "done"
         self.fail: str | None = None
         self.running: asyncio.Event | None = None
+        # The hooks a TurnDriver takes, and what it reads back.
+        self.notices: list[str] = []
+        self.pending = None
+        self.on_jobs_changed = None
+        self.shell_runs: list[tuple[str, str]] = []
+        self.compactions = 0
 
     async def run(self, prompt: str, *, expand: bool = True):
         self.prompts.append(prompt)
+        # Taken as the turn starts, as Agent.run takes them. The fake has no
+        # later steps, so one that lands mid-turn waits for the next turn.
+        self.notices.clear()
         self.running = asyncio.Event()
         for event in self.events:
             yield event
@@ -36,6 +45,23 @@ class FakeAgent:
             raise RuntimeError(self.fail)
         self.history.append(ModelResponse(parts=[
             ThinkingPart(content="secret reasoning"), TextPart(content=self.answer)]))
+
+    async def compact_now(self):
+        self.compactions += 1
+        self.running = asyncio.Event()
+        await self.running.wait()
+        if self.fail:
+            raise RuntimeError(self.fail)
+        return None
+
+    def record_shell(self, command: str, output: str) -> None:
+        self.shell_runs.append((command, output))
+
+    def report(self, notice: str) -> None:
+        """A job of this agent's reported, the way Agent._notify tells it."""
+        self.notices.append(notice)
+        if self.on_jobs_changed is not None:
+            self.on_jobs_changed()
 
     def finish(self) -> None:
         assert self.running is not None, "no turn is running"

@@ -454,7 +454,7 @@ class UserCommandTest(AppTestCase):
             self.assertEqual(app.pane.agent.history, [])
             self.assertIn("hi", str(app.query(ToolResult).first().render()))
 
-            queued = app.pane._take_queued()
+            queued = app.pane.agent.pending()
             self.assertEqual(synthetic_kind(queued[0]), "shell")
 
     async def test_a_run_the_turn_never_came_back_for_is_flushed(self) -> None:
@@ -472,7 +472,7 @@ class UserCommandTest(AppTestCase):
             await self._run(app, pilot, "!echo hi")
             await self._run(app, pilot, "and now this")
 
-            queued = app.pane._take_queued()
+            queued = app.pane.agent.pending()
             self.assertEqual(synthetic_kind(queued[0]), "shell")
             self.assertEqual(queued[1], "and now this")
 
@@ -502,7 +502,7 @@ class UserCommandTest(AppTestCase):
 
             self.assertEqual(interrupted, [])  # the turn is still running
             self.assertIn("interrupted", str(app.query(ToolResult).first().render()))
-            self.assertEqual(app.pane._pending_shell, [])
+            self.assertEqual(app.pane.agent.pending(), [], "nothing is held for the turn")
             # A second Esc, with no command left to stop, reaches the turn.
             app.pane.interrupt()
             self.assertEqual(interrupted, [True])

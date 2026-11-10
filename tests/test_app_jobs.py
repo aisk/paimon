@@ -126,7 +126,7 @@ class SpawnAgentTest(AppTestCase):
                 parent = app.pane
                 hold_turn(parent)
                 parent.agent.notices.append("agent a1f2 finished:\nfound it")
-                parent._jobs_changed()
+                parent.agent.on_jobs_changed()
                 await pilot.pause()
                 self.assertEqual(len(parent.agent.notices), 1, "busy: nothing starts yet")
 

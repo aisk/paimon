@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import threading
 import unittest
@@ -59,6 +60,46 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             replayed = session.messages()
             self.assertEqual(len(replayed), 2)
             self.assertIn("checkpoint", replayed[0].parts[0].content)
+
+
+    async def test_a_cancelled_compaction_leaves_history_and_log_alone(self) -> None:
+        """Cancelled while measuring the compacted context, the last await
+        before it would be committed."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+            self.addCleanup(agent.close)
+            recent = ModelResponse(parts=[TextPart(content="recent")])
+            agent._append_message(ModelRequest(parts=[UserPromptPart(content="old")]))
+            agent._append_message(recent)
+            history, log = list(agent.history), session.path.read_bytes()
+
+            measuring, release = threading.Event(), threading.Event()
+            count_tokens = compaction.count_tokens
+
+            def count(messages, *args, **kwargs) -> int:
+                if messages and synthetic_kind(messages[0]) == "summary":
+                    measuring.set()
+                    release.wait(5)
+                return count_tokens(messages, *args, **kwargs)
+
+            result = compaction.CompactionResult("checkpoint", [recent], 100, 0)
+            with patch("paimon.agent.build_model", return_value=stub_model()), \
+                    patch("paimon.agent.compaction.compact", new=AsyncMock(return_value=result)), \
+                    patch("paimon.compaction.count_tokens", side_effect=count):
+                task = asyncio.ensure_future(agent.compact_now())
+                while not measuring.is_set():
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                release.set()
+
+            self.assertEqual(agent.history, history)
+            self.assertEqual(session.path.read_bytes(), log)
+            self.assertEqual(agent.session.messages(), history)
 
 
 class CompactionTokenCountTest(unittest.IsolatedAsyncioTestCase):

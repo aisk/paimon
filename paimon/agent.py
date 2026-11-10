@@ -5,6 +5,7 @@ render however it likes.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import time
@@ -33,6 +34,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import codemode, compaction, logtext, retry, review
 from .config import Config
+from .errors import PaimonError
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string)
 from .mentions import expand_mentions
@@ -87,6 +89,17 @@ MAX_AGENTS = 4
 ANSWER_LIMIT = 8_000
 
 _RECAP_MAX_TOKENS = 2_048
+
+
+class AgentBusyError(PaimonError):
+    """A turn or a compaction was started while another one of the same
+    agent was still in flight.
+
+    Both rewrite the history and the session log, and two of them at once
+    would interleave their writes into a log that no longer replays to what
+    either of them meant.
+    """
+
 
 # Marked so the model answers it rather than taking it for the next
 # instruction and resuming the work.
@@ -508,7 +521,7 @@ class Agent:
     way out::
 
         with Agent.open(cwd=path) as agent:
-            async for event in agent.run("..."):
+            async for event in agent.run_until_idle("..."):
                 ...
     """
 
@@ -578,6 +591,13 @@ class Agent:
         # appended since. None until a request reports usage, and again after
         # compaction reshapes the history.
         self._usage_anchor: tuple[int, int] | None = None
+        # What is writing the history right now: "turn", "compaction" or None.
+        # Only a guard: whoever drives the agent is expected to serialize the
+        # two (the TUI's TurnDriver does), and this turns a caller that does
+        # not into an error instead of a corrupted log.
+        self._in_flight: str | None = None
+        # Events run_until_idle waits on, set whenever the jobs move.
+        self._job_waiters: set[asyncio.Event] = set()
 
     @classmethod
     def open(cls, cwd: Path | None = None, *, session: Session | None = None,
@@ -776,15 +796,21 @@ class Agent:
         )
         if result is None:
             return None
+        # Measured before anything is committed, the way count_context_tokens
+        # would measure it with no anchor. This is the last await: the commit
+        # below runs in one go, so a compaction cancelled at any point leaves
+        # the history and the log as they were, and nothing can observe it
+        # half done.
+        tokens_after = await asyncio.to_thread(
+            compaction.count_tokens, list(result.messages), self.tool_schemas, self.system_prompt)
 
         # Mirrors how Session.messages() replays a compaction record, so the
         # append-message invariant (see _append_message) still holds afterwards.
         self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
         self.history = result.messages
-        # The provider's count described the old context; drop the anchor so
-        # the fresh estimate below covers the compacted shape.
+        # The provider's count described the old context.
         self._usage_anchor = None
-        result.tokens_after = await self.count_context_tokens()
+        result.tokens_after = tokens_after
         return result
 
     async def count_context_tokens(self) -> int:
@@ -812,8 +838,24 @@ class Agent:
             compaction.count_tokens, list(self.history), self.tool_schemas, self.system_prompt)
 
     async def compact_now(self) -> compaction.CompactionResult | None:
-        """Compact on demand; None when the history is too short to be worth it."""
-        return await self._maybe_compact(force=True)
+        """Compact on demand; None when the history is too short to be worth it.
+
+        Raises ``AgentBusyError`` while a turn or another compaction of this
+        agent is in flight. Cancelling it leaves the history and the log
+        untouched.
+        """
+        self._claim("compaction")
+        try:
+            return await self._maybe_compact(force=True)
+        finally:
+            self._in_flight = None
+
+    def _claim(self, what: str) -> None:
+        """Mark ``what`` as the one writer of the history, or refuse."""
+        if self._in_flight is not None:
+            raise AgentBusyError(f"cannot start a {what}: a {self._in_flight} "
+                                 "of this agent is still in flight")
+        self._in_flight = what
 
     def _context(self, model: Model) -> list[ModelMessage]:
         """What a request over this conversation opens with: the system prompt,
@@ -833,6 +875,10 @@ class Agent:
         Read-only: neither the question nor the answer enters ``self.history``
         or the session log, and no compaction is triggered. Only between
         turns, where the history is a complete request on its own.
+
+        The request is built from the history before the first await, and a
+        compaction swaps the history in one synchronous step, so a recap sees
+        the history either before a compaction or after it, never half way.
 
         The request opens exactly like a turn's (same prompt, tools and
         history), so a provider that caches prefixes has this one cached.
@@ -861,8 +907,12 @@ class Agent:
 
         Only between turns. While one is running the message belongs in the
         pending queue instead, which the loop drains between steps — appended
-        here it would land between a tool call and its result.
+        here it would land between a tool call and its result. Raises
+        ``AgentBusyError`` while a turn or a compaction is in flight.
         """
+        if self._in_flight is not None:
+            raise AgentBusyError(f"cannot record a shell run: a {self._in_flight} "
+                                 "of this agent is still in flight")
         self._append_message(shell_message(command, output))
 
     # ---- Tools the agent loop runs itself ----------------------------------
@@ -1116,6 +1166,8 @@ class Agent:
             return
         if notice:
             self.notices.append(notice)
+        for waiter in self._job_waiters:
+            waiter.set()
         if self.on_jobs_changed is not None:
             self.on_jobs_changed()
 
@@ -1169,8 +1221,11 @@ class Agent:
 
         # The prompt is an event like any other, as in a turn the user starts.
         await emit(UserInput(prompt))
-        async for event in child.run(prompt, max_tool_calls=self._max_tool_calls):
-            await emit(event)
+        # Closed on the way out even when stopped mid-event, so the child's
+        # turn records how it ended before _child_done closes its session.
+        async with contextlib.aclosing(child.run(prompt, max_tool_calls=self._max_tool_calls)) as events:
+            async for event in events:
+                await emit(event)
         return _answer(child.history, child.session.id)
 
     def _child_done(self, job_id: str, job: Job) -> None:
@@ -1324,49 +1379,99 @@ class Agent:
         tool can slip past the budget. On the budget every remaining call gets
         an explicit refusal persisted as its result, ToolBudgetExhausted is
         yielded and the turn ends.
+
+        Raises ``AgentBusyError`` when a turn or a compaction of this agent is
+        already in flight: the history has one writer at a time.
         """
-        # Jobs this session started report in here, ahead of the prompt they
-        # arrived before. Persisted messages, not just events: the notice is
-        # how the model gets a child's answer at all.
-        notices = self._take_notices()
-        if user_input is None and not notices:
-            return
-        for notice in notices:
-            yield notice
-        self._max_tool_calls = max_tool_calls
-        if user_input is not None:
-            prompt = self.expand_input(user_input) if expand else user_input
-            self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
-
-        # Every turn leaves exactly one terminal ``turn_end`` record in the
-        # session: success, error (with the exception), max_tool_calls or
-        # interrupted. The record is not a message, so it reaches audits and
-        # ``paimon log`` without an error or a partial answer ever being
-        # replayed to the model as a normal assistant response.
-        outcome_recorded = False
-
-        def record_outcome(outcome: str, *, error: str | None = None,
-                           partial_text: str | None = None) -> None:
-            nonlocal outcome_recorded
-            if outcome_recorded:
-                return
-            outcome_recorded = True
-            self.session.append_meta("turn_end", outcome=outcome, error=error,
-                                     partial_text=partial_text)
-
+        self._claim("turn")
         try:
-            async for event in self._run(record_outcome, max_tool_calls):
-                yield event
-        except asyncio.CancelledError:
-            record_outcome("interrupted")
-            raise
-        except GeneratorExit:
-            # The consumer abandoned the turn mid-iteration.
-            record_outcome("interrupted")
-            raise
-        except Exception as exc:
-            record_outcome("error", error=f"{type(exc).__name__}: {exc}")
-            raise
+            # Jobs this session started report in here, ahead of the prompt they
+            # arrived before. Persisted messages, not just events: the notice is
+            # how the model gets a child's answer at all.
+            notices = self._take_notices()
+            if user_input is None and not notices:
+                return
+            for notice in notices:
+                yield notice
+            self._max_tool_calls = max_tool_calls
+            if user_input is not None:
+                prompt = self.expand_input(user_input) if expand else user_input
+                self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
+
+            # Every turn leaves exactly one terminal ``turn_end`` record in the
+            # session: success, error (with the exception), max_tool_calls or
+            # interrupted. The record is not a message, so it reaches audits and
+            # ``paimon log`` without an error or a partial answer ever being
+            # replayed to the model as a normal assistant response.
+            outcome_recorded = False
+
+            def record_outcome(outcome: str, *, error: str | None = None,
+                               partial_text: str | None = None) -> None:
+                nonlocal outcome_recorded
+                if outcome_recorded:
+                    return
+                outcome_recorded = True
+                self.session.append_meta("turn_end", outcome=outcome, error=error,
+                                         partial_text=partial_text)
+
+            try:
+                async for event in self._run(record_outcome, max_tool_calls):
+                    yield event
+            except asyncio.CancelledError:
+                record_outcome("interrupted")
+                raise
+            except GeneratorExit:
+                # The consumer abandoned the turn mid-iteration.
+                record_outcome("interrupted")
+                raise
+            except Exception as exc:
+                record_outcome("error", error=f"{type(exc).__name__}: {exc}")
+                raise
+        finally:
+            self._in_flight = None
+
+    async def run_until_idle(self, user_input: str | None, *, expand: bool = True,
+                             max_tool_calls: int | None = None) -> AsyncIterator[AgentEvent]:
+        """Run ``user_input``, then keep the agent going until it has nothing
+        left to wait for, yielding the events of every turn.
+
+        A turn can start agents (spawn_agent) whose answers arrive after it
+        ends, as notices the model only sees in a later turn. This runs that
+        later turn — a wake-up, ``run(None)`` — whenever notices are waiting,
+        and waits while agents this one started are still running. It returns
+        once nothing is running and nothing is left unsaid.
+
+        Each turn gets ``max_tool_calls`` afresh, and a ToolBudgetExhausted
+        ends the whole run after it is yielded. Background commands do not
+        keep it waiting: one may run for as long as the process lives, and
+        what becomes of it is reported by whatever runs next. Plain ``run``
+        is still the call for a caller that drives the conversation itself,
+        such as a UI that wakes the agent when its jobs move.
+        """
+        moved = asyncio.Event()
+        self._job_waiters.add(moved)
+        try:
+            prompt, first = user_input, True
+            while True:
+                if not first:
+                    moved.clear()
+                    if not self.notices:
+                        if not any(job.kind == "agent" for job in self.jobs.values()):
+                            return
+                        await moved.wait()
+                        continue
+                # Closed here rather than left to the garbage collector: until
+                # a turn's generator is closed it holds the agent, and the next
+                # turn would be refused.
+                async with contextlib.aclosing(self.run(
+                        prompt, expand=expand, max_tool_calls=max_tool_calls)) as events:
+                    async for event in events:
+                        yield event
+                        if isinstance(event, ToolBudgetExhausted):
+                            return
+                prompt, first = None, False
+        finally:
+            self._job_waiters.discard(moved)
 
     async def _run(self, record_outcome: Callable[..., None],
                    max_tool_calls: int | None) -> AsyncIterator[AgentEvent]:
