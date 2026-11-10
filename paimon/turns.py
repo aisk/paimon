@@ -30,6 +30,10 @@ WAKE = object()
 # Inbox sentinel for a compaction the user asked for.
 COMPACT = object()
 
+# What a wake-up turn leaves instead of a TurnOver when it found nothing to
+# react to: the agent never ran, so there is no turn to report.
+_IDLE = object()
+
 
 class Outcome(str, Enum):
     """How one turn ended."""
@@ -168,24 +172,54 @@ class TurnDriver:
                 else:
                     self.result = Result(Outcome.INTERRUPTED)
                     self._over = TurnOver(self.result)
-            await self._close(self._over)
+            try:
+                await self._close(None if self._over is _IDLE else self._over)
+            except Exception as exc:  # noqa: BLE001 — the driver outlives any one item
+                # _close contains what it calls into; this is the backstop for
+                # a listener that raises, which must not end the driver and
+                # leave every later prompt waiting on an inbox nobody reads.
+                self._item = None
+                self.result = Result(Outcome.FAILED, error=_describe(exc))
 
     async def _close(self, over) -> None:
         """The item in flight is over: settle what it left behind, report it,
-        and wake the agent if a report is waiting for it."""
+        and wake the agent if a report is waiting for it.
+
+        ``over`` is None for a wake-up that found nothing to do, which reports
+        nothing: it must neither overwrite the last turn's result nor set off
+        what the end of a turn does on screen.
+
+        Nothing here may end the driver. What goes wrong is reported as a
+        failed outcome, the one thing every viewer of a driver reads; the
+        item itself has already left its record in the session log.
+        """
         self._item = None
         # Before the event, whose handler may submit the next prompt: a "!"
         # run from during this item belongs to the history it happened in.
-        runs, self._held = self._held, []
-        for command, output in runs:
-            self.agent.record_shell(command, output)
-        await self._emit(over)
+        if (problem := self._record_held()) is not None:
+            over = self._failed(over, problem)
+        if over is None:
+            self._release_queued()
+        else:
+            try:
+                await self._emit(over)
+            except Exception as exc:  # noqa: BLE001 — a renderer bug must not end the driver
+                over = self._failed(over, f"its end could not be shown ({_describe(exc)})")
+                if isinstance(over, TurnOver):
+                    # Once more, as a failure: whatever the sink choked on,
+                    # this gives it a chance to close the turn and hand back
+                    # what was queued behind it. If it fails again, the
+                    # result is left to say so.
+                    with contextlib.suppress(Exception):
+                        await self._emit(over)
         # A job that ended during the last step has not been reported: the
         # loop only looks between steps. Refused when a queued prompt has just
         # been submitted, which reports it anyway. Not after a turn the user
         # stopped or that failed, nor a compaction the user stopped: the
         # notice waits for whatever runs next.
-        if isinstance(over, CompactionOver):
+        if over is None:
+            wakes = True
+        elif isinstance(over, CompactionOver):
             wakes = over.result.outcome is not Outcome.INTERRUPTED
         else:
             wakes = over.result.finished
@@ -193,32 +227,83 @@ class TurnDriver:
             self.wake()
         self._notify()
 
+    def _record_held(self) -> str | None:
+        """Record the "!" runs held while the item was in flight: None, or
+        what went wrong.
+
+        A run that cannot be recorded stays held, with the ones after it, so
+        it is not lost: the next turn takes it at its first step, and the end
+        of the next item tries again.
+        """
+        runs, self._held = self._held, []
+        for index, (command, output) in enumerate(runs):
+            try:
+                self.agent.record_shell(command, output)
+            except Exception as exc:  # noqa: BLE001 — reported through the outcome
+                self._held = runs[index:] + self._held
+                return f'a "!" run could not be recorded yet ({_describe(exc)})'
+        return None
+
+    def _failed(self, over, problem: str):
+        """``over`` with ``problem`` reported, and the result saying it.
+
+        A turn's own report becomes a failure, so the pane shows it where it
+        shows any other. A compaction's stays as it went, which it did; only
+        the result says what went wrong after it. None (an idle wake-up)
+        stays None.
+        """
+        error = problem
+        if isinstance(over, TurnOver) and over.result.outcome is Outcome.FAILED:
+            error = f"{over.result.error}; {problem}"
+        self.result = Result(Outcome.FAILED, error=error)
+        return TurnOver(self.result) if isinstance(over, TurnOver) else over
+
+    def _release_queued(self) -> None:
+        """Send what was typed while an idle wake-up sat in the inbox.
+
+        A turn hands the queue back through its TurnOver; an idle wake-up has
+        none, so the queue is taken here and sent the way the pane sends it
+        after a finished turn: as one prompt.
+        """
+        texts = self.take_queued() if self.take_queued is not None else []
+        if texts and not self.killed:
+            self.submit("\n\n".join(texts))
+
     async def _emit(self, event) -> None:
         if self.sink is not None:
             await self.sink(event)
 
     async def _run_turn(self, prompt) -> None:
+        user_input = None if prompt is WAKE else prompt
+        # What stays when the turn is cancelled.
+        result = Result(Outcome.INTERRUPTED)
+        idle = False
         try:
-            user_input = None if prompt is WAKE else prompt
             if user_input is not None:
                 # The prompt is an event like any other, so every turn
                 # renders through the one sink. A wake-up has no prompt to
                 # show: its first event is a job notice, or nothing at all.
                 await self._emit(UserInput(user_input))
+            shown = False
             # Closed here even when the turn is cancelled while the sink has
             # an event: left to the garbage collector, the turn would hold the
             # agent past its end and the next one would be refused.
             async with contextlib.aclosing(self.agent.run(user_input)) as events:
                 async for event in events:
+                    shown = True
                     await self._emit(event)
-            self.result = Result(Outcome.SUCCESS)
-        except asyncio.CancelledError:
-            self.result = Result(Outcome.INTERRUPTED)
-            raise
+            # A wake-up whose news was gone by the time it ran yields nothing
+            # and persists nothing: the turn never happened.
+            idle = user_input is None and not shown
+            result = Result(Outcome.SUCCESS)
         except Exception as exc:  # noqa: BLE001 — reported, not raised at the UI
-            self.result = Result(Outcome.FAILED, error=str(exc))
+            result = Result(Outcome.FAILED, error=str(exc))
         finally:
-            self._over = TurnOver(self.result)
+            if idle:
+                self._over = _IDLE
+            else:
+                self.result = result
+                self._over = TurnOver(result)
 
     async def _compact(self) -> None:
         compacted = None
@@ -234,10 +319,9 @@ class TurnDriver:
         finally:
             self._over = CompactionOver(result, compacted)
 
-    def submit(self, text: str) -> bool:
+    def submit(self, text: str) -> None:
         self._inbox.put_nowait(text)
         self._notify()
-        return True
 
     def wake(self) -> bool:
         """Queue a turn with no user input, so the agent reacts to what its
@@ -303,7 +387,13 @@ class TurnDriver:
 
     def shutdown(self) -> None:
         """The process is going: whatever the driver is in the middle of,
-        there will be no loop left to finish it."""
+        there will be no loop left to finish it.
+
+        Killed like cancel(), so nothing on the way out calls back into a
+        pane that is going away, but without telling anyone: there is nobody
+        left to tell.
+        """
+        self.killed = True
         self.interrupt()
         if self._task is not None:
             self._task.cancel()
@@ -350,3 +440,7 @@ class TurnDriver:
     def _notify(self) -> None:
         if self.on_change is not None:
             self.on_change()
+
+
+def _describe(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__

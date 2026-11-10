@@ -326,3 +326,149 @@ class TurnDriverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent.pending(), ["and now this"], "a run is taken once")
         await self.finish(job)
         self.assertEqual(self.agent.shell_runs, [], "the turn took it, so nothing is left over")
+
+    # ---- what goes wrong around an item -------------------------------------
+
+    async def test_a_sink_that_raises_at_the_end_does_not_end_the_driver(self) -> None:
+        for item in ("turn", "compaction"):
+            with self.subTest(item):
+                job = self.make()
+                seen: list = []
+
+                async def sink(event) -> None:
+                    seen.append(event)
+                    ends = [e for e in seen if isinstance(e, (TurnOver, CompactionOver))]
+                    if ends == [event]:
+                        raise RuntimeError("renderer bug")
+
+                job.sink = sink
+                job.submit("go") if item == "turn" else job.compact()
+                await self.finish(job)
+
+                self.assertFalse(job.is_busy)
+                self.assertIs(job.result.outcome, Outcome.FAILED, "said, not swallowed")
+                self.assertIn("renderer bug", job.result.error)
+                if item == "turn":
+                    # Shown once more as a failure, which this sink takes.
+                    self.assertEqual(seen[-1], TurnOver(job.result))
+                job.submit("next")
+                await self.finish(job)
+                self.assertEqual(self.agent.prompts[-1], "next", "the driver still runs")
+                self.assertFalse(job.is_busy)
+                job.cancel()
+
+    async def test_a_sink_that_raises_at_the_prompt_fails_only_that_turn(self) -> None:
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+            if isinstance(event, UserInput) and event.text == "go":
+                raise RuntimeError("renderer bug")
+
+        job.sink = sink
+        job.submit("go")
+        await settle()
+        self.assertIs(job.result.outcome, Outcome.FAILED)
+        self.assertEqual(seen[-1], TurnOver(job.result))
+        job.submit("next")
+        await self.finish(job)
+        self.assertEqual(self.agent.prompts, ["next"])
+        self.assertIs(job.result.outcome, Outcome.SUCCESS)
+
+    async def test_a_shell_run_that_cannot_be_recorded_is_kept_and_reported(self) -> None:
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+
+        job.sink = sink
+        record = self.agent.record_shell
+
+        def broken(command: str, output: str) -> None:
+            raise OSError("disk full")
+
+        self.agent.record_shell = broken
+        job.submit("go")
+        await settle()
+        job.record_shell("ls", "a.txt")
+        await self.finish(job)
+
+        self.assertFalse(job.is_busy)
+        self.assertIs(job.result.outcome, Outcome.FAILED)
+        self.assertIn("disk full", job.result.error)
+        self.assertEqual(seen[-1], TurnOver(job.result))
+
+        # Still held, not lost: the next item's end records it.
+        self.agent.record_shell = record
+        job.submit("next")
+        await self.finish(job)
+        self.assertEqual(self.agent.shell_runs, [("ls", "a.txt")])
+        self.assertIs(job.result.outcome, Outcome.SUCCESS)
+
+    async def test_a_listener_that_raises_does_not_end_the_driver(self) -> None:
+        job = self.make()
+        calls = 0
+
+        def on_change() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:  # the one at the end of the first turn
+                raise RuntimeError("listener bug")
+
+        job.on_change = on_change
+        job.submit("go")
+        await self.finish(job)
+        self.assertFalse(job.is_busy)
+        job.on_change = None
+        job.submit("next")
+        await self.finish(job)
+        self.assertEqual(self.agent.prompts, ["go", "next"])
+
+    # ---- a wake-up with nothing to do ---------------------------------------
+
+    async def test_a_wake_up_that_finds_nothing_leaves_no_trace(self) -> None:
+        """Its news was gone by the time it ran: the agent yields nothing, and
+        the last turn's outcome must still be the one reported."""
+        job = self.make()
+        seen: list = []
+
+        async def sink(event) -> None:
+            seen.append(event)
+
+        async def run(prompt, *, expand=True):
+            self.agent.prompts.append(prompt)
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        job.sink = sink
+        self.agent.fail = "the model said no"
+        job.submit("go")
+        await self.finish(job)
+        failed = job.result
+        self.assertIs(failed.outcome, Outcome.FAILED)
+        seen.clear()
+
+        self.agent.run = run
+        job.take_queued = lambda: ["typed meanwhile", "and this"]
+        job.submit = lambda text: seen.append(("submitted", text))
+        self.assertTrue(job.wake())
+        await settle()
+
+        self.assertEqual(self.agent.prompts[-1], None)
+        self.assertIs(job.result, failed, "the failure is still what the last turn said")
+        self.assertEqual(seen, [("submitted", "typed meanwhile\n\nand this")],
+                         "no TurnOver, and what was queued behind it goes out")
+        self.assertFalse(job.is_busy)
+
+    async def test_shutdown_tells_nobody(self) -> None:
+        job = self.make()
+        job.submit("go")
+        await settle()
+        calls: list = []
+        job.on_change = lambda: calls.append(job.is_busy)
+        job.shutdown()
+        await settle()
+        self.assertTrue(job.killed)
+        self.assertEqual(calls, [], "the pane is going away")
