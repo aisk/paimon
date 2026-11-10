@@ -378,6 +378,9 @@ class GitBashDiscoveryTest(unittest.TestCase):
         with patch("paimon.tools.shell.os.name", "nt"),                 patch("paimon.tools.shell.find_git_bash", return_value=None):
             self.assertIsNone(shell_executable.__wrapped__())
 
+    # Not with os.name patched: that is the one os module, and on POSIX
+    # pathlib then refuses to build the Windows paths the lookup works on.
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
     def test_the_root_is_known_only_for_the_launcher(self) -> None:
         root = self._install("Git")
         with patch("paimon.tools.shell.os.name", "nt"):

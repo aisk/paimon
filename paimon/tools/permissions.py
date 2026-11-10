@@ -194,9 +194,10 @@ _GIT_FLAGS_ONLY = {
 # Builtins in bash and in sh alike, so never looked up on PATH.
 _BUILTINS = frozenset({"cd", "echo", "pwd"})
 # Under Git Bash every other command above must be the one Git for Windows
-# ships, the GNU tool this list was written for; these alone are not shipped
-# and come from the user's PATH.
-_NOT_FROM_GIT = frozenset({"rg"})
+# ships, the GNU tool this list was written for. These alone may come from
+# the user's PATH: rg is not shipped, and git is git wherever it is found,
+# which not every installation keeps in the directories bash searches first.
+_NOT_FROM_GIT = frozenset({"rg", "git"})
 # Win32 device names. Opened by a native program (rg, git) they are devices
 # in any directory and with any extension: CON reads the console paimon's
 # own TUI is reading.
