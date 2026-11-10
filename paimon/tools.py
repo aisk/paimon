@@ -597,7 +597,7 @@ async def run_tool(name: str, args: dict, cwd: Path, mode: str,
     return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx), False
 
 
-def _decode_preserving(raw: bytes) -> tuple[str, str, bool]:
+def _decode_preserving(raw: bytes, errors: str = "strict") -> tuple[str, str, bool]:
     """(LF-normalized text, line ending to restore, had a UTF-8 BOM).
 
     The model reads and writes LF, so matching and editing happen on the LF
@@ -606,11 +606,16 @@ def _decode_preserving(raw: bytes) -> tuple[str, str, bool]:
     keeps this independent of the platform and its locale — text mode would
     normalize every line ending in the file just for touching one line.
     Mixed-ending files are re-written uniformly with the majority ending.
+
+    Strict by default: text decoded with replacement characters and written
+    back would turn every byte that is not UTF-8 into U+FFFD, all over a file
+    of which only one span was meant to change. Only callers that never write
+    the text back may pass ``errors="replace"``.
     """
     bom = raw.startswith(codecs.BOM_UTF8)
     if bom:
         raw = raw[len(codecs.BOM_UTF8):]
-    text = raw.decode("utf-8", errors="replace")
+    text = raw.decode("utf-8", errors=errors)
     crlf = text.count("\r\n")
     bare = text.count("\n") - crlf
     newline = "\r\n" if crlf > bare else "\n"
@@ -628,7 +633,7 @@ def _read_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
         return f"Error: file not found: {path}"
-    text, _, _ = _decode_preserving(path.read_bytes())
+    text, _, _ = _decode_preserving(path.read_bytes(), errors="replace")
     lines = text.splitlines()
     offset = max(1, int(args.get("offset", 1)))
     limit = args.get("limit")
@@ -646,9 +651,11 @@ def _write_file(args: dict, cwd: Path) -> str:
     newline, bom = "\n", False
     if path.is_file():
         # A full rewrite keeps the file's own conventions, the same way an
-        # edit does; new files are plain LF UTF-8.
+        # edit does; new files are plain LF UTF-8. Only the conventions are
+        # taken from the old bytes, so a file that is not UTF-8 decodes
+        # lossily here and is simply replaced with UTF-8 content.
         try:
-            _, newline, bom = _decode_preserving(path.read_bytes())
+            _, newline, bom = _decode_preserving(path.read_bytes(), errors="replace")
         except OSError:
             pass
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -661,7 +668,11 @@ def _edit_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
         return f"Error: file not found: {path}"
-    text, newline, bom = _decode_preserving(path.read_bytes())
+    try:
+        text, newline, bom = _decode_preserving(path.read_bytes())
+    except UnicodeDecodeError:
+        return (f"Error: {path} is not valid UTF-8 text, and editing it here would corrupt "
+                "every byte outside the edit. Use the shell to change it in its own encoding.")
     old = str(args["old_string"]).replace("\r\n", "\n")
     new = str(args["new_string"]).replace("\r\n", "\n")
     count = text.count(old)

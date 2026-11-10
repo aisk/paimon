@@ -163,6 +163,30 @@ class LineEndingPreservationTest(unittest.TestCase):
         _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
         self.assertEqual(self.path.read_bytes(), b"p\nq\n")
 
+    def test_edit_refuses_a_file_that_is_not_utf8(self) -> None:
+        """Decoded lossily and written back, every GBK byte outside the edit
+        would turn into U+FFFD."""
+        original = "中文\nb\n".encode("gbk")
+        self.path.write_bytes(original)
+        result = self._edit("b", "B")
+        self.assertTrue(result.startswith("Error:"), result)
+        self.assertIn("UTF-8", result)
+        self.assertIn("shell", result)
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_write_file_replaces_a_file_that_is_not_utf8(self) -> None:
+        from paimon.tools import _write_file
+        self.path.write_bytes("café\r\n".encode("latin-1"))
+        _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
+        self.assertEqual(self.path.read_bytes(), b"p\r\nq\r\n")
+
+    def test_read_file_shows_a_file_that_is_not_utf8(self) -> None:
+        from paimon.tools import _read_file
+        self.path.write_bytes("café\nb\n".encode("latin-1"))
+        result = _read_file({"path": "f.txt"}, self.cwd)
+        self.assertIn("caf�", result)
+        self.assertIn("b", result)
+
     def test_read_file_shows_crlf_files_without_stray_carriage_returns(self) -> None:
         from paimon.tools import _read_file
         self.path.write_bytes(b"a\r\nb\r\n")
