@@ -74,8 +74,11 @@ class TranscriptTest(unittest.TestCase):
             summary_message("## Goal\nThe user wants the remote branch deleted."),
         ]
         transcript = review._transcript(history)
+        # The checkpoint is kept, under a label that says a model wrote it.
         self.assertEqual(transcript.splitlines(),
-                         ["user: fix the flaky test", "user ran: make lint"])
+                         ["user: fix the flaky test", "user ran: make lint",
+                          "recap of earlier conversation (model-written): ## Goal",
+                          "The user wants the remote branch deleted."])
 
     def test_the_users_own_words_count_whatever_they_start_with(self) -> None:
         """Only paimon's mark makes a message synthetic, never its prefix."""
@@ -86,6 +89,44 @@ class TranscriptTest(unittest.TestCase):
         self.assertEqual(review._transcript(history).splitlines(),
                          ["user: [job] push the branch when done",
                           "user: [shell] $ make", "and deploy"])
+
+    def test_a_long_turn_keeps_what_the_user_asked_and_drops_old_calls_first(self) -> None:
+        call = '{"command": "pytest -k %d ' + "x" * 300 + '"}'
+        history = [ModelRequest(parts=[UserPromptPart(content="fix the flaky test")])]
+        for index in range(120):
+            history.append(ModelResponse(parts=[ToolCallPart(
+                tool_name="shell", args=call % index, tool_call_id=f"c-{index}")]))
+            history.append(ModelRequest(parts=[ToolReturnPart(
+                tool_name="shell", tool_call_id=f"c-{index}", content="ok")]))
+            if index == 60:
+                history.append(ModelRequest(parts=[UserPromptPart(content="and the slow one")]))
+        history.append(ModelRequest(parts=[UserPromptPart(content="y" * 50_000)]))
+        history.append(ModelResponse(parts=[ToolCallPart(
+            tool_name="shell", args='{"command": "git push"}', tool_call_id="c-last")]))
+
+        lines = review._transcript(history).splitlines()
+        transcript = "\n".join(lines)
+        self.assertLessEqual(len(transcript), review._MAX_TRANSCRIPT)
+        self.assertEqual(lines[0], "user: fix the flaky test", "the request that started it")
+        self.assertIn("user: and the slow one", lines)
+        self.assertTrue(any(line.startswith("user: yyy") and "more chars" in line
+                            for line in lines), "a huge message is clipped, not dropped")
+        self.assertEqual(lines[-1], 'agent called shell: {"command": "git push"}')
+        self.assertIn("pytest -k 119 ", transcript, "the newest calls stay")
+        self.assertNotIn("pytest -k 0 ", transcript, "the oldest go first")
+        self.assertRegex(lines[1], r"^\[\d+ lines left out\]$")
+
+    def test_a_compacted_session_keeps_its_recap_whatever_came_after(self) -> None:
+        history = [summary_message("## Goal\nMake the parser accept tabs.")]
+        for index in range(200):
+            history.append(ModelResponse(parts=[ToolCallPart(
+                tool_name="shell", args='{"command": "make %d %s"}' % (index, "z" * 300),
+                tool_call_id=f"c-{index}")]))
+        lines = review._transcript(history).splitlines()
+        self.assertEqual(lines[:2], ["recap of earlier conversation (model-written): ## Goal",
+                                     "Make the parser accept tabs."])
+        self.assertNotIn("checkpoint", lines[0], "the log's own preamble is not repeated")
+        self.assertLessEqual(len("\n".join(lines)), review._MAX_TRANSCRIPT)
 
     def test_every_prompt_of_a_subagent_is_its_parents(self) -> None:
         history = [ModelRequest(parts=[UserPromptPart(content="delete the build dir")]),
