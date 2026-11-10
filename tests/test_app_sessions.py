@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -14,7 +15,7 @@ from textual.widgets import Input, Static
 from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import PaimonApp
-from paimon.config import Config
+from paimon.config import Config, RunOptions, config_path
 from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen, PromptScreen
 from paimon.pane import _session_label
 from paimon.session import SessionError
@@ -339,6 +340,54 @@ class ModelSwitchTest(AppTestCase):
             app.action_switch_model()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
+
+
+class LaunchOptionsTest(AppTestCase):
+    """What the app was launched with holds for every conversation it opens,
+    and is never written to the config file."""
+
+    OPTIONS = RunOptions(strict=True, no_web_search=True, no_code_mode=True,
+                         skills=("extra",), no_skills=True)
+
+    def _app(self) -> PaimonApp:
+        agent = Agent.open(mode="read", config=Config(model="test-model"),
+                           run_options=self.OPTIONS, model_override="test:launched")
+        return PaimonApp(agent)
+
+    def _assert_launched(self, agent: Agent, model: str = "test:launched") -> None:
+        self.assertIs(agent.run_options, self.OPTIONS)
+        self.assertNotIn("web_search", agent.toolset)
+        self.assertNotIn("run_code", agent.toolset)
+        self.assertEqual(agent.model_name, model)
+
+    async def test_new_sessions_forks_and_panes_keep_them(self) -> None:
+        app = self._app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_new_session()
+            self._assert_launched(app.pane.agent)
+            app.action_fork_session()
+            self._assert_launched(app.pane.agent)
+            await pilot.press("ctrl+t")
+            await self._wait_for(pilot, lambda: len(app.sessions) == 2)
+            self._assert_launched(app.pane.agent)
+
+    async def test_saves_write_none_of_them_and_a_picked_model_replaces_the_launched_one(self) -> None:
+        app = self._app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_toggle_reasoning()
+            await self._wait_for(pilot, lambda: config_path().exists())
+            self.assertEqual(json.loads(config_path().read_text()), {"show_reasoning": True})
+            self._assert_launched(app.pane.agent)
+
+            app._model_picked("test:picked")
+            await self._wait_for(pilot, lambda: Config.load().model == "test:picked")
+            self.assertEqual(json.loads(config_path().read_text()),
+                             {"show_reasoning": True, "model": "test:picked"})
+            self._assert_launched(app.pane.agent, "test:picked")
+            app.action_new_session()
+            self._assert_launched(app.pane.agent, "test:picked")
 
 
 class PaneSessionLockTest(AppTestCase):

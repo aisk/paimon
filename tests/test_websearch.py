@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from paimon import logtext, websearch
 from paimon.agent import Agent
-from paimon.config import Config
+from paimon.config import Config, RunOptions
 from paimon.tools.permissions import MODES, gate
 from paimon.tools.registry import BACKGROUND_TOOLS, INTERACTIVE_TOOLS, SUBAGENT_DENIED, execute_tool
 from paimon.tools.result import ToolError
@@ -187,8 +187,7 @@ class DisabledTest(unittest.TestCase):
             cwd = Path(directory)
             with Agent.open(cwd=cwd, config=config) as agent:
                 self.assertIn("web_search", agent.toolset)
-            config.web_search = False
-            with Agent.open(cwd=cwd, config=config) as agent:
+            with Agent.open(cwd=cwd, config=config, run_options=RunOptions(no_web_search=True)) as agent:
                 self.assertNotIn("web_search", agent.toolset)
                 self.assertNotIn("web_search", [s["function"]["name"] for s in agent.tool_schemas])
 

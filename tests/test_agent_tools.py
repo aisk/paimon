@@ -19,7 +19,7 @@ from paimon.events import (
     TurnEnd,
     replay_events,
 )
-from paimon.config import Config
+from paimon.config import Config, RunOptions
 from paimon.review import MAX_BLOCKS, Verdict
 from paimon.tools.permissions import READ_DENIAL, USER_DENIAL
 from paimon.tools.registry import REGISTRY, SUBAGENT_DENIED, without
@@ -101,6 +101,13 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(end.denied)
 
         agent.config.safe_commands = False
+        end = await self._run_tool_turn(agent, "shell", '{"command": "pwd"}')
+        self.assertTrue(end.denied)
+
+    @modelled_shell
+    async def test_strict_holds_read_only_commands_the_config_lets_through(self) -> None:
+        agent = open_agent(self._cwd(), mode="read", run_options=RunOptions(strict=True))
+        self.assertTrue(agent.config.safe_commands)
         end = await self._run_tool_turn(agent, "shell", '{"command": "pwd"}')
         self.assertTrue(end.denied)
 

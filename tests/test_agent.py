@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
 
 from paimon import lockfile, prompt
 from paimon.agent import Agent
-from paimon.config import Config
+from paimon.config import Config, RunOptions
 from paimon.llm import build_model
 from paimon.session import (
     Session,
@@ -338,14 +338,37 @@ class SkillAgentIntegrationTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             self._write_skill(cwd / ".agents" / "skills" / "ambient", "ambient")
             explicit = self._write_skill(cwd / "elsewhere" / "explicit", "explicit")
-            config = Config(model="test:stub")
-            config.skills = [str(explicit.parent)]
-            config.include_default_skills = False
+            config = Config(model="test:stub", skills=[str(explicit.parent)])
             with patch("paimon.skills.default_skill_dirs") as dirs:
-                agent = Agent.open(cwd=cwd, config=config)
+                agent = Agent.open(cwd=cwd, config=config, run_options=RunOptions(no_skills=True))
             self.addCleanup(agent.session.unlock)
             dirs.assert_not_called()
             self.assertEqual([s.name for s in agent.skills], ["explicit"])
+
+    def test_run_options_reach_a_child_agent(self) -> None:
+        """What the run was launched with holds for the agents it starts too,
+        and none of it lands in the shared config."""
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            self._write_skill(cwd / ".agents" / "skills" / "ambient", "ambient")
+            explicit = self._write_skill(cwd / "elsewhere" / "explicit", "explicit")
+            config = Config(model="test:stub")
+            options = RunOptions(strict=True, no_web_search=True, no_code_mode=True,
+                                 skills=(str(explicit.parent),), no_skills=True)
+            with patch("paimon.skills.default_skill_dirs") as dirs:
+                parent = Agent.open(cwd=cwd, config=config, run_options=options,
+                                    model_override="test:other")
+                self.addCleanup(parent.close)
+                child = parent._open_child(None)
+                self.addCleanup(child.close)
+            dirs.assert_not_called()
+            self.assertIs(child.run_options, options)
+            self.assertEqual([s.name for s in child.skills], ["explicit"])
+            self.assertNotIn("web_search", child.toolset)
+            self.assertNotIn("run_code", child.toolset)
+            self.assertFalse(child.run_options.safe_commands(child.config))
+            self.assertEqual(child.model_name, "test:other")
+            self.assertEqual(config, Config(model="test:stub"))
 
     async def test_skill_command_is_expanded_and_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

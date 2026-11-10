@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import cli
-from paimon.config import Config
+from paimon.config import Config, RunOptions
 from paimon.session import Session, _project_dir
 from tests.support.agent import stub_model
 
@@ -128,6 +128,11 @@ class WebForwardingTest(CliTestCase):
 
     def test_forwards_textual_debug(self) -> None:
         self.assertIn("--textual-debug", self._serve_command("--web", "--textual-debug"))
+
+    def test_forwards_the_skill_switches(self) -> None:
+        command = self._serve_command("--web", "--skill", "extra", "--no-skills")
+        self.assertIn("--skill extra", command)
+        self.assertIn("--no-skills", command)
 
 
 class TextualDebugCliTest(CliTestCase):
@@ -521,7 +526,7 @@ class HeadlessRunTest(CliTestCase):
 
 
 
-class SkillFlagsTest(unittest.TestCase):
+class RunOptionsFlagsTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -529,7 +534,8 @@ class SkillFlagsTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def _config_after(self, *argv: str) -> Config:
+    def _launched(self, *argv: str) -> tuple[Config, RunOptions]:
+        """The config and run options a headless launch hands on."""
         captured: dict = {}
 
         def fake_run(**kwargs):
@@ -537,23 +543,20 @@ class SkillFlagsTest(unittest.TestCase):
             return 0
 
         config = Config(model="test:stub", skills=["from-config"])
-        with patch("sys.argv", ["paimon", "-p", "hi", *argv]), \
-                patch("paimon.cli.Config.load", return_value=config), \
-                patch("paimon.headless.run", fake_run):
+        with patch("sys.argv", ["paimon", "-p", "hi", *argv]),                 patch("paimon.cli.Config.load", return_value=config),                 patch("paimon.headless.run", fake_run):
             with self.assertRaises(SystemExit):
                 cli.main()
-        return captured["config"]
+        return captured["config"], captured["run_options"]
 
-    def test_skill_paths_extend_the_config_and_no_skills_drops_the_defaults(self) -> None:
-        config = self._config_after("--skill", "a", "--skill", "b/SKILL.md")
-        self.assertEqual(config.skills, ["from-config", "a", "b/SKILL.md"])
-        self.assertTrue(config.include_default_skills)
-        self.assertFalse(self._config_after("--no-skills").include_default_skills)
+    def test_nothing_is_overridden_by_default(self) -> None:
+        self.assertEqual(self._launched()[1], RunOptions())
 
-    def test_no_web_search_clears_the_flag_for_this_run(self) -> None:
-        self.assertTrue(self._config_after().web_search)
-        self.assertFalse(self._config_after("--no-web-search").web_search)
-
-    def test_no_code_mode_clears_the_flag_for_this_run(self) -> None:
-        self.assertTrue(self._config_after().code_mode)
-        self.assertFalse(self._config_after("--no-code-mode").code_mode)
+    def test_flags_become_run_options_and_leave_the_config_alone(self) -> None:
+        config, options = self._launched("--strict", "--no-web-search", "--no-code-mode",
+                                         "--no-skills", "--skill", "a", "--skill", "b/SKILL.md")
+        self.assertEqual(options, RunOptions(strict=True, no_web_search=True, no_code_mode=True,
+                                             skills=("a", "b/SKILL.md"), no_skills=True))
+        self.assertEqual(config, Config(model="test:stub", skills=["from-config"]))
+        self.assertEqual(options.skill_paths(config), ["from-config", "a", "b/SKILL.md"])
+        self.assertFalse(options.safe_commands(config))
+        self.assertFalse(options.code_mode(config))

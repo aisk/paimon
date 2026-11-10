@@ -67,19 +67,19 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.provider_auth(), (None, "sk-old"))
         self.assertEqual(Config.load().provider_auth(), (None, "sk-old"))
 
-    def test_unrelated_save_keeps_a_runtime_override(self) -> None:
-        """paimon --model X assigns the field on the live instance; persisting a
-        theme from the TUI must not swap the running agent back to the stored model."""
+    def test_unrelated_save_leaves_the_other_fields_as_loaded(self) -> None:
+        """Persisting a theme from the TUI must not take in a model another
+        Paimon stored meanwhile, swapping the running agents onto it."""
         config = Config.load()
-        config.save(model="test:stored", api_key="sk-stored")
-        config.model = "test:override"
+        config.save(model="test:mine", api_key="sk-stored")
+        Config.load().save(model="test:theirs")
         config.save(theme="nord")
 
-        self.assertEqual(config.model, "test:override")
+        self.assertEqual(config.model, "test:mine")
         self.assertEqual(config.theme, "nord")
         self.assertEqual(config.provider_auth(), (None, "sk-stored"))
         stored = json.loads(config_path().read_text())
-        self.assertEqual(stored["model"], "test:stored", "the override is not persisted")
+        self.assertEqual(stored["model"], "test:theirs", "the other write is kept on disk")
         self.assertEqual(stored["theme"], "nord")
 
     def test_save_empty_string_clears_too(self) -> None:
@@ -299,11 +299,8 @@ class ConfigSkillsTest(unittest.TestCase):
         self.assertEqual(Config.load().skills, ["~/.claude/skills", "/abs/one"])
         path.write_text(json.dumps({"skills": "not-a-list"}))
         self.assertEqual(Config.load().skills, [])
-        self.assertTrue(Config.load().include_default_skills)
 
     def test_skills_survive_a_save_without_being_written(self) -> None:
-        config = Config.load()
-        config.skills = ["x"]
-        config.model = "test:stub"
+        config = Config(model="test:stub", skills=["x"])
         config.save()
         self.assertNotIn("skills", json.loads(config_path().read_text()))

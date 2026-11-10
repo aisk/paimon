@@ -425,13 +425,22 @@ class SessionPane(Pane):
         self._cache_inputs = 0
         self._cache_reported = False
 
+    def _open_agent(self, session: Session | None = None) -> Agent:
+        """An agent to put in place of this pane's, on ``session`` or a new one.
+
+        Everything but the conversation travels with the pane: the run
+        options, the model it is on, the toolset.
+        """
+        agent = self.agent
+        return Agent.open(cwd=agent.cwd, session=session, confirm=self._confirm, mode=self.mode,
+                          config=agent.config, run_options=agent.run_options,
+                          toolset=agent.toolset, model_override=agent.model_override)
+
     def new_session(self) -> None:
         if self.is_busy:
             return
-        # The toolset travels with the pane, not with the session.
         try:
-            agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
-                               config=self.config, toolset=self.agent.toolset)
+            agent = self._open_agent()
         except SessionError as exc:
             self.transcript.add(Content.from_markup("[$text-error b]Cannot start a new session:[/] $body",
                                                     body=str(exc)))
@@ -455,8 +464,7 @@ class SessionPane(Pane):
             # Copying the log is file I/O of its own and can fail (disk full,
             # permissions) before any agent exists to open.
             forked = self.agent.session.fork()
-            agent = Agent.open(cwd=self.agent.cwd, session=forked, confirm=self._confirm,
-                               mode=self.mode, config=self.config, toolset=self.agent.toolset)
+            agent = self._open_agent(forked)
         except (SessionError, OSError) as exc:
             self.transcript.add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
             return
@@ -493,8 +501,7 @@ class SessionPane(Pane):
             self._focus_input()
             return
         try:
-            agent = Agent.open(cwd=self.agent.cwd, session=labels[choice], confirm=self._confirm,
-                               mode=self.mode, config=self.config, toolset=self.agent.toolset)
+            agent = self._open_agent(labels[choice])
         except SessionError as exc:  # already open elsewhere, or no persisted system prompt
             self.transcript.add(Content.from_markup("[$text-error b]Cannot resume:[/] $body", body=str(exc)))
             return

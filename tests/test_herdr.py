@@ -223,8 +223,7 @@ class AppReportingTest(AppTestCase):
             app.action_cycle_mode()  # read -> auto
             await pilot.pause()
             self.assertIn("auto", recorder.reports[-1].resume)
-            app.config.model = "other-model"
-            app._report_herdr()
+            app._model_picked("other-model")
             resume = recorder.reports[-1].resume
             self.assertEqual(resume[resume.index("--model") + 1], "other-model")
 

@@ -254,7 +254,12 @@ def update_provider(provider: str, fields: dict) -> dict:
 
 @dataclass
 class Config:
-    """Settings owned by whoever constructed them — no module-level state."""
+    """What config.json holds, and nothing else — no module-level state.
+
+    Only load() and save() write its fields (and the TUI's save_config, just
+    ahead of the save it starts), so a field always reads as the user's
+    stored setting. How one run departs from it is a RunOptions.
+    """
 
     model: str | None = None
     # Per-provider credentials: {"zai": {"api_base": ..., "api_key": ...}}.
@@ -284,14 +289,9 @@ class Config:
     # Stands in for the built-in window table on model names it does not know.
     compaction_context_window: int | None = None
     # Extra skill files or directories, on top of the default locations.
-    # Edited by hand (or extended by --skill for one run); never written back.
+    # Edited by hand; never written back.
     skills: list[str] = field(default_factory=list)
-    # Cleared by --no-skills for one run; not a config file setting.
-    include_default_skills: bool = True
-    # Cleared by --no-web-search for one run; not a config file setting.
-    web_search: bool = True
-    # Give the model the run_code tool (see paimon.codemode). Turned off by
-    # "code_mode": false in the config file, or for one run by --no-code-mode.
+    # Give the model the run_code tool (see paimon.codemode).
     code_mode: bool = True
 
     @classmethod
@@ -383,11 +383,44 @@ class Config:
 
         data = _update_file(config_path(), change)
 
-        # Only the fields this call wrote are refreshed from the file. A
-        # runtime override the caller set on the instance (paimon --model X
-        # assigns self.model) must survive an unrelated save, such as the TUI
-        # persisting a theme change.
+        # Only the fields this call wrote are refreshed from the file. What
+        # another Paimon changed in the rest of it waits for the next launch,
+        # so persisting a theme never swaps the model under a running agent.
         for key, _ in passed:
             setattr(self, key, data.get(key, getattr(type(self), key)))
         if auth_passed:
             self.providers = _parse_providers(data.get("providers"))
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    """What this run was launched with on top of the config file.
+
+    Command-line switches that hold for the life of the process and are never
+    written back. One instance travels with the config to every agent the
+    process opens, so a new session, a fork or a subagent runs under the same
+    ones. The defaults override nothing.
+    """
+
+    # --strict: hold even the shell commands safe_commands lets through.
+    strict: bool = False
+    # --no-web-search: no agent gets the web_search tool.
+    no_web_search: bool = False
+    # --no-code-mode: no agent gets run_code, whatever the config says.
+    no_code_mode: bool = False
+    # --skill: skill files or directories loaded on top of the config's.
+    skills: tuple[str, ...] = ()
+    # --no-skills: skip the default skill locations.
+    no_skills: bool = False
+
+    # The settings the config and the run both have a say in, combined here
+    # and nowhere else.
+
+    def safe_commands(self, config: Config) -> bool:
+        return config.safe_commands and not self.strict
+
+    def code_mode(self, config: Config) -> bool:
+        return config.code_mode and not self.no_code_mode
+
+    def skill_paths(self, config: Config) -> list[str]:
+        return [*config.skills, *self.skills]

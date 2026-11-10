@@ -32,7 +32,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestParameters
 
 from . import codemode, compaction, logtext, retry, review
-from .config import Config
+from .config import Config, RunOptions
 from .errors import PaimonError
 from .events import (
     AgentEvent,
@@ -125,17 +125,18 @@ def _settle(slot: ToolReturnPart, result: ToolResult) -> None:
     slot.metadata = metadata or None
 
 
-def _held(toolset: dict[str, Tool] | None, config: Config) -> dict[str, Tool]:
-    """The tools an agent opened with ``toolset`` under ``config`` really holds.
+def _held(toolset: dict[str, Tool] | None, config: Config, options: RunOptions) -> dict[str, Tool]:
+    """The tools an agent opened with ``toolset`` under ``config`` and
+    ``options`` really holds.
 
-    The config's switches are applied here rather than by each caller, so
-    --no-web-search and code mode reach every agent opened with it: new
+    The switches are applied here rather than by each caller, so
+    --no-web-search and code mode reach every agent opened with them: new
     sessions, forks, subagents.
     """
     held = dict(REGISTRY if toolset is None else toolset)
-    if not config.web_search:
+    if options.no_web_search:
         held.pop("web_search", None)
-    if not config.code_mode:
+    if not options.code_mode(config):
         held.pop(codemode.NAME, None)
     if codemode.NAME in held:
         held[codemode.NAME] = codemode.tool(held)
@@ -228,6 +229,7 @@ class Agent:
     def __init__(self, session: Session, system_prompt: str, *, cwd: Path | None = None,
                  confirm: ConfirmFn | None = None, ask: AskFn | None = None,
                  mode: str = "yolo", config: Config | None = None,
+                 run_options: RunOptions | None = None,
                  toolset: dict[str, Tool] | None = None,
                  model_override: str | None = None,
                  skills: Sequence[Skill] = (),
@@ -252,10 +254,12 @@ class Agent:
                          check_model=lambda name: me()._built(name, None))
         self.mode = mode
         self.config = config or Config.load()
-        # Per-agent model choice. One Config instance is shared by every agent
-        # in the process, so writing config.model would repoint all of them;
-        # this overrides the model for this agent alone, credentials included
-        # (they come from the config either way).
+        # What the process was launched with on top of the config. Handed on
+        # to every agent opened from this one.
+        self.run_options = run_options or RunOptions()
+        # Per-agent model choice over the configured one: the model the run
+        # was launched on (--model), or the one a subagent was started on.
+        # Credentials come from the config either way.
         self.model_override = model_override
         # Set by the UI: the hook the loop pulls queued user messages from.
         # None where nobody can type while a turn runs (headless, tests).
@@ -269,7 +273,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.history: list[ModelMessage] = session.messages()
         # This agent's tool set; None means everything in REGISTRY.
-        self.toolset = _held(toolset, self.config)
+        self.toolset = _held(toolset, self.config, self.run_options)
         self.tool_schemas = schemas(self.toolset)
         self._tool_definitions = definitions(self.toolset)
         self._cached_model: tuple[tuple, Model] | None = None
@@ -292,11 +296,15 @@ class Agent:
     def open(cls, cwd: Path | None = None, *, session: Session | None = None,
              confirm: ConfirmFn | None = None, ask: AskFn | None = None,
              mode: str = "yolo", config: Config | None = None,
+             run_options: RunOptions | None = None,
              append_system_prompt: str | None = None,
              toolset: dict[str, Tool] | None = None,
              model_override: str | None = None,
              parent_session_id: str | None = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
+
+        ``run_options`` are the launch switches layered over ``config``;
+        left out, nothing is overridden.
 
         ``append_system_prompt`` is added to the end of a new session's system
         prompt and persisted with it, so a resumed session keeps it. Resuming
@@ -320,10 +328,12 @@ class Agent:
         if session is not None and append_system_prompt:
             raise ValueError("append_system_prompt only applies to a new session")
         config = config or Config.load()
+        run_options = run_options or RunOptions()
         skills, skill_diagnostics = discover_skills(
-            cwd, extra_paths=config.skills, include_defaults=config.include_default_skills)
+            cwd, extra_paths=run_options.skill_paths(config),
+            include_defaults=not run_options.no_skills)
         # The prompt only mentions tools this agent will actually be offered.
-        tool_names = frozenset(_held(toolset, config))
+        tool_names = frozenset(_held(toolset, config, run_options))
         is_new = session is None
         if session is None:
             session = Session.create(cwd, parent_session_id)
@@ -349,7 +359,8 @@ class Agent:
                 if system_prompt != stored:
                     session.append_system_prompt(system_prompt, appended=appended)
             return cls(session, system_prompt, cwd=cwd, confirm=confirm, ask=ask, mode=mode,
-                       config=config, toolset=toolset, model_override=model_override,
+                       config=config, run_options=run_options, toolset=toolset,
+                       model_override=model_override,
                        skills=skills, skill_diagnostics=skill_diagnostics)
         except BaseException:
             session.unlock()
@@ -653,7 +664,7 @@ class Agent:
         None when it may run, else what the model is told."""
         return await authorize(name, args, self.mode, self.cwd, self.confirm,
                                self._review, self.toolset,
-                               safe_commands=self.config.safe_commands,
+                               safe_commands=self.run_options.safe_commands(self.config),
                                ctx=self.tool_context)
 
     async def _review(self, name: str, args: dict) -> str | None:
@@ -763,7 +774,8 @@ class Agent:
             return await confirm_for(self.confirm, origin, name, args)
 
         child = Agent.open(
-            cwd=self.cwd, mode=self.mode, config=self.config, confirm=confirm,
+            cwd=self.cwd, mode=self.mode, config=self.config,
+            run_options=self.run_options, confirm=confirm,
             # Narrowed from this agent's own set, so a parent that was given
             # less never hands more to what it starts.
             toolset=without(self.toolset, SUBAGENT_DENIED),
@@ -1214,7 +1226,7 @@ class Agent:
                 yield ToolStart(call.tool_call_id, name, args)
                 result = await run_tool(name, args, self.cwd, self.mode,
                                         self.confirm, self.toolset,
-                                        safe_commands=self.config.safe_commands,
+                                        safe_commands=self.run_options.safe_commands(self.config),
                                         ctx=self.tool_context,
                                         review=self._review)
                 _settle(slot, result)

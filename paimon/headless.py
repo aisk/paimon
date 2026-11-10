@@ -64,7 +64,7 @@ from .events import (
     ToolEnd,
     ToolStart,
 )
-from .config import Config
+from .config import Config, RunOptions
 from .mentions import expand_mentions
 from .skills import Skill, expand_skill_command
 from .session import Session, SessionError, resume_hint
@@ -469,8 +469,8 @@ def _relax_encoding() -> None:
 
 def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Session | None,
         output_format: str = "text", config: Config | None = None,
-        model: str | None = None, timeout: float | None = None,
-        max_tool_calls: int | None = None,
+        run_options: RunOptions | None = None, model: str | None = None,
+        timeout: float | None = None, max_tool_calls: int | None = None,
         append_system_prompt: str | None = None) -> int:
     """Run one prompt to its end and return the process exit code.
 
@@ -488,13 +488,11 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Session | Non
         config = config or Config.load()
     except Exception as exc:  # corrupt config file, unreadable config home
         return fail(str(exc), output_format)
-    if model:
-        config.model = model
     renderer = _make_renderer(output_format, config)
 
     # Checked before constructing the Agent, which would otherwise create a
     # session file and probe the environment for a run that cannot happen.
-    if not config.model:
+    if not (model or config.model):
         renderer.begin()
         renderer.finish(subtype="error", error="no model configured; run 'paimon' once to log in")
         return 1
@@ -505,6 +503,7 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Session | Non
         # process started there would be one nobody ever kills. Agents are
         # fine: the run waits for them.
         agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
+                           run_options=run_options, model_override=model,
                            append_system_prompt=append_system_prompt,
                            toolset=without(REGISTRY, (*BACKGROUND_TOOLS, *INTERACTIVE_TOOLS)))
         text = build_prompt(prompt, piped, cwd, agent.skills)
@@ -523,7 +522,7 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Session | Non
         renderer.finish(subtype="error", error=f"{type(exc).__name__}: {exc}")
         return 1
 
-    renderer.begin(agent.session.id, config.model, mode, cwd, log_path=agent.session.path)
+    renderer.begin(agent.session.id, agent.model_name, mode, cwd, log_path=agent.session.path)
     for diagnostic in agent.skill_diagnostics:
         _write(sys.stderr, f"paimon: skill warning: {diagnostic.path}: {diagnostic.message}\n")
     # Auto-compaction silently doing nothing looks exactly like it working —

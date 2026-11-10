@@ -12,7 +12,7 @@ from . import telemetry
 from . import textual_debug
 from .agent import Agent
 from .app import PaimonApp
-from .config import Config
+from .config import Config, RunOptions
 from .errors import PaimonError
 from .llm import split_model_string
 from .session import SessionError, resume_hint
@@ -114,28 +114,19 @@ def main() -> None:
 
     if args.continue_latest and args.resume is not None:
         parser.error("--continue and --resume cannot be combined")
-    # Loaded here, once: everything downstream just carries the instance.
+    # Loaded here, once: everything downstream just carries the instance, and
+    # the run options beside it.
     try:
         config = Config.load()
-        # Per-run skill options ride on the shared config like --model does, so
-        # every Agent.open in the process (new session, fork, child agents) sees them.
-        config.skills = [*config.skills, *args.skills]
-        if args.no_skills:
-            config.include_default_skills = False
-    except ValueError as exc:
-        parser.error(str(exc))
     except PaimonError as exc:
         if args.output_format != "text":
             # Machine formats promise init/result lines even for this failure.
             sys.exit(headless_mode.fail(str(exc), args.output_format))
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)
-    if args.strict:
-        config.safe_commands = False  # session-only; save() never persists this key
-    if args.no_web_search:
-        config.web_search = False  # session-only, like --strict
-    if args.no_code_mode:
-        config.code_mode = False  # session-only as well
+    run_options = RunOptions(strict=args.strict, no_web_search=args.no_web_search,
+                             no_code_mode=args.no_code_mode, skills=tuple(args.skills),
+                             no_skills=args.no_skills)
     if args.model is not None:
         try:
             split_model_string(args.model)
@@ -148,23 +139,17 @@ def main() -> None:
             parser.error("--web and --print cannot be combined")
         from textual_serve.server import Server
 
-        flags = ["--tui"]
-        if args.resume is not None:
-            flags += ["--resume"] if args.resume == "" else ["--resume", args.resume]
-        if args.continue_latest:
-            flags += ["--continue"]
+        # The same switches a resumed session is relaunched with, so none of
+        # them can be forgotten here: --skill and --no-skills once were.
+        flags = ["--tui", *_resume_flags(args)]
         if args.mode != "yolo":
             flags += ["--mode", args.mode]
-        if args.strict:
-            flags += ["--strict"]
-        if args.no_web_search:
-            flags += ["--no-web-search"]
-        if args.no_code_mode:
-            flags += ["--no-code-mode"]
-        if args.textual_debug:
-            flags += ["--textual-debug"]
         if args.model:
             flags += ["--model", args.model]
+        if args.continue_latest:
+            flags += ["--continue"]
+        if args.resume is not None:
+            flags += ["--resume"] if args.resume == "" else ["--resume", args.resume]
         command = shlex.join([sys.executable, "-m", "paimon", *flags])
         telemetry.record_launch("web", model=args.model or config.model)
         Server(command, port=args.port).serve()
@@ -212,20 +197,20 @@ def main() -> None:
         sys.exit(headless_mode.run(
             prompt=args.prompt or "", piped=piped, cwd=Path.cwd(), mode=args.mode,
             session=resume_session, output_format=args.output_format, config=config,
-            model=args.model, timeout=args.timeout, max_tool_calls=args.max_tool_calls,
-            append_system_prompt=args.append_system_prompt,
+            run_options=run_options, model=args.model, timeout=args.timeout,
+            max_tool_calls=args.max_tool_calls, append_system_prompt=args.append_system_prompt,
         ))
 
-    if args.model:
-        config.model = args.model
     # The --tui relaunch under --web was already counted by the server.
     if not args.tui:
-        telemetry.record_launch("tui", model=config.model)
+        telemetry.record_launch("tui", model=args.model or config.model)
     debug_bridge = textual_debug.TextualDebugBridge() if args.textual_debug else None
     toolset = {**REGISTRY, **debug_bridge.toolset()} if debug_bridge is not None else None
     try:
+        # --model is the first agent's own; the app hands it on to the
+        # conversations opened after it, until a model is picked in the app.
         agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config,
-                           toolset=toolset)
+                           run_options=run_options, toolset=toolset, model_override=args.model)
     except SessionError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
         sys.exit(1)

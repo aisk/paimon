@@ -140,6 +140,11 @@ class PaimonApp(App):
         self._persist_theme_changes = False
         super().__init__()
         self.config = agent.config
+        # What a conversation opened here starts with besides the config: the
+        # run options, and the model the run was launched on (--model) until
+        # one is picked in the app.
+        self._run_options = agent.run_options
+        self._model_override = agent.model_override
         # Set only when running in a Herdr pane. ``resume_flags`` are the
         # launch options a resumed session needs to behave like this one.
         self._herdr = reporter
@@ -283,10 +288,9 @@ class PaimonApp(App):
             return
         session_id = pane.agent.session.id
         resume = [herdr.NAME, "--resume", session_id, "--mode", pane.mode]
-        # Read now rather than at launch: it follows a login made from inside
-        # the app.
-        if self.config.model:
-            resume += ["--model", self.config.model]
+        # Read now rather than at launch: it follows a model picked in the app.
+        if pane.agent.model_name:
+            resume += ["--model", pane.agent.model_name]
         self._herdr.report(herdr.Report(state, session_id, (*resume, *self._resume_flags)))
 
     def focus_pane_widget(self, pane: Pane, widget: Widget) -> None:
@@ -387,7 +391,7 @@ class PaimonApp(App):
                 "[$text-warning]Already at $max panes[/]", max=str(MAX_PANES)))
             return
         try:
-            agent = Agent.open(cwd=source.cwd, mode=source.mode, config=self.config)
+            agent = self._open_agent(source)
         except SessionError as exc:
             self.pane.notice(Content.from_markup(
                 "[$text-error b]Cannot open a pane:[/] $body", body=str(exc)))
@@ -435,9 +439,19 @@ class PaimonApp(App):
         await pane.remove()
         self._sync_panes()
 
+    def _open_agent(self, beside: Pane) -> Agent:
+        """A new conversation for a pane of its own, where ``beside`` works."""
+        return Agent.open(cwd=beside.cwd, mode=beside.mode, config=self.config,
+                          run_options=self._run_options, model_override=self._model_override)
+
+    @property
+    def _model(self) -> str | None:
+        """The model a conversation opened now starts on."""
+        return self._model_override or self.config.model
+
     async def _replace_last_pane(self, closed: Pane) -> None:
         try:
-            agent = Agent.open(cwd=closed.cwd, mode=closed.mode, config=self.config)
+            agent = self._open_agent(closed)
         except SessionError:
             self.exit()  # nothing left to show, and no session to show it in
             return
@@ -494,13 +508,17 @@ class PaimonApp(App):
                 return
 
     def save_config(self, **fields) -> None:
-        """Persist config fields without blocking or crashing the UI.
+        """Change config fields, and persist them without blocking or crashing the UI.
 
+        The instance changes up front: the UI must reflect the change at once.
         save() waits on the cross-process lock (up to 10s when another
         instance is stuck) and fsyncs twice, and it raises ConfigError on a
         corrupt file, so it runs on a worker thread and a failure lands as a
         notice instead of an exception tearing down the app.
         """
+        for key, value in fields.items():
+            setattr(self.config, key, value)
+
         def _write() -> None:
             try:
                 self.config.save(**fields)
@@ -523,7 +541,7 @@ class PaimonApp(App):
 
     def on_mount(self) -> None:
         self._sync_panes()
-        if not self.config.model:
+        if not self._model:
             # Credentials left by an earlier login only need a model chosen.
             pane = self._session()
             if pane is not None and pane.agent.available_models():
@@ -588,10 +606,7 @@ class PaimonApp(App):
             self.pane.interrupt()
 
     def action_toggle_reasoning(self) -> None:
-        # Flipped on the instance up front: the write happens on a worker
-        # thread, and the UI must reflect the toggle immediately.
-        self.config.show_reasoning = not self.config.show_reasoning
-        self.save_config(show_reasoning=self.config.show_reasoning)
+        self.save_config(show_reasoning=not self.config.show_reasoning)
         state = "streamed live" if self.config.show_reasoning else "folded"
         self.pane.notice(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
 
@@ -601,8 +616,7 @@ class PaimonApp(App):
         Config is process-wide, so one switch covers all panes; turning it off
         also drops recaps already armed, which check the flag only when armed.
         """
-        self.config.recap_enabled = not self.config.recap_enabled
-        self.save_config(recap_enabled=self.config.recap_enabled)
+        self.save_config(recap_enabled=not self.config.recap_enabled)
         if not self.config.recap_enabled:
             for pane in self.sessions:
                 pane._cancel_recap()
@@ -679,10 +693,14 @@ class PaimonApp(App):
     def _model_picked(self, model: str | None) -> None:
         # A turn may have started while the picker was up.
         if model and not self._config_is_busy():
-            self.config.model = model
+            # The model picked is the configured one from now on, and every
+            # conversation moves to it, those started on --model included.
+            self._model_override = None
+            for pane in self.sessions:
+                pane.agent.model_override = None
             self.save_config(model=model)
             self.pane.notice(Content.from_markup("[$text-muted]Model: $model[/]", model=model))
-        elif not self.config.model:
+        elif not self._model:
             self.pane.notice(Content.from_markup("[$text-warning]No model configured.[/]"))
             self.exit()
         self.refresh_statusbar()
