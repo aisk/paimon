@@ -130,17 +130,22 @@ class ModelRetry:
     error: str
 
 
-# ---- Replay-only events (history has no deltas, so these mark structure) ----
+# ---- Events that stand for a message, live and on replay ----------------------
 
 
 @dataclass
 class UserInput:
+    """Something the user typed. Yielded live for each queued prompt a turn
+    takes (the driver emits the turn's own one before it starts), and rebuilt
+    from every user message on replay."""
+
     text: str
 
 
 @dataclass
 class CompactionNotice:
-    """A compaction checkpoint encountered while replaying history."""
+    """A compaction checkpoint encountered while replaying history. Replay
+    only: live, a compaction reports itself as ContextCompacted."""
 
 
 @dataclass
@@ -199,7 +204,7 @@ def _nested_calls(part: ToolReturnPart) -> list[dict]:
 
 
 def _returned(part: ToolReturnPart) -> ToolResult:
-    """A persisted return part as the result it recorded; see _settle."""
+    """A persisted return part as the result it recorded; see agent._settled."""
     detail = part.metadata.get("detail") if isinstance(part.metadata, dict) else None
     return ToolResult(str(part.content or "(no output)"), part.outcome,
                       detail if isinstance(detail, str) else "")

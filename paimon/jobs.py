@@ -190,11 +190,6 @@ class Jobs(Mapping[str, Job]):
         return next((job.title(job_id) for job_id, job in self._table.items()
                      if job.agent is agent), None)
 
-    def take_notices(self) -> list[str]:
-        """The waiting notices, taken: each one is handed over once."""
-        notices, self.notices = self.notices, []
-        return notices
-
     @property
     def agents_running(self) -> bool:
         """Whether any agent this one started has yet to report."""

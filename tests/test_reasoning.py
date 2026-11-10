@@ -201,3 +201,71 @@ class StripForeignThinkingTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(_strip_foreign_thinking([foreign], model), [])
 
+
+
+class OwnThinkingUnderAnotherIdTest(unittest.IsolatedAsyncioTestCase):
+    """A provider reports the id it served, which for an alias is not the one
+    configured; the model's own thinking must still go back as its own."""
+
+    def _model(self) -> ZaiModel:
+        def handler(request: httpx.Request) -> httpx.Response:  # never called
+            raise AssertionError
+
+        return _zai_model(handler)
+
+    def test_a_dated_snapshot_of_the_configured_model_is_the_same_model(self) -> None:
+        for reported in ("glm-5.2-20260115", "glm-5.2-2026-01-15", "glm-5.2@20260115"):
+            with self.subTest(reported):
+                own = ModelResponse(
+                    parts=[ThinkingPart(content="keep me", signature="sig"), TextPart(content="a")],
+                    model_name=reported, provider_name="zai")
+                self.assertEqual(_strip_foreign_thinking([own], self._model()), [own])
+
+    def test_an_id_the_model_has_reported_is_the_same_model(self) -> None:
+        own = ModelResponse(parts=[ThinkingPart(content="keep me"), TextPart(content="a")],
+                            model_name="glm-5.2-turbo-preview", provider_name="zai")
+        model = self._model()
+        self.assertNotEqual(_strip_foreign_thinking([own], model), [own])
+        self.assertEqual(_strip_foreign_thinking([own], model, {"glm-5.2-turbo-preview"}), [own])
+
+    def test_the_same_name_from_another_provider_is_still_foreign(self) -> None:
+        other = ModelResponse(parts=[ThinkingPart(content="convert me", signature="sig"),
+                                     TextPart(content="a")],
+                              model_name="glm-5.2", provider_name="openrouter")
+        stripped = _strip_foreign_thinking([other], self._model())
+        self.assertFalse(any(isinstance(p, ThinkingPart) for p in stripped[0].parts))
+
+    async def test_thinking_reported_under_an_alias_goes_back_mid_turn(self) -> None:
+        requests: list[dict] = []
+
+        def chunk(delta: dict, finish: str | None = None) -> dict:
+            return {**_chunk(delta, finish), "model": "glm-5.2-turbo-preview"}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                chunks = [
+                    chunk({"role": "assistant", "reasoning_content": "I should add a todo."}),
+                    chunk({"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {
+                        "name": "write_todos",
+                        "arguments": '{"todos": [{"content": "x", "status": "pending"}]}'}}]}),
+                    chunk({}, finish="tool_calls"),
+                ]
+            else:
+                chunks = [chunk({"role": "assistant", "content": "done"}), chunk({}, finish="stop")]
+            return httpx.Response(200, content=_sse(chunks), headers={"content-type": "text/event-stream"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=Config(model="zai/glm-5.2"))
+            self.addCleanup(agent.close)
+
+            # The real provider pipeline runs only through the MockTransport above.
+            with override_allow_model_requests(True), \
+                    patch("paimon.agent.build_model", return_value=_zai_model(handler)):
+                _ = [event async for event in agent.run("plan it")]
+
+            assistants = [m for m in requests[1]["messages"] if m["role"] == "assistant"]
+            self.assertEqual(assistants[0].get("reasoning_content"), "I should add a todo.")

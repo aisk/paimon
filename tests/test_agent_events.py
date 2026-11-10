@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -686,3 +687,154 @@ class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events, [], "no events, and no model request either")
             self.assertEqual(session.path.read_bytes(), before,
                              "nothing was persisted")
+
+
+class ClosedAtAnyYieldTest(unittest.IsolatedAsyncioTestCase):
+    """A turn may end for good at any of its yields: its caller is cancelled
+    while it renders the event, and closes the generator. Wherever that
+    happens, the history must be one the next request can be built on, and
+    the one the log replays to."""
+
+    @staticmethod
+    def _model() -> FunctionModel:
+        requests = 0
+
+        async def stream(messages, info):
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                yield {0: DeltaToolCall(name="read_file", json_args='{"path": "missing.txt"}',
+                                        tool_call_id="call-1"),
+                       1: DeltaToolCall(name="write_todos", tool_call_id="call-2",
+                                        json_args='{"todos": [{"content": "x", "status": "pending"}]}')}
+            else:
+                yield "done"
+
+        return FunctionModel(stream_function=stream)
+
+    async def _run_until(self, cwd: Path, stop: int | None) -> tuple[Agent, list, bool]:
+        """Run one turn, closing it after its ``stop``-th event; returns the
+        agent, the events seen, and whether the queued prompts were taken."""
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+        self.addCleanup(agent.close)
+        # A job reported before the turn, and two prompts queued during its
+        # first step: taken from the queue together, so neither may be lost.
+        agent.jobs.notices.append("a1f2 finished")
+        asked = 0
+        taken = False
+
+        def pending() -> list[str]:
+            nonlocal asked, taken
+            asked += 1
+            if asked == 2:
+                taken = True
+                return ["queued A", "queued B"]
+            return []
+
+        agent.pending = pending
+        seen: list = []
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with contextlib.aclosing(agent.run("go")) as events:
+                async for event in events:
+                    seen.append(event)
+                    if len(seen) == stop:
+                        break
+        return agent, seen, taken
+
+    def _assert_sound(self, agent: Agent, taken: bool, where: str) -> None:
+        history = agent.history
+        for index, message in enumerate(history):
+            calls = [part.tool_call_id for part in getattr(message, "parts", [])
+                     if isinstance(part, ToolCallPart)]
+            if not calls:
+                continue
+            following = history[index + 1] if index + 1 < len(history) else None
+            answered = {part.tool_call_id for part in getattr(following, "parts", [])
+                        if isinstance(part, ToolReturnPart)}
+            self.assertLessEqual(set(calls), answered, f"a tool call left unanswered {where}")
+        self.assertEqual(history, agent.session.messages(), f"live and replay differ {where}")
+        prompts = [part.content for message in history for part in message.parts
+                   if isinstance(part, UserPromptPart) and synthetic_kind(message) is None]
+        self.assertIn("go", prompts, f"the prompt already shown is missing {where}")
+        if taken:
+            self.assertLessEqual({"queued A", "queued B"}, set(prompts),
+                                 f"a queued prompt was taken and lost {where}")
+        ends = [record for record in session_records(agent.session)
+                if record["type"] == "turn_end"]
+        self.assertEqual(len(ends), 1, f"one terminal record {where}")
+
+    async def test_the_history_is_sound_at_every_yield(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, everything, _ = await self._run_until(Path(directory), None)
+        kinds = [type(event) for event in everything]
+        # The run this test means to cover: a notice, a stats line after a
+        # tool-call response, the batch, the queued prompts, the answer.
+        for kind in (JobNotice, RequestStats, ToolStart, TodosUpdate, UserInput, TextDelta, TurnEnd):
+            self.assertIn(kind, kinds)
+
+        for stop in range(1, len(everything) + 1):
+            with self.subTest(stop=stop, at=kinds[stop - 1].__name__):
+                with tempfile.TemporaryDirectory() as directory:
+                    agent, seen, taken = await self._run_until(Path(directory), stop)
+                    self._assert_sound(agent, taken, f"after {type(seen[-1]).__name__} #{stop}")
+
+    async def test_closed_while_a_delta_renders_keeps_the_partial_answer(self) -> None:
+        """The usual interrupt: the caller is cancelled while it draws a text
+        delta, and closes the turn."""
+        async def stream(messages, info):
+            yield "half an "
+            yield "answer"
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+            self.addCleanup(agent.close)
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                async with contextlib.aclosing(agent.run("go")) as events:
+                    async for event in events:
+                        if isinstance(event, TextDelta):
+                            break
+            ends = [record for record in session_records(session) if record["type"] == "turn_end"]
+            self.assertEqual([record["outcome"] for record in ends], ["interrupted"])
+            self.assertEqual(ends[0].get("partial_text"), "half an ")
+            self.assertIsInstance(agent.session.messages()[-1], ModelRequest)
+
+
+class LogFirstTest(unittest.IsolatedAsyncioTestCase):
+    """A write to the log that fails leaves the history as the log has it."""
+
+    def _open(self, cwd: Path) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+        self.addCleanup(agent.close)
+        return agent
+
+    async def test_a_message_the_log_refused_is_not_in_the_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory))
+            agent.jobs.notices.extend(["a1f2 finished", "b3c4 finished"])
+            with patch.object(Session, "append", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    agent.record_shell("ls", "a.txt")
+                with self.assertRaises(OSError):
+                    [event async for event in agent.run(None)]
+            self.assertEqual(agent.history, [])
+            self.assertEqual(agent.jobs.notices, ["a1f2 finished", "b3c4 finished"],
+                             "the notices wait for a write that works")
+
+    async def test_a_result_the_log_refused_is_not_in_the_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory))
+            with patch("paimon.agent.build_model",
+                       return_value=stub_model("read_file", '{"path": "missing.txt"}')), \
+                    patch.object(Session, "append_tool_result", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    [event async for event in agent.run("go")]
+            self.assertEqual(agent.history, agent.session.messages())
+            self.assertEqual(agent.history[-1].parts[0].outcome, "interrupted")

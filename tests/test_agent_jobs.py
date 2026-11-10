@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
@@ -19,7 +19,7 @@ from paimon.agent import Agent, AgentBusyError
 from paimon.events import JobNotice, TextDelta, ToolEnd, UserInput
 from paimon.config import Config
 from paimon.session import Session, job_text, synthetic_kind
-from paimon.tools.permissions import confirm_origin
+from paimon.tools.permissions import USER_DENIAL, confirm_origin
 from paimon.tools.result import ToolError
 from tests.support.agent import make_session, spawning_model, stub_model
 from tests.support.turns import FakeCommand, settle
@@ -514,6 +514,33 @@ class ChildConfirmTest(JobsTestCase):
         await self._child_writes(agent)
         self.assertFalse(self.out.exists())
         self.assertIn("finished", agent.jobs.notices[0], "the child carries on and reports")
+
+    async def test_with_nobody_to_ask_the_child_hears_what_the_parent_would(self) -> None:
+        """Not "User denied this operation.": no user was asked."""
+        agent = self.agent(mode="auto")
+        child = agent._open_child(None)
+        self.addCleanup(child.close)
+        args = {"path": "../out.txt", "content": "hi"}
+
+        with patch.object(Agent, "_review_model", return_value=stub_model()), \
+                patch("paimon.review.judge", AsyncMock(side_effect=TimeoutError())):
+            refusals = [await who._review("write_file", args) for who in (agent, child)]
+        self.assertEqual(refusals[0], refusals[1])
+        self.assertEqual(refusals[0],
+                         "Denied: the auto mode reviewer was unavailable (TimeoutError).")
+
+        # A pane adopting the parent later is who the child asks from then on.
+        asked: list = []
+
+        async def confirm(name: str, args: dict) -> bool:
+            asked.append(name)
+            return False
+
+        agent.confirm = confirm
+        with patch.object(Agent, "_review_model", return_value=stub_model()), \
+                patch("paimon.review.judge", AsyncMock(side_effect=TimeoutError())):
+            self.assertEqual(await child._review("write_file", args), USER_DENIAL)
+        self.assertEqual(asked, ["write_file"])
 
 
 class BackgroundCommandTest(JobsTestCase):

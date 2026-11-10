@@ -65,13 +65,14 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_a_cancelled_compaction_leaves_history_and_log_alone(self) -> None:
-        """Cancelled while measuring the compacted context, the last await
-        before it would be committed."""
+        """Cancelled while compact() measures the compacted context, the last
+        await before it would be committed."""
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
-            agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+            agent = Agent.open(cwd=cwd, session=session,
+                               config=Config(model="test:stub", compaction_keep_recent_tokens=1))
             self.addCleanup(agent.close)
             recent = ModelResponse(parts=[TextPart(content="recent")])
             agent._append_message(ModelRequest(parts=[UserPromptPart(content="old")]))
@@ -87,9 +88,10 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
                     release.wait(5)
                 return count_tokens(messages, *args, **kwargs)
 
-            result = compaction.CompactionResult("checkpoint", [recent], 100, 0)
-            with patch("paimon.agent.build_model", return_value=stub_model()), \
-                    patch("paimon.agent.compaction.compact", new=AsyncMock(return_value=result)), \
+            def summarize(messages, info) -> ModelResponse:
+                return ModelResponse(parts=[TextPart(content="checkpoint")])
+
+            with patch("paimon.agent.build_model", return_value=FunctionModel(summarize)), \
                     patch("paimon.compaction.count_tokens", side_effect=count):
                 task = asyncio.ensure_future(agent.compact_now())
                 while not measuring.is_set():

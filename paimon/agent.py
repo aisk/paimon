@@ -8,10 +8,11 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import re
 import time
 import weakref
 from pathlib import Path
-from typing import AsyncIterator, Callable, Sequence
+from typing import AsyncIterator, Callable, Collection, Sequence
 
 from pydantic_ai.direct import model_request_stream
 from pydantic_ai.messages import (
@@ -108,21 +109,23 @@ RECAP_PROMPT = (
 )
 
 
-def _settle(slot: ToolReturnPart, result: ToolResult) -> None:
-    """Fill a call's pre-seeded return part with how it went.
+def _settled(slot: ToolReturnPart, result: ToolResult,
+             metadata: dict | None = None) -> ToolReturnPart:
+    """A call's pre-seeded return part filled with how it went, as a copy.
 
     The status is the part's outcome, so the log records it rather than
     leaving it to be guessed from the text. A detail that says more than the
     status ("exit 2") goes in the part's metadata, which is persisted but
     never sent to the model, so a replay renders it exactly as live did.
+    ``metadata`` is anything else to keep there (a script's nested calls).
     """
-    slot.content = result.text
-    slot.outcome = result.status
-    metadata = dict(slot.metadata) if isinstance(slot.metadata, dict) else {}
-    metadata.pop("detail", None)
+    kept = dict(slot.metadata) if isinstance(slot.metadata, dict) else {}
+    kept.update(metadata or {})
+    kept.pop("detail", None)
     if result.detail != ("" if result.ok else result.status):
-        metadata["detail"] = result.detail
-    slot.metadata = metadata or None
+        kept["detail"] = result.detail
+    return dataclasses.replace(slot, content=result.text, outcome=result.status,
+                               metadata=kept or None)
 
 
 def _held(toolset: dict[str, Tool] | None, config: Config, options: RunOptions) -> dict[str, Tool]:
@@ -143,7 +146,30 @@ def _held(toolset: dict[str, Tool] | None, config: Config, options: RunOptions) 
     return held
 
 
-def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[ModelMessage]:
+# A dated snapshot id that a provider reports in place of the alias it was
+# asked for: "claude-sonnet-4-5" answers as "claude-sonnet-4-5-20250929",
+# "gpt-5" as "gpt-5-2025-08-07", and Vertex names the snapshot with an "@".
+_SNAPSHOT_SUFFIX = re.compile(r"[-@]\d{4}-?\d{2}-?\d{2}$")
+
+
+def _same_model(reported: str | None, model: Model, aliases: Collection[str] = ()) -> bool:
+    """Whether a response reported as ``reported`` came from ``model``.
+
+    Not plain equality: a provider reports the id it actually served, which
+    for an alias is a dated snapshot, and taking the agent's own responses
+    for foreign ones would drop the signatures some providers insist on
+    getting back mid tool loop. ``aliases`` are the ids ``model`` has been
+    seen reporting, which covers aliasing schemes no suffix rule knows.
+    """
+    if reported is None:
+        return False
+    if reported == model.model_name or reported in aliases:
+        return True
+    return _SNAPSHOT_SUFFIX.sub("", reported) == _SNAPSHOT_SUFFIX.sub("", model.model_name)
+
+
+def _strip_foreign_thinking(history: list[ModelMessage], model: Model,
+                            aliases: Collection[str] = ()) -> list[ModelMessage]:
     """Adapt thinking parts produced by a different provider/model.
 
     Preserved thinking is only valid replayed verbatim to the model that
@@ -153,14 +179,20 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
     provider that did not produce them (cf. pi's transformMessages, which
     converts rather than deletes readable thinking).
 
+    The provider has to match, as pydantic-ai's own check does (a part's
+    provider_name against the model's system), and so does the model, up to
+    the snapshot ids and ``aliases`` _same_model accepts: an OpenAI-compatible
+    provider takes reasoning_content sent back as the current model's own
+    thinking, whichever of its models wrote it.
+
     Only the request being built is touched; the persisted history keeps the
     original parts.
     """
-    current = (model.system, model.model_name)
     sanitized: list[ModelMessage] = []
     for message in history:
         if (isinstance(message, ModelResponse)
-                and (message.provider_name, message.model_name) != current
+                and not (message.provider_name == model.system
+                         and _same_model(message.model_name, model, aliases))
                 and any(isinstance(part, ThinkingPart) for part in message.parts)):
             parts = []
             for part in message.parts:
@@ -209,6 +241,38 @@ def _failures_as_text(history: list[ModelMessage]) -> list[ModelMessage]:
 # ready-made request is one paimon assembled (a "!" shell run) and is appended
 # verbatim, since @path in a command's output is output, not a mention.
 PendingFn = Callable[[], list[str | ModelRequest]]
+
+
+class _ParentConfirm:
+    """A subagent's confirm hook: whoever answers for its parent, asked per call.
+
+    Nothing a child does is put on screen by itself; a UI that shows the child
+    replaces this hook with its own. Until then the parent's hook answers,
+    looked up on every call since a pane may adopt the parent later. The
+    request is marked with the child's title, so the parent's UI can say it
+    is not the parent's own call; the job is looked up per call too, because
+    its id is only given once the child is open.
+
+    Falsy while the parent has nobody to ask (headless), the way a None hook
+    is: the child is then refused exactly as the parent would be, with the
+    reviewer's refusal rather than a user denial nobody gave.
+    """
+
+    def __init__(self, parent: "Agent") -> None:
+        self._parent = parent
+        # Weak, like the jobs' hold on the parent: this hook lives on the
+        # child, and a strong reference back would make the child a cycle.
+        self.child: "weakref.ReferenceType[Agent] | None" = None
+
+    def __bool__(self) -> bool:
+        return bool(self._parent.confirm)
+
+    async def __call__(self, name: str, args: dict) -> bool:
+        confirm = self._parent.confirm
+        if not confirm:
+            return False
+        origin = self._parent.jobs.title_of(self.child and self.child()) or "agent"
+        return await confirm_for(confirm, origin, name, args)
 
 
 class Agent:
@@ -278,6 +342,11 @@ class Agent:
         self._tool_definitions = definitions(self.toolset)
         self._cached_model: tuple[tuple, Model] | None = None
         self._cached_review_model: tuple[tuple, Model] | None = None
+        # The ids each model has reported its responses under, keyed by
+        # (system, configured name): an alias answers as whatever it points
+        # to, and those responses are still the model's own (see
+        # _strip_foreign_thinking).
+        self._reported_ids: dict[tuple[str, str], set[str]] = {}
         # Refusals in a row from the auto-mode reviewer; see _review.
         self._review_blocks = 0
         # (history length, provider-reported tokens) after the last completed
@@ -445,13 +514,25 @@ class Agent:
     # replaying the session log would produce.
 
     def _append_message(self, message: ModelMessage) -> str:
+        # The log first: a write that fails then leaves both as they were,
+        # where the other order would leave a message the log never got.
+        record_id = self.session.append_message(message)
         self.history.append(message)
-        return self.session.append_message(message)
+        return record_id
 
-    def _persist_slot(self, record_id: str, index: int, request: ModelRequest) -> None:
-        """Persist slot ``index`` of a tool request already present in
-        ``self.history``, after its result was filled in place."""
-        self.session.append_tool_result(record_id, index, request)
+    def _settle_slot(self, record_id: str, index: int, request: ModelRequest,
+                     result: ToolResult, metadata: dict | None = None) -> None:
+        """Fill slot ``index`` of a tool request already present in
+        ``self.history`` with ``result``, and persist that one slot.
+
+        The log first, then the history, as in _append_message: a write that
+        fails leaves the placeholder in both.
+        """
+        part = _settled(request.parts[index], result, metadata)
+        parts = list(request.parts)
+        parts[index] = part
+        self.session.append_tool_result(record_id, index, dataclasses.replace(request, parts=parts))
+        request.parts[index] = part
 
     async def _maybe_compact(self, *, force: bool = False) -> compaction.CompactionResult | None:
         """Compact the context if it is close to full.
@@ -486,13 +567,11 @@ class Agent:
         )
         if result is None:
             return None
-        # Measured before anything is committed, the way count_context_tokens
-        # would measure it with no anchor. This is the last await: the commit
-        # below runs in one go, so a compaction cancelled at any point leaves
-        # the history and the log as they were, and nothing can observe it
-        # half done.
-        tokens_after = await asyncio.to_thread(
-            compaction.count_tokens, list(result.messages), self.tool_schemas, self.system_prompt)
+        # compact() already measured the new context (tokens_after), the way
+        # count_context_tokens would with no anchor, and that was the last
+        # await: the commit below runs in one go, so a compaction cancelled at
+        # any point leaves the history and the log as they were, and nothing
+        # can observe it half done.
 
         # Mirrors how Session.messages() replays a compaction record, so the
         # append-message invariant (see _append_message) still holds afterwards.
@@ -501,7 +580,6 @@ class Agent:
         self.history = result.messages
         # The provider's count described the old context.
         self._usage_anchor = None
-        result.tokens_after = tokens_after
         return result
 
     async def count_context_tokens(self) -> int:
@@ -555,9 +633,10 @@ class Agent:
         Every request that sends the history goes through here (turn steps,
         the recap); the reviewer and compaction write their own text.
         """
+        aliases = self._reported_ids.get((model.system, model.model_name), set())
         return [
             ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
-            *_failures_as_text(_strip_foreign_thinking(self.history, model)),
+            *_failures_as_text(_strip_foreign_thinking(self.history, model, aliases)),
         ]
 
     async def recap(self) -> str:
@@ -608,12 +687,12 @@ class Agent:
 
     # ---- Tools the agent loop runs itself ----------------------------------
     # These mutate agent-held state, so they cannot go through
-    # the stateless run_tool. Each handler fills ``slot`` with the tool
-    # result, calls ``persist()`` (which writes that slot) after every slot
-    # update, and yields the events to forward.
+    # the stateless run_tool. Each handler hands its result to ``settle``,
+    # which fills the call's slot and persists it, and yields the events to
+    # forward.
 
-    async def _run_write_todos(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
-                               persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+    async def _run_write_todos(self, call: ToolCallPart, args: dict,
+                               settle: Callable[[ToolResult], None]) -> AsyncIterator[AgentEvent]:
         # Reports itself as TodosUpdate alone — no ToolStart/ToolEnd — which is
         # also the shape replay_events produces for it, so no renderer has to
         # special-case the name. A malformed argument is the exception: it
@@ -623,17 +702,15 @@ class Agent:
             yield ToolStart(call.tool_call_id, call.tool_name, args)
             result = ToolResult("Error: 'todos' must be an array of "
                                 "{content, status} objects.", "failed")
-            _settle(slot, result)
-            persist()
+            settle(result)
             yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
             return
         self.todos = todos
-        _settle(slot, ToolResult(render_todos(self.todos)))
-        persist()
+        settle(ToolResult(render_todos(self.todos)))
         yield TodosUpdate(list(self.todos))
 
-    async def _run_ask_user(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
-                            persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+    async def _run_ask_user(self, call: ToolCallPart, args: dict,
+                            settle: Callable[[ToolResult], None]) -> AsyncIterator[AgentEvent]:
         # The one tool whose result comes from the user. No ask hook means no
         # user to answer (headless leaves the tool out of its toolset, so this
         # is a narrowed-toolset edge, not the normal path); the error tells the
@@ -655,8 +732,7 @@ class Agent:
                                     "Proceed on your best judgment and say what you assumed.")
             else:
                 result = ToolResult(f"User answered: {answer}")
-        _settle(slot, result)
-        persist()
+        settle(result)
         yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
 
     async def _refusal(self, name: str, args: dict) -> str | None:
@@ -681,7 +757,7 @@ class Agent:
                 review.TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — any failure means no verdict
             verdict = None
-            refusal = f"Denied: the auto mode reviewer was unavailable ({exc or type(exc).__name__})."
+            refusal = f"Denied: the auto mode reviewer was unavailable ({retry.describe(exc)})."
         else:
             if verdict.allow:
                 self._review_blocks = 0
@@ -691,15 +767,17 @@ class Agent:
                        "for another way to do this; if it is needed, tell the user so.")
             if self._review_blocks < review.MAX_BLOCKS:
                 return refusal
-        if self.confirm is None:
+        # Falsy rather than None alone: a subagent's hook is falsy while its
+        # parent has nobody to ask (see _ParentConfirm).
+        if not self.confirm:
             return refusal
         if not await self.confirm(name, args):
             return USER_DENIAL
         self._review_blocks = 0
         return None
 
-    async def _run_job_tool(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
-                            persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
+    async def _run_job_tool(self, call: ToolCallPart, args: dict,
+                            settle: Callable[[ToolResult], None]) -> AsyncIterator[AgentEvent]:
         """The job tools: starting agents and commands, reading and stopping them.
 
         They act on the jobs this agent holds, which no stateless tool
@@ -717,8 +795,7 @@ class Agent:
                                     else await self.jobs.call(call.tool_name, args))
             except ToolError as exc:
                 result = exc.result()
-        _settle(slot, result)
-        persist()
+        settle(result)
         yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
 
     def available_models(self) -> list[str]:
@@ -755,24 +832,7 @@ class Agent:
         """A subagent of this one, for the job manager to run: its own session,
         marked as this one's child, on ``model`` or else this agent's model."""
 
-        # Weak, like the jobs' hold on this agent: the closure lives on the
-        # child, and a strong reference back would make the child a cycle.
-        child_ref: "weakref.ReferenceType[Agent] | None" = None
-
-        async def confirm(name: str, args: dict) -> bool:
-            # For a child nothing put on screen; a UI that shows it asks there
-            # instead. Through the parent, its hook looked up per call: whoever
-            # can ask for this conversation answers for the child too, and
-            # with nobody to ask (headless) it is denied, exactly as it would
-            # be for the parent. The request is marked with the child's title,
-            # so the parent's UI can say it is not the parent's own call; the
-            # job is looked up per call because its id is only given once the
-            # child is open.
-            if not self.confirm:
-                return False
-            origin = self.jobs.title_of(child_ref and child_ref()) or "agent"
-            return await confirm_for(self.confirm, origin, name, args)
-
+        confirm = _ParentConfirm(self)
         child = Agent.open(
             cwd=self.cwd, mode=self.mode, config=self.config,
             run_options=self.run_options, confirm=confirm,
@@ -783,15 +843,23 @@ class Agent:
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
             parent_session_id=self.session.id)
-        child_ref = weakref.ref(child)
+        confirm.child = weakref.ref(child)
         return child
 
     def _take_notices(self) -> list[JobNotice]:
-        """Move the waiting notices into the history, one message each."""
-        notices = self.jobs.take_notices()
-        for text in notices:
+        """Move the waiting notices into the history, one message each.
+
+        Each one leaves the waiting list only once it is persisted, so a
+        write that fails leaves it waiting for the next attempt rather than
+        gone from both.
+        """
+        moved = []
+        while self.jobs.notices:
+            text = self.jobs.notices[0]
             self._append_message(job_message(text))
-        return [JobNotice(text) for text in notices]
+            self.jobs.notices.pop(0)
+            moved.append(JobNotice(text))
+        return moved
 
     async def _run_code(self, code: str,
                         spend: Callable[[], str | None]) -> tuple[str, bool, list[dict]]:
@@ -885,17 +953,22 @@ class Agent:
         """
         self._claim("turn")
         try:
+            # Expanded before anything is taken, so a prompt that fails to
+            # expand leaves the notices waiting for the next turn.
+            prompt = None
+            if user_input is not None:
+                prompt = self.expand_input(user_input) if expand else user_input
             # Jobs this session started report in here, ahead of the prompt they
             # arrived before. Persisted messages, not just events: the notice is
             # how the model gets a child's answer at all.
             notices = self._take_notices()
-            if user_input is None and not notices:
+            if prompt is None and not notices:
                 return
-            for notice in notices:
-                yield notice
             self.jobs.tool_budget = max_tool_calls
-            if user_input is not None:
-                prompt = self.expand_input(user_input) if expand else user_input
+            # Appended before the notices are yielded: the turn may end for
+            # good at any yield, and the caller has already shown the prompt,
+            # so it must be in the history by then.
+            if prompt is not None:
                 self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
 
             # Every turn leaves exactly one terminal ``turn_end`` record in the
@@ -915,6 +988,8 @@ class Agent:
                                          partial_text=partial_text)
 
             try:
+                for notice in notices:
+                    yield notice
                 # Closed with this one rather than left to the garbage
                 # collector, so an abandoned turn's model stream is shut before
                 # its turn_end is recorded and the agent is freed.
@@ -976,7 +1051,14 @@ class Agent:
     async def _run(self, record_outcome: Callable[..., None],
                    max_tool_calls: int | None) -> AsyncIterator[AgentEvent]:
         """The model/tool loop of one turn; ``run`` wraps it to guarantee the
-        terminal ``turn_end`` record whatever way the turn ends."""
+        terminal ``turn_end`` record whatever way the turn ends.
+
+        Every yield here and in the handlers is a point where the turn may end
+        for good: the caller is cancelled while it renders the event and
+        closes the generator. So at every yield the history is one a request
+        can be built on (each tool call answered) and is what the log replays
+        to: whatever a step appends goes in before its events go out.
+        """
         # A compaction that failed for a transient reason is retried on the
         # next step of this turn — the context only keeps growing, so giving
         # up on the first rate limit disables the safety net exactly when it
@@ -1011,8 +1093,10 @@ class Agent:
             # results already recorded. Before compaction, so they count
             # towards the context check and survive a history replacement.
             # Notices from jobs that ended meanwhile come in the same way.
-            for notice in self._take_notices():
-                yield notice
+            # Everything is appended before anything is yielded: what pending()
+            # returns is gone from the caller's queue, and the turn may end for
+            # good at any yield.
+            arrived: list[AgentEvent] = self._take_notices()
             for queued in (self.pending() if self.pending is not None else []):
                 # A ready-made request is one the caller already showed the
                 # user (a "!" run, whose output was on screen the moment the
@@ -1024,7 +1108,9 @@ class Agent:
                     continue
                 self._append_message(ModelRequest(
                     parts=[UserPromptPart(content=self.expand_input(queued))]))
-                yield UserInput(queued)
+                arrived.append(UserInput(queued))
+            for event in arrived:
+                yield event
 
             if not compaction_off:
                 try:
@@ -1094,12 +1180,14 @@ class Agent:
                                                      usage.cache_read_tokens,
                                                      usage.cache_write_tokens)
                     break
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, GeneratorExit):
                     # Interrupted mid-stream: the partial text is persisted in
                     # the turn_end record for the log, but no ModelResponse is
                     # appended — a truncated answer replayed as a completed
                     # one misleads both the resumed UI and the model, and a
                     # history ending on the user request stays resumable.
+                    # GeneratorExit is the usual way: the caller is cancelled
+                    # while it renders a delta, and closes this generator.
                     record_outcome("interrupted", partial_text=content or None)
                     raise
                 except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
@@ -1138,6 +1226,9 @@ class Agent:
                     yield ModelRetry(attempt, retry.MAX_ATTEMPTS, delay, retry.describe(exc))
                     await asyncio.sleep(delay)
 
+            if response.model_name and response.provider_name == model.system:
+                self._reported_ids.setdefault(
+                    (model.system, model.model_name), set()).add(response.model_name)
             self._append_message(response)
             usage = response.usage
             if usage.input_tokens:
@@ -1145,31 +1236,33 @@ class Agent:
                 # the authoritative context size at this history length.
                 self._usage_anchor = (len(self.history),
                                       usage.input_tokens + (usage.output_tokens or 0))
-            if stats is not None:
-                yield stats
-
-            calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
-            if not calls:
-                record_outcome("success")
-                yield TurnEnd()
-                return
 
             # Pre-seed a tool result for every call up front, so even if we are
             # interrupted mid-execution the history never has a dangling tool call
             # (the API requires each tool_call_id to be answered). Unfinished ones
-            # keep this placeholder.
+            # keep this placeholder. Appended before anything is yielded: the
+            # turn may end for good at any yield, and a response whose calls
+            # have no results is a history every later request is refused on.
+            calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
             returns = [
                 ToolReturnPart(tool_name=call.tool_name, content="Interrupted by user.",
                                tool_call_id=call.tool_call_id, outcome="interrupted")
                 for call in calls
             ]
             tool_request = ModelRequest(parts=returns)
-            record_id = self._append_message(tool_request)
+            record_id = self._append_message(tool_request) if calls else ""
 
-            for index, (slot, call) in enumerate(zip(returns, calls)):
-                # Writes this one slot as it stands, so each result is durable
-                # the moment it is settled without rewriting the others.
-                persist = functools.partial(self._persist_slot, record_id, index, tool_request)
+            if stats is not None:
+                yield stats
+            if not calls:
+                record_outcome("success")
+                yield TurnEnd()
+                return
+
+            for index, call in enumerate(calls):
+                # Writes this one slot, so each result is durable the moment
+                # it is settled without rewriting the others.
+                settle = functools.partial(self._settle_slot, record_id, index, tool_request)
                 args = parse_args(call.args)
                 name = call.tool_name
 
@@ -1197,8 +1290,7 @@ class Agent:
                                          "failed")
                 if refused is not None:
                     yield ToolStart(call.tool_call_id, name, args)
-                    _settle(slot, refused)
-                    persist()
+                    settle(refused)
                     yield ToolEnd.of(call.tool_call_id, name, refused)
                     continue
 
@@ -1211,15 +1303,13 @@ class Agent:
                     result = ToolResult(text) if completed else ToolResult(text, "failed")
                     # Kept beside the result, where it is persisted for replay
                     # and never sent to the model.
-                    slot.metadata = {"calls": nested}
-                    _settle(slot, result)
-                    persist()
+                    settle(result, {"calls": nested})
                     yield ToolEnd.of(call.tool_call_id, name, result, nested)
                     continue
 
                 handler = self._AGENT_HANDLED.get(name)
                 if handler is not None:
-                    async for event in handler(self, call, args, slot, persist):
+                    async for event in handler(self, call, args, settle):
                         yield event
                     continue
 
@@ -1229,8 +1319,7 @@ class Agent:
                                         safe_commands=self.run_options.safe_commands(self.config),
                                         ctx=self.tool_context,
                                         review=self._review)
-                _settle(slot, result)
-                persist()
+                settle(result)
                 yield ToolEnd.of(call.tool_call_id, name, result)
 
             if budget_hit:
