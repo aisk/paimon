@@ -92,10 +92,17 @@ def _shell_description() -> str:
     from .tools.shell import shell_executable
 
     shell = shell_executable()
-    if shell is not None:
-        return shell
-    # Windows: create_subprocess_shell uses ComSpec, defaulting to cmd.exe.
-    return os.environ.get("ComSpec") or "cmd.exe"
+    if shell is None:
+        # Windows without Git Bash: create_subprocess_shell uses ComSpec,
+        # defaulting to cmd.exe.
+        return os.environ.get("ComSpec") or "cmd.exe"
+    if os.name == "nt":
+        # A model told only "bash" on Windows tends to write C:\ paths, which
+        # bash reads as escapes, or /tmp and /etc, which are Git's own
+        # directories rather than the system's.
+        return (f"{shell} (Git Bash: write POSIX shell syntax, and Windows paths with "
+                "forward slashes, e.g. C:/Users/name/file)")
+    return shell
 
 
 def _runtime_flags(system: str) -> str:

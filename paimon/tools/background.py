@@ -17,6 +17,7 @@ from .shell import (
     _signal_group,
     _spawn_shell,
     _stop_reader,
+    _terminate_job,
     decode_output,
     shell_executable,
 )
@@ -85,12 +86,14 @@ def _line_buffered(command: str) -> str:
     mitigation, not a fix — output arriving late is what a pipe instead of a
     terminal costs.
 
-    Left alone under cmd.exe: the only stdbuf found there is the one Git for
-    Windows ships, and wrapping would run the command in its sh instead of the
-    shell the system prompt names.
+    Left alone on Windows, whichever shell runs the command: the native
+    programs whose buffering matters there (python, node, a compiler) load no
+    LD_PRELOAD library, and a stdbuf found on PATH might be any port of it,
+    running the command in some other shell than the one the system prompt
+    names.
     """
     shell = shell_executable()
-    if shell is None or not shutil.which("stdbuf"):
+    if shell is None or os.name == "nt" or not shutil.which("stdbuf"):
         return command
     return f"stdbuf -oL -eL {shlex.quote(shell)} -c {shlex.quote(command)}"
 
@@ -166,8 +169,13 @@ class BackgroundCommand:
         if self._proc.returncode is not None:
             return
         if os.name == "nt":
-            # Nothing left to await taskkill on; fire it detached so the tree
-            # still goes down after this process is gone. The leader is left
+            # Terminating the command's job is synchronous, so nothing has to
+            # be awaited for the whole tree to go.
+            if _terminate_job(self._proc):
+                return
+            # Without a job there is nothing left to await taskkill on; fire
+            # it detached so the tree still goes down after this process is
+            # gone. The leader is left
             # to taskkill as well: it finds the tree by walking parent pids
             # from the leader, so killing that first would orphan the rest.
             # There is no SIGKILL to escalate to here (the name does not even

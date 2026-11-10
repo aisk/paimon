@@ -1,6 +1,5 @@
 import asyncio
 import os
-import shutil
 import signal
 import sys
 import tempfile
@@ -11,10 +10,19 @@ from unittest.mock import patch
 
 from paimon.tools.background import BackgroundCommand, _TaskOutput, start_background, tail_text
 from paimon.tools.base import MAX_OUTPUT
-from paimon.tools.shell import _kill_tree, _shell, _signal_group, shell_executable, shell_output_dir
+from paimon.tools.shell import (
+    _kill_tree,
+    _shell,
+    _signal_group,
+    find_git_bash,
+    git_bash_root,
+    shell_executable,
+    shell_output_dir,
+)
 from tests.support.shell import (
     alive,
     filler,
+    git_bash,
     overflow_path,
     pid_from,
     posix_shell,
@@ -296,20 +304,124 @@ class ShellExecutableTest(unittest.IsolatedAsyncioTestCase):
     def test_prompt_reports_the_shell_the_tool_uses(self) -> None:
         from paimon.prompt import _shell_description
         with patch.dict("os.environ", {"SHELL": "/bin/some-login-shell"}):
-            # No explicit shell on Windows: the tool runs ComSpec there, and
-            # that is what the prompt has to say.
+            # No shell found on Windows (no Git Bash): the tool runs ComSpec
+            # there, and that is what the prompt has to say.
             expected = shell_executable() or os.environ.get("ComSpec") or "cmd.exe"
-            self.assertEqual(_shell_description(), expected)
+            self.assertTrue(_shell_description().startswith(expected), _shell_description())
 
     @posix_shell
     async def test_commands_run_in_the_reported_shell(self) -> None:
         result = (await _shell({"command": "echo shell=$0"}, self.cwd)).text
         self.assertIn(f"shell={shell_executable()}", result)
 
-    @posix_shell
-    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    @unittest.skipUnless("bash" in (shell_executable() or ""), "bash not installed")
     async def test_bashisms_work_when_bash_is_installed(self) -> None:
         self.assertIn("bash", shell_executable())
         result = (await _shell({"command": "[[ 1 == 1 ]] && echo yes-bash"}, self.cwd)).text
         self.assertIn("yes-bash", result)
         self.assertIn("(exit code 0)", result)
+
+
+class GitBashDiscoveryTest(unittest.TestCase):
+    """Which bash.exe Windows commands run in. Fake installations on disk, so
+    this runs on every platform; PATH is written with Windows' ";"."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+
+    def _install(self, name: str, git_in: str = "cmd") -> Path:
+        """A Git for Windows layout: both bash.exe files, git.exe in ``git_in``."""
+        root = self.base / name
+        for relative in ("bin/bash.exe", "usr/bin/bash.exe", f"{git_in}/git.exe"):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_bytes(b"MZ")
+        return root
+
+    def _wsl_launcher(self) -> Path:
+        """What System32 holds: a bash.exe, and no Git around it."""
+        system32 = self.base / "System32"
+        system32.mkdir()
+        (system32 / "bash.exe").write_bytes(b"MZ")
+        return system32
+
+    def test_derived_from_git_on_path_wherever_the_installer_put_it(self) -> None:
+        for git_in in ("cmd", "bin", "mingw64/bin"):
+            root = self._install(f"Git-{git_in.replace('/', '-')}", git_in)
+            path = f"{self._wsl_launcher() if git_in == 'cmd' else ''};{root / git_in}"
+            found = find_git_bash({"PATH": path})
+            self.assertEqual(found, str(root / "bin" / "bash.exe"), git_in)
+
+    def test_the_wsl_launcher_is_never_chosen(self) -> None:
+        system32 = self._wsl_launcher()
+        self.assertIsNone(find_git_bash({"PATH": str(system32), "ProgramFiles": str(self.base)}))
+
+    def test_a_git_without_the_msys_layout_is_not_git_for_windows(self) -> None:
+        root = self._install("NotGit")
+        (root / "usr" / "bin" / "bash.exe").unlink()
+        self.assertIsNone(find_git_bash({"PATH": str(root / "cmd")}))
+
+    def test_standard_locations_when_git_is_not_on_path(self) -> None:
+        programs = self.base / "Program Files"
+        programs.mkdir()
+        root = self._install("Program Files/Git")
+        self.assertEqual(find_git_bash({"PATH": "", "ProgramFiles": str(programs)}),
+                         str(root / "bin" / "bash.exe"))
+        local = self.base / "Local"
+        root = self._install("Local/Programs/Git")
+        self.assertEqual(find_git_bash({"LOCALAPPDATA": str(local)}),
+                         str(root / "bin" / "bash.exe"))
+
+    def test_nothing_found_falls_back_to_cmd(self) -> None:
+        self.assertIsNone(find_git_bash({"PATH": str(self.base)}))
+        with patch("paimon.tools.shell.os.name", "nt"),                 patch("paimon.tools.shell.find_git_bash", return_value=None):
+            self.assertIsNone(shell_executable.__wrapped__())
+
+    def test_the_root_is_known_only_for_the_launcher(self) -> None:
+        root = self._install("Git")
+        with patch("paimon.tools.shell.os.name", "nt"):
+            self.assertEqual(git_bash_root(str(root / "bin" / "bash.exe")), root)
+            self.assertIsNone(git_bash_root(str(root / "usr" / "bin" / "bash.exe")))
+            self.assertIsNone(git_bash_root("/bin/sh"))
+            self.assertIsNone(git_bash_root(None))
+
+
+@git_bash
+class GitBashShellTest(unittest.IsolatedAsyncioTestCase):
+    """The shell tool for real under Git Bash on this machine."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    async def test_posix_commands_run_with_gits_tools(self) -> None:
+        (self.cwd / "中文 文件.txt").write_bytes("你好\n".encode("utf-8"))
+        command = "type -P ls find && ls | grep -c txt && cat '中文 文件.txt' && printf '[%s]\\n' 'a  b'"
+        outcome = await _shell({"command": command}, self.cwd)
+
+        self.assertEqual(outcome.status, "success", outcome.text)
+        lines = outcome.text.splitlines()
+        self.assertEqual(lines[:2], ["/usr/bin/ls", "/usr/bin/find"],
+                         "GNU tools from Git, not System32's find.exe")
+        self.assertEqual(lines[2:5], ["1", "你好", "[a  b]"])
+
+    async def test_a_timeout_kills_what_a_forked_bash_started(self) -> None:
+        """A "&" job's process is started by a forked bash that is gone by
+        then, so walking parent pids from the shell never finds it."""
+        command = "sleep 57 & echo pid $(cat /proc/$!/winpid); sleep 58 | cat"
+        with (
+            patch("paimon.tools.shell._COMMAND_TIMEOUT", 3.0),
+            patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
+        ):
+            result = (await _shell({"command": command}, self.cwd)).text
+        pid = pid_from(result)
+        self.addCleanup(reap, pid)
+
+        self.assertIn("(timed out after 3s)", result)
+        for _ in range(40):
+            if not alive(pid):
+                return
+            await asyncio.sleep(0.05)
+        self.fail(f"sleep {pid} outlived the timeout")

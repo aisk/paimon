@@ -6,6 +6,7 @@ import shutil
 import signal
 import subprocess
 import time
+import weakref
 from functools import cache
 from pathlib import Path
 
@@ -51,9 +52,11 @@ def _format_size(size: int) -> str:
 def decode_output(data: bytes) -> str:
     """Command output as text.
 
-    Windows console programs (cmd.exe built-ins above all) write in the OEM
-    code page rather than UTF-8, so output that is not valid UTF-8 is read as
-    that instead of being turned into replacement marks.
+    Git Bash and the programs Git for Windows ships write UTF-8, but Windows
+    console programs (cmd.exe built-ins above all, and native programs run
+    from either shell) write in the OEM code page, so output that is not
+    valid UTF-8 is read as that instead of being turned into replacement
+    marks.
     """
     if os.name == "nt":
         try:
@@ -204,7 +207,7 @@ def _signal_group(pgid: int, sig: int, proc: asyncio.subprocess.Process) -> None
     """Send a signal to the whole process group, falling back to the child alone.
 
     Windows has no process groups to signal (os.killpg does not exist there);
-    the tree is handled by the taskkill path in _kill_tree, and this falls
+    the tree is handled by the job or taskkill path in _kill_tree, and this falls
     back to killing the child itself.
     """
     if os.name == "nt":
@@ -222,12 +225,101 @@ def _signal_group(pgid: int, sig: int, proc: asyncio.subprocess.Process) -> None
             pass
 
 
-async def _taskkill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Windows tree kill: taskkill /T /F walks the parent-pid tree, the
-    closest equivalent of killing a POSIX process group. Best effort — a
-    child whose parent already exited is re-parented and cannot be found by
-    anything — with a direct kill of the leader as the fallback.
+@cache
+def _win32():
+    """kernel32 and ntdll with the signatures the job code below relies on.
+
+    Declared rather than left to ctypes' defaults, which pass and return C
+    ints and would truncate a 64-bit HANDLE.
     """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    handle, dword = wintypes.HANDLE, wintypes.DWORD
+    for name, restype, argtypes in (
+        ("CreateJobObjectW", handle, (wintypes.LPVOID, wintypes.LPCWSTR)),
+        ("SetInformationJobObject", wintypes.BOOL, (handle, ctypes.c_int, wintypes.LPVOID, dword)),
+        ("AssignProcessToJobObject", wintypes.BOOL, (handle, handle)),
+        ("TerminateJobObject", wintypes.BOOL, (handle, wintypes.UINT)),
+        ("TerminateProcess", wintypes.BOOL, (handle, wintypes.UINT)),
+        ("CloseHandle", wintypes.BOOL, (handle,)),
+    ):
+        function = getattr(kernel32, name)
+        function.restype, function.argtypes = restype, argtypes
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    ntdll.NtResumeProcess.argtypes = (handle,)
+    return kernel32, ntdll
+
+
+def _contain(process: int) -> int | None:
+    """Put the suspended process behind the handle ``process`` in a job
+    object of its own, then resume it. Returns the job handle, or None when
+    there is no job (the process is resumed either way, and killed if even
+    that fails).
+
+    Takes the handle the process was created with rather than its pid: that
+    one has every right needed, and cannot fail to open and leave the command
+    suspended for good.
+
+    The job is Windows' process group: every process the command starts
+    joins it, whoever its parent was, so terminating the job reaches all of
+    them. The parent-pid tree taskkill /T walks does not: under Git Bash a
+    pipeline's or a "&" job's processes are created by a forked bash that has
+    already exited, and they outlived the kill. Started suspended so nothing
+    can be spawned before the job is in place. Breakaway is not allowed:
+    Cygwin, which Git Bash runs on, asks for it whenever it may, so allowing
+    it lets exactly those processes escape.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    kernel32, ntdll = _win32()
+    job = None
+    try:
+        job = kernel32.CreateJobObjectW(None, None)
+        limits = BasicLimits(LimitFlags=0)
+        if job and not (kernel32.SetInformationJobObject(job, 2, ctypes.byref(limits),
+                                                         ctypes.sizeof(limits))
+                        and kernel32.AssignProcessToJobObject(job, process)):
+            kernel32.CloseHandle(job)
+            job = None
+    finally:
+        if ntdll.NtResumeProcess(process) != 0:
+            kernel32.TerminateProcess(process, 1)  # a command that never runs would hang the turn
+    return job or None
+
+
+def _terminate_job(proc: asyncio.subprocess.Process) -> bool:
+    """Kill every process in the command's job; False when it has none."""
+    job = getattr(proc, "_paimon_job", None)
+    return job is not None and bool(_win32()[0].TerminateJobObject(job, 1))
+
+
+async def _taskkill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Windows tree kill: the command's job when it has one (see _contain),
+    else taskkill /T /F, which walks the parent-pid tree. That is best
+    effort — a child whose parent already exited cannot be found by it —
+    with a direct kill of the leader as the fallback.
+    """
+    if _terminate_job(proc):
+        try:
+            await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=_KILL_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        return
     try:
         killer = await asyncio.create_subprocess_exec(
             "taskkill", "/PID", str(proc.pid), "/T", "/F",
@@ -282,22 +374,92 @@ async def _pump(stream: asyncio.StreamReader, tail: _OutputTail) -> None:
         tail.append(chunk)
 
 
+def _git_root(directory: Path) -> Path | None:
+    """The Git for Windows installation ``directory`` belongs to, if any.
+
+    Recognized by the two bash.exe files every installation has, so a stray
+    bin\\bash.exe elsewhere (System32 holds the WSL one) does not qualify.
+    """
+    if (directory / "bin" / "bash.exe").is_file() and (directory / "usr" / "bin" / "bash.exe").is_file():
+        return directory
+    return None
+
+
+def find_git_bash(environ: dict | None = None) -> str | None:
+    """Git for Windows' bash.exe, or None when Git for Windows is not found.
+
+    Never shutil.which("bash"): on Windows that is usually System32's or
+    WindowsApps' bash.exe, the WSL launcher, which runs the command inside a
+    Linux VM with a filesystem of its own.
+
+    The installation is found from git.exe on PATH, which sits in <Git>\\cmd,
+    <Git>\\bin or <Git>\\mingw64\\bin depending on the installer's PATH
+    option (a portable copy is found the same way), then in the standard
+    install locations. Only absolute PATH entries are searched, so a git.exe
+    in the working directory cannot nominate a bash.exe next to it.
+
+    The bash.exe returned is <Git>\\bin\\bash.exe, not <Git>\\usr\\bin\\bash.exe.
+    The former is Git's launcher: it sets MSYSTEM and HOME and puts
+    <Git>\\mingw64\\bin and <Git>\\usr\\bin first on PATH before starting the
+    latter. Started directly, usr\\bin\\bash.exe searches the Windows PATH
+    alone, where "ls" or "find" is whatever happens to be installed there
+    (System32's find.exe, another coreutils port) or nothing at all.
+    """
+    environ = os.environ if environ is None else environ
+    candidates: list[Path] = []
+    for entry in (environ.get("PATH") or "").split(";"):
+        entry = entry.strip().strip('"')
+        if not entry or not os.path.isabs(entry):
+            continue
+        git = Path(entry) / "git.exe"
+        if git.is_file():
+            try:
+                git = git.resolve()  # a WinGet link points into the real install
+            except OSError:
+                pass
+            candidates += [git.parent.parent, git.parent.parent.parent]
+    for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        if environ.get(variable):
+            candidates.append(Path(environ[variable]) / "Git")
+    if environ.get("LOCALAPPDATA"):  # the installer's per-user option
+        candidates.append(Path(environ["LOCALAPPDATA"]) / "Programs" / "Git")
+    for candidate in candidates:
+        root = _git_root(candidate)
+        if root is not None:
+            return str(root / "bin" / "bash.exe")
+    return None
+
+
 @cache
 def shell_executable() -> str | None:
     """The shell the shell tool actually runs commands with.
 
     Bash is preferred when installed, so the bashisms models habitually write
-    ([[ ]], process substitution) behave; /bin/sh is the fallback. None means
-    the platform default (cmd.exe via ComSpec on Windows). The system prompt
-    reports this same value — the model must never be told a shell the tool
-    does not use (previously it reported $SHELL while running /bin/sh).
+    ([[ ]], process substitution) behave; /bin/sh is the fallback. On Windows
+    that bash is Git for Windows' (see find_git_bash), and None — cmd.exe via
+    ComSpec — is left for a machine without it. The system prompt reports
+    this same value: the model must never be told a shell the tool does not
+    use (previously it reported $SHELL while running /bin/sh).
+
+    Cached because the prompt, every command and every permission check ask,
+    and the answer only changes when software is installed or removed.
     """
     if os.name == "nt":
-        return None
+        return find_git_bash()
     for candidate in ("/bin/bash", "/usr/bin/bash"):
         if os.path.isfile(candidate):
             return candidate
     return shutil.which("bash") or "/bin/sh"
+
+
+def git_bash_root(shell: str | None) -> Path | None:
+    """The Git for Windows installation ``shell`` is the launcher of, else None."""
+    if os.name != "nt" or shell is None:
+        return None
+    path = Path(shell)
+    if path.name.lower() != "bash.exe" or path.parent.name.lower() != "bin":
+        return None
+    return _git_root(path.parent.parent)
 
 
 def _output_pipe():
@@ -343,9 +505,11 @@ async def _spawn_shell(
             env=env,
         )
         if os.name == "nt":
-            # A group of its own, so cleanup handles the tree as one unit
-            # (taskkill /T in _kill_tree); start_new_session is POSIX-only.
-            options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            # Suspended until _contain has put it in a job of its own, which
+            # is what cleanup kills as one unit; start_new_session is
+            # POSIX-only.
+            options["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                        | getattr(subprocess, "CREATE_SUSPENDED", 0x4))
         else:
             # start_new_session puts the child in its own process group so the
             # whole tree (the shell plus anything it spawns) can be killed on
@@ -359,6 +523,12 @@ async def _spawn_shell(
             # override: the override would run bash with argv[0] "sh", which
             # flips it into POSIX mode.
             proc = await asyncio.create_subprocess_exec(shell, "-c", command, **options)
+        if os.name == "nt":
+            popen = proc._transport.get_extra_info("subprocess")
+            job = _contain(int(popen._handle))
+            if job is not None:
+                proc._paimon_job = job
+                weakref.finalize(proc, _win32()[0].CloseHandle, job)
     except BaseException:
         pipe.close()
         raise

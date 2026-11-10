@@ -8,7 +8,7 @@ from paimon.tools.base import ToolContext
 from paimon.tools.files import _glob, _inside
 from paimon.tools.permissions import MODES, gate, safe_command
 from paimon.tools.shell import _shell, shell_output_dir
-from tests.support.shell import filler, overflow_path
+from tests.support.shell import MODELLED_SHELL, filler, modelled_shell, overflow_path
 
 
 class GateTest(unittest.IsolatedAsyncioTestCase):
@@ -95,8 +95,9 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gate("write_todos", {"todos": []}, mode, self.cwd), "allow")
         self.assertEqual(gate("read_file", {}, "read", self.cwd), "allow")
 
+    @modelled_shell
     def test_safe_shell_commands_auto_allowed(self) -> None:
-        with patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh"):
+        with patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL):
             for mode in ("read", "auto"):
                 self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
                 self.assertEqual(gate("shell", {"command": "git status"}, mode, self.cwd), "allow")
@@ -116,8 +117,11 @@ class SafeCommandTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.cwd = Path(tmp.name).resolve()
         # The list models sh, so it is tested as if sh ran the command on
-        # every platform; under cmd.exe nothing is recognized at all.
-        shell = patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh")
+        # POSIX, and against the Git Bash that runs it on Windows; under
+        # cmd.exe nothing is recognized at all.
+        if MODELLED_SHELL is None:
+            self.skipTest("commands run in cmd.exe")
+        shell = patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL)
         shell.start()
         self.addCleanup(shell.stop)
 
@@ -127,7 +131,7 @@ class SafeCommandTest(unittest.TestCase):
             "tail -n 5 a.log", "wc -l *.py", "stat a.py", "file a.py",
             "which python3", "df", "du -sh .", "grep TODO src", "grep -rn foo .",
             "rg TODO", "rg -n foo src", "find . -name *.py -type f",
-            "tree -L 2", "diff a.txt b.txt", "readlink -f a.py",
+            "diff a.txt b.txt", "readlink -f a.py",
             "realpath a.py", "echo done", "uname -a", "whoami", "date", "nproc",
             "git status", "git status --porcelain", "git log --oneline -20",
             "git log HEAD~3..", "git diff --stat", "git show HEAD~1",
@@ -135,6 +139,8 @@ class SafeCommandTest(unittest.TestCase):
             "git blame cli.py", "git shortlog -sn", "git describe --tags",
             "git rev-parse HEAD", "git ls-files", "git ls-tree -r HEAD",
             "git remote -v", "git tag -l",
+            # Git for Windows ships no tree, and System32's tree.com is not it.
+            *(("tree -L 2",) if os.name == "posix" else ()),
         ):
             self.assertTrue(safe_command(cmd, self.cwd), cmd)
 
@@ -276,6 +282,87 @@ class SafeCommandTest(unittest.TestCase):
         ):
             self.assertFalse(safe_command(cmd, self.cwd), cmd)
 
+    def test_an_environment_that_redefines_commands_rejects(self) -> None:
+        # bash imports exported functions and runs BASH_ENV before the
+        # command; either can make "ls" something else.
+        for env in ({"BASH_FUNC_ls%%": "() { echo pwned; }"}, {"BASH_ENV": "setup.sh"}):
+            with patch.dict(os.environ, env):
+                self.assertFalse(safe_command("ls", self.cwd), env)
+        # A function named like some other command is no reason to refuse:
+        # Fedora exports one for "which" in every login shell.
+        with patch.dict(os.environ, {"BASH_FUNC_which%%": "() { :; }"}):
+            self.assertTrue(safe_command("ls", self.cwd))
+            self.assertFalse(safe_command("which ls", self.cwd))
+
+    @unittest.skipUnless(os.name == "posix", "the POSIX PATH lookup")
+    def test_a_relative_path_entry_ahead_of_the_command_rejects(self) -> None:
+        # An empty entry is the current directory to sh, where the agent may
+        # have just written an executable named ls.
+        real = os.environ["PATH"]
+        for path in (f":{real}", f"bin:{real}"):
+            with patch.dict(os.environ, {"PATH": path}):
+                self.assertFalse(safe_command("ls", self.cwd), path)
+                self.assertTrue(safe_command("echo hi", self.cwd), "a builtin is not looked up")
+        with patch.dict(os.environ, {"PATH": f"{real}:"}):
+            self.assertTrue(safe_command("ls", self.cwd), "found before the relative entry")
+
+
+@unittest.skipUnless(os.name == "nt", "Windows path semantics")
+class WindowsSafeCommandTest(unittest.TestCase):
+    """Under Git Bash a path token is resolved twice: the Win32 way by the
+    check, the MSYS way by the command. Only tokens both read alike pass."""
+
+    def setUp(self) -> None:
+        if MODELLED_SHELL is None:
+            self.skipTest("commands run in cmd.exe")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        shell = patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL)
+        shell.start()
+        self.addCleanup(shell.stop)
+
+    def test_tokens_msys_and_win32_read_differently_reject(self) -> None:
+        for cmd in (
+            # MSYS paths: Git's own /etc and /tmp (the user's temp directory),
+            # drive and UNC spellings, emulated devices.
+            "cat /etc/passwd", "cat /tmp/x", "cat /c/Users/x", "ls /",
+            "cat //server/share/x", "cat /dev/stdin", "cd /c && ls",
+            # Drive-relative paths and alternate data streams.
+            "cat C:x", "cd C:x && ls", "cat a.txt:secret", "grep -fC:x .", "grep --file=C:x .",
+            # Device names, in any directory and with any extension.
+            "cat CON", "cat con.txt", "rg x sub/nul", "cat COM1", "cat 'AUX .log'",
+            # Win32 strips trailing dots and spaces; MSYS does not.
+            "cat x.", "cat 'x '", "cat sub./a",
+        ):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_drive_paths_both_read_alike_are_allowed(self) -> None:
+        root = self.cwd.as_posix()  # C:/Users/...
+        for cmd in (f"cat {root}/a.txt", f"cd {root}/sub && ls", "cat sub/a.txt", "ls ."):
+            self.assertTrue(safe_command(cmd, self.cwd), cmd)
+        self.assertFalse(safe_command(f"cat {root}/../x", self.cwd))
+
+    def test_only_the_programs_git_ships_are_recognized(self) -> None:
+        self.assertFalse(safe_command("tree", self.cwd), "System32's tree.com is not GNU tree")
+        # Git's own directories come first in Git Bash's PATH, and the
+        # current directory is not on it, so this never runs for "cat".
+        (self.cwd / "cat.exe").write_bytes(b"MZ")
+        self.assertTrue(safe_command("cat a.txt", self.cwd))
+
+    def test_a_relative_path_entry_rejects_what_comes_from_path(self) -> None:
+        system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        with patch.dict(os.environ, {"PATH": f"bin;{system}"}):
+            self.assertFalse(safe_command("rg foo", self.cwd), "rg is looked up on PATH")
+            self.assertTrue(safe_command("ls", self.cwd), "ls never gets that far")
+        with patch.dict(os.environ, {"PATH": f"{system};;"}):
+            self.assertTrue(safe_command("rg foo", self.cwd), "MSYS drops empty entries")
+
+    def test_nothing_is_recognized_under_an_unknown_bash(self) -> None:
+        # Command lookup is modelled for Git's launcher only.
+        with patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh"):
+            self.assertFalse(safe_command("ls", self.cwd))
+
 
 class InsideTest(unittest.TestCase):
     def test_symlink_escape_is_outside(self) -> None:
@@ -347,8 +434,9 @@ class BackgroundGateTest(unittest.TestCase):
 
     def test_a_safe_looking_command_is_still_held(self) -> None:
         args = {"command": "ls -la", "description": "listing"}
-        with patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh"):
-            self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
+        if MODELLED_SHELL is not None:
+            with patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL):
+                self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
         self.assertEqual(gate("run_background", args, "read", self.cwd), "deny",
                          "nothing that keeps running is waved through")
         self.assertEqual(gate("run_background", args, "auto", self.cwd), "review")

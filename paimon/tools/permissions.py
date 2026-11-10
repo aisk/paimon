@@ -12,7 +12,7 @@ from .base import Tool, ToolContext
 from .files import _inside, _real, _resolve
 from .registry import REGISTRY, execute_tool
 from .result import ToolResult
-from .shell import shell_executable
+from .shell import git_bash_root, shell_executable
 
 
 # A confirm callback returns True to allow a dangerous tool, False to deny.
@@ -191,6 +191,97 @@ _GIT_FLAGS_ONLY = {
 }
 
 
+# Builtins in bash and in sh alike, so never looked up on PATH.
+_BUILTINS = frozenset({"cd", "echo", "pwd"})
+# Under Git Bash every other command above must be the one Git for Windows
+# ships, the GNU tool this list was written for; these alone are not shipped
+# and come from the user's PATH.
+_NOT_FROM_GIT = frozenset({"rg"})
+# Win32 device names. Opened by a native program (rg, git) they are devices
+# in any directory and with any extension: CON reads the console paimon's
+# own TUI is reading.
+_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", "conin$", "conout$"}
+    | {f"{port}{n}" for port in ("com", "lpt") for n in "0123456789¹²³"}
+)
+
+
+def _lookup_is_sound(name: str, shell: str) -> bool:
+    """Whether ``name`` runs the program the analysis assumes it does.
+
+    The lists above assume "cat" is the system's cat. A PATH entry that is
+    relative (an empty one, in sh, means the current directory) lets a file
+    the agent wrote into the working directory a moment ago run instead, so
+    such an entry ahead of the command's real location fails the check.
+
+    Under Git Bash the shell puts Git's own directories ahead of the Windows
+    PATH (see find_git_bash), so a command found there is certain; anything
+    else would be some Windows program of the same name with other semantics
+    (System32's find.exe), and is refused, except for the few commands that
+    are expected to come from PATH.
+    """
+    path = os.environ.get("PATH")
+    if os.name == "nt":
+        root = git_bash_root(shell)
+        if root is None:
+            return False  # not a shell whose lookup is modelled here
+        for directory in ("mingw64", "clangarm64", "mingw32", "usr"):
+            folder = root / directory / "bin"
+            if (folder / f"{name}.exe").is_file() or (folder / name).is_file():
+                return True
+        if name not in _NOT_FROM_GIT:
+            return False
+        # Where on the Windows PATH it is found does not matter, provided no
+        # entry is relative; MSYS drops the empty ones rather than reading
+        # them as the current directory.
+        return all(os.path.isabs(entry) for entry in (path or "").split(";") if entry)
+    if path is None:
+        return True  # the shell's built-in default, which is all absolute
+    for entry in path.split(os.pathsep):
+        if not os.path.isabs(entry):
+            return False
+        candidate = os.path.join(entry, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return True
+    return True  # not found anywhere: the command fails, and nothing runs
+
+
+def _windows_path_ok(tok: str) -> bool:
+    """Whether Python's Windows path rules and Git Bash agree on ``tok``.
+
+    _inside resolves a token the Win32 way and the shell's programs resolve
+    it the MSYS way, and only some tokens mean the same thing to both:
+
+    - a leading "/" is an MSYS path: /tmp and /etc are directories in Git's
+      install or the user's temp directory, /c/x is drive C, //host/share is
+      UNC, /dev and /proc are emulated, while Python reads each as a
+      directory on the current drive. A drive path written "C:/x" is
+      understood alike by both and stays allowed.
+    - any other ":" is a drive-relative path ("C:x", resolved against
+      a per-drive directory Python and MSYS do not share) or an alternate
+      data stream ("file:stream").
+    - Win32 strips trailing dots and spaces from a name and MSYS does not,
+      so "x." is two different files.
+    - a reserved device name is a device to a native program wherever it is.
+
+    Backslashes never reach this: they are rejected with the metacharacters.
+    """
+    if tok.startswith("/"):
+        return False
+    drive = len(tok) > 2 and tok[0].isascii() and tok[0].isalpha() and tok[1:3] == ":/"
+    rest = tok[3:] if drive else tok
+    if ":" in rest:
+        return False
+    for segment in rest.split("/"):
+        if segment in ("", ".", ".."):
+            continue
+        if segment[-1] in ". ":
+            return False
+        if segment.split(".")[0].rstrip(" ").lower() in _RESERVED_NAMES:
+            return False
+    return True
+
+
 def _flag_denied(tok: str, deny_flags: tuple[str, ...]) -> bool:
     """True if tok matches a denied flag, including combined shorts ("-20f")."""
     if tok.split("=", 1)[0] in deny_flags:
@@ -253,13 +344,15 @@ def _safe_cd(argv: list[str], base: Path, root: Path) -> Path | None:
     # glob is pointless anyway, so reject any "*"/"?" outright.
     if ".." in tok.split("/") or "*" in tok or "?" in tok:
         return None
+    if os.name == "nt" and not _windows_path_ok(tok):
+        return None
     target = _resolve(tok, base)
     # Resolved so later segments check against the directory the kernel will
     # actually be in (without "..", physical and logical agree).
     return target.resolve() if _inside(target, root) else None
 
 
-def _safe_simple(argv: list[str], base: Path, root: Path) -> Path | None:
+def _safe_simple(argv: list[str], base: Path, root: Path, shell: str) -> Path | None:
     """Check one operator-free command from a compound line.
 
     ``base`` resolves relative paths (it moves when an earlier segment was
@@ -272,6 +365,15 @@ def _safe_simple(argv: list[str], base: Path, root: Path) -> Path | None:
     # (git's HEAD~1) stay allowed.
     if any(tok.startswith("~") or "=~" in tok for tok in argv):
         return None
+    # bash imports exported functions, and a function is found before a
+    # builtin or anything on PATH. Only one named like the command matters:
+    # some systems export a few of their own (Fedora's "which"), and refusing
+    # on any of them would turn the allowance off there altogether.
+    if f"BASH_FUNC_{argv[0]}%%" in os.environ:
+        return None
+    if argv[0] not in _BUILTINS and not _lookup_is_sound(argv[0], shell):
+        return None
+    windows = os.name == "nt"
     if argv[0] == "cd":
         return _safe_cd(argv, base, root)
     if argv[0] == "git":
@@ -283,9 +385,12 @@ def _safe_simple(argv: list[str], base: Path, root: Path) -> Path | None:
         if tok.startswith("-"):
             # A flag carrying an attached path (-f/etc/passwd, --from-file=/x)
             # would never reach the containment check below.
-            if _flag_denied(tok, spec.deny_flags) or "/" in tok:
+            # On Windows a drive letter needs no "/" ("-fC:x").
+            if _flag_denied(tok, spec.deny_flags) or "/" in tok or (windows and ":" in tok):
                 return None
         elif _hidden_glob(tok):
+            return None
+        elif spec.check_paths and windows and not _windows_path_ok(tok):
             return None
         elif spec.check_paths and not _inside(_resolve(tok, base), root):
             return None
@@ -303,13 +408,30 @@ def safe_command(command: str, cwd: Path) -> bool:
     its own. A cd segment moves the base later relative paths resolve
     against, but containment is always checked against the original cwd.
 
-    Nothing is recognized when cmd.exe runs the command: everything below
-    models sh. cmd does not treat "'" as a quote, so "echo ' && del x && echo '"
-    reads as one echo here and runs as three commands there, and it looks a
-    command up in the current directory before PATH, so "cat" may be a
-    cat.bat the agent wrote a moment ago.
+    What runs the command decides what can be recognized:
+
+    - POSIX (bash or sh): the analysis below, with paths resolved the POSIX
+      way and each command looked up on PATH the way the shell will.
+    - Windows with Git Bash: the same analysis, since bash parses the line,
+      plus what MSYS changes. A command must be the one Git ships (System32's
+      find.exe is not GNU find, and tree has no GNU counterpart there), and a
+      path token must mean the same file to Python's Win32 resolution and to
+      MSYS: no "/"-rooted MSYS path, drive-relative path, alternate data
+      stream, trailing dot or space, or device name (see _windows_path_ok).
+      MSYS also rewrites "/"-rooted arguments before a native program such as
+      git or rg sees them; those are rejected for the same reason, except as
+      git pathspecs, where git's own repository boundary applies.
+    - Windows with cmd.exe (no Git Bash): nothing, as everything here models
+      sh. cmd does not treat "'" as a quote, so "echo ' && del x && echo '"
+      reads as one echo here and runs as three commands there, and it looks
+      a command up in the current directory before PATH, so "cat" may be a
+      cat.bat the agent wrote a moment ago.
     """
-    if shell_executable() is None:
+    shell = shell_executable()
+    if shell is None:
+        return False
+    # bash runs BASH_ENV before the command, and that file can redefine "ls".
+    if os.environ.get("BASH_ENV"):
         return False
     if any(ch in _SHELL_METACHARS for ch in command):
         return False
@@ -330,7 +452,7 @@ def safe_command(command: str, cwd: Path) -> bool:
             return False
         if not argv or (argv[0] == "cd" and not pure_and):
             return False
-        new_base = _safe_simple(argv, base, cwd)
+        new_base = _safe_simple(argv, base, cwd, shell)
         if new_base is None:
             return False
         base = new_base

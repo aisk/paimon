@@ -16,7 +16,7 @@ from paimon.tools.registry import (REGISTRY, _read_history, _search_history, exe
 from paimon.tools.result import ToolError
 from paimon.tools.shell import _shell
 from tests.support.agent import make_session
-from tests.support.shell import sleeper
+from tests.support.shell import modelled_shell, sleeper
 
 
 class RunToolTest(unittest.IsolatedAsyncioTestCase):
@@ -84,7 +84,7 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "success")
         self.assertIn("hi", result.text)
 
-    @unittest.skipIf(os.name == "nt", "nothing is auto-allowed under cmd.exe")
+    @modelled_shell
     async def test_safe_command_runs_in_read_mode(self) -> None:
         result = await run_tool("shell", {"command": "ls"}, self.cwd, "read")
         self.assertEqual(result.status, "success")

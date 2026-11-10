@@ -1,10 +1,11 @@
 """Shell output generators and readers shared by tool tests.
 
 The commands here are Python one-liners rather than shell loops: the shell tool
-runs /bin/sh or bash on POSIX and cmd.exe on Windows, and the only syntax the
-two share is a quoted program with a quoted argument. What the tests exercise
-is what paimon does with a command's output and its process tree, which does
-not depend on who wrote the bytes.
+runs /bin/sh or bash on POSIX and Git Bash on Windows, but cmd.exe on a Windows
+machine without Git, and the only syntax all of them share is a quoted program
+with a quoted argument. What the tests exercise is what paimon does with a
+command's output and its process tree, which does not depend on who wrote the
+bytes.
 """
 
 import os
@@ -15,8 +16,21 @@ import sys
 import unittest
 from pathlib import Path
 
-# For the few tests that are about the POSIX shell itself ($0, bashisms).
+from paimon.tools.shell import shell_executable
+
+# For the few tests that are about the POSIX shell itself ($0).
 posix_shell = unittest.skipUnless(os.name == "posix", "needs a POSIX shell")
+
+# For tests about Git Bash, which only Windows has.
+git_bash = unittest.skipUnless(os.name == "nt" and shell_executable() is not None,
+                               "needs Git Bash on Windows")
+
+# The shell safe_command is checked against: sh on POSIX, where its analysis
+# is the same for every sh, and on Windows the Git Bash that actually runs
+# commands, since what it allows there depends on that installation. None
+# on Windows without Git, where nothing is recognized at all.
+MODELLED_SHELL = "/bin/sh" if os.name == "posix" else shell_executable()
+modelled_shell = unittest.skipIf(MODELLED_SHELL is None, "commands run in cmd.exe")
 
 # Stops SIGTERM from ending the process, so a test reaches the forced kill.
 # A no-op on Windows, where nothing delivers SIGTERM to begin with.
@@ -26,7 +40,7 @@ _SLEEPER = "import time; time.sleep(30)"
 
 
 def python_command(code: str) -> str:
-    """``code`` as a command line both sh and cmd.exe run the same way.
+    """``code`` as a command line sh, bash and cmd.exe all run the same way.
 
     The code goes inside double quotes, so it must hold none itself, and no
     ``$``, backtick or ``%`` either; a backslash escape such as ``\\n`` passes

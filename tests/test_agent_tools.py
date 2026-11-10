@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +24,7 @@ from paimon.review import MAX_BLOCKS, Verdict
 from paimon.tools.permissions import READ_DENIAL, USER_DENIAL
 from paimon.tools.registry import REGISTRY, SUBAGENT_DENIED, without
 from tests.support.agent import make_session, open_agent, stub_model
+from tests.support.shell import modelled_shell
 
 
 class HistoryToolWiringTest(unittest.IsolatedAsyncioTestCase):
@@ -92,7 +92,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(end.denied)
         self.assertEqual((cwd / "a.txt").read_text(), "hi")
 
-    @unittest.skipIf(os.name == "nt", "nothing is auto-allowed under cmd.exe")
+    @modelled_shell
     async def test_read_only_commands_run_unless_the_config_says_strict(self) -> None:
         """The safe_commands setting has to reach run_tool, not just the gate."""
         agent = open_agent(self._cwd(), mode="read")
