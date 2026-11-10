@@ -21,7 +21,7 @@ from paimon.agent import (
 )
 from paimon.config import Config
 from paimon.session import (
-    is_summary_message,
+    synthetic_kind,
 )
 from tests.support.agent import make_session, session_records, stub_model
 
@@ -53,7 +53,7 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIs(returned, result)
             compact.assert_awaited_once()
-            self.assertTrue(is_summary_message(agent.history[0]))
+            self.assertEqual(synthetic_kind(agent.history[0]), "summary")
             self.assertEqual(agent.history[1:], [recent])
             # the checkpoint is persisted, so a resume replays the same context
             replayed = session.messages()

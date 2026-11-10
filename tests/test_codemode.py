@@ -16,7 +16,7 @@ from paimon.config import Config
 from paimon.session import Session
 from paimon.tools.base import MAX_OUTPUT, Tool
 from paimon.tools.permissions import USER_DENIAL
-from paimon.tools.registry import REGISTRY, failure, without
+from paimon.tools.registry import REGISTRY, without
 from paimon.transcript import EventRenderer
 from tests.support.agent import make_session, session_records
 from tests.support.app import AppTestCase
@@ -329,12 +329,17 @@ class ReviewFixesTest(CodeModeTestCase):
 
         self.assertEqual([(call["name"], call["status"]) for call in end.calls], [("shell", "error")])
 
-    def test_failure_reads_the_status_a_command_ends_with(self) -> None:
-        self.assertIsNone(failure("out\n(exit code 0)"))
-        self.assertEqual(failure("out\n(exit code 1)"), "exit 1")
-        self.assertEqual(failure("out\n(timed out after 120s)"), "timed out")
-        self.assertEqual(failure("Error: unknown tool 'x'"), "failed")
-        self.assertIsNone(failure("1:Error handling\n"))
+    async def test_a_nested_status_comes_from_the_tool_not_its_text(self) -> None:
+        # Text that reads like a failure is only text: a file can end with a
+        # command's status line, or open with "Error".
+        (self.cwd / "log.txt").write_text("Error handling\nran\n(exit code 1)\n")
+        end = await self._run(self._agent(), (
+            "await read_file(path='log.txt')\n"
+            "await read_file(path='missing.txt')\n"))
+
+        self.assertEqual([(call["name"], call["status"]) for call in end.calls],
+                         [("read_file", "ok"), ("read_file", "error")])
+        self.assertEqual(end.status, "success")
 
     async def test_headless_counts_a_call_denied_inside_a_script(self) -> None:
         from paimon.headless import ResultRenderer

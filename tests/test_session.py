@@ -20,10 +20,12 @@ from paimon.session import (
     SessionBusyError,
     SessionError,
     _project_dir,
-    is_shell_message,
-    is_synthetic_user_text,
+    job_message,
+    job_text,
     shell_message,
     shell_text,
+    summary_message,
+    synthetic_kind,
 )
 
 
@@ -97,11 +99,27 @@ class PreviewTest(SessionScanTestCase):
 
         self.assertEqual(session.first_user_text(), "fix the bug")
 
+    def test_first_user_text_skips_a_job_notice_and_a_checkpoint(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(job_message("agent ab12 finished:\ndone"))
+        session.append_message(summary_message("what happened"))
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="fix the bug")]))
+
+        self.assertEqual(session.first_user_text(), "fix the bug")
+
+    def test_a_user_message_that_looks_synthetic_is_still_the_title(self) -> None:
+        """Only the mark makes a message paimon's: typing its prefix does not."""
+        for typed in ("[job] agent 1234 finished", "[shell] $ ls"):
+            with self.subTest(typed=typed):
+                session = Session.create(self.cwd)
+                session.append_message(ModelRequest(parts=[UserPromptPart(content=typed)]))
+                self.assertEqual(session.first_user_text(), typed)
+
 
 class ShellMessageTest(unittest.TestCase):
     def test_command_and_output_survive_the_round_trip(self) -> None:
         message = shell_message("git log --oneline -n 2", "1e34a91 x\n1a3bbc1 y")
-        self.assertTrue(is_shell_message(message))
+        self.assertEqual(synthetic_kind(message), "shell")
         self.assertEqual(shell_text(message),
                          ("git log --oneline -n 2", "1e34a91 x\n1a3bbc1 y"))
 
@@ -110,8 +128,54 @@ class ShellMessageTest(unittest.TestCase):
 
     def test_an_ordinary_user_message_is_not_one(self) -> None:
         message = ModelRequest(parts=[UserPromptPart(content="$ ls")])
-        self.assertFalse(is_shell_message(message))
-        self.assertFalse(is_synthetic_user_text("$ ls"))
+        self.assertIsNone(synthetic_kind(message))
+        self.assertEqual(shell_text(message), ("", ""))
+
+    def test_the_prefix_alone_does_not_make_a_message_synthetic(self) -> None:
+        for typed in ("[job] agent 1234 finished", "[shell] $ ls\noutput"):
+            with self.subTest(typed=typed):
+                message = ModelRequest(parts=[UserPromptPart(content=typed)])
+                self.assertIsNone(synthetic_kind(message))
+                self.assertEqual(job_text(message), "")
+                self.assertEqual(shell_text(message), ("", ""))
+
+    def test_the_model_still_reads_a_prefix(self) -> None:
+        self.assertEqual(shell_message("ls", "a").parts[0].content, "[shell] $ ls\na")
+        self.assertEqual(job_message("agent x finished").parts[0].content,
+                         "[job] agent x finished")
+
+
+class SyntheticMarkTest(SessionScanTestCase):
+    def test_every_mark_survives_a_reload(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(job_message("command 1a2b exited (code 0)"))
+        session.append_message(shell_message("git status", "clean"))
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="[job] typed")]))
+
+        loaded = Session(session.path, session.id, self.cwd).messages()
+
+        self.assertEqual([synthetic_kind(message) for message in loaded], ["job", "shell", None])
+        self.assertEqual(job_text(loaded[0]), "command 1a2b exited (code 0)")
+        self.assertEqual(shell_text(loaded[1]), ("git status", "clean"))
+
+    def test_the_raw_record_carries_the_same_mark(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(shell_message("ls", "a.txt"))
+        raw = session.entries()[-1][1]["message"]
+
+        self.assertEqual(synthetic_kind(raw), "shell")
+        self.assertEqual(shell_text(raw), ("ls", "a.txt"))
+
+    def test_a_replayed_compaction_rebuilds_a_marked_checkpoint(self) -> None:
+        session = Session.create(self.cwd)
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="old")]))
+        session.append_compaction("the summary", [ModelRequest(parts=[UserPromptPart(content="kept")])],
+                                  tokens_before=10)
+
+        loaded = session.messages()
+
+        self.assertEqual([synthetic_kind(message) for message in loaded], ["summary", None])
+        self.assertTrue(loaded[0].parts[0].content.endswith("the summary"))
 
 
 class EntriesTest(SessionScanTestCase):

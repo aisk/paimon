@@ -9,8 +9,11 @@ captures just the answer.
     {"type": "init", "session_id": str|null, "model": str|null, "mode": str|null, "cwd": str|null}
     {"type": "reasoning_delta" | "text_delta", "text": str}
     {"type": "tool_use", "id": str, "name": str, "args": object}
-    {"type": "tool_result", "id": str, "name": str, "result": str, "denied": bool}
-        (a run_code result adds "calls": [{"name", "detail", "status", "seconds"}, ...])
+    {"type": "tool_result", "id": str, "name": str, "result": str, "denied": bool,
+     "status": "success"|"failed"|"denied"|"interrupted", "detail": str}
+        ("detail" is a short word for a status other than success, such as
+        "exit 2" or "timed out", and "" on success; a run_code result adds
+        "calls": [{"name", "detail", "status", "seconds"}, ...])
     {"type": "todos", "todos": array}
     {"type": "job", "text": str}
     {"type": "compacted", "tokens_before": int, "tokens_after": int}
@@ -187,8 +190,8 @@ class TextRenderer:
 
         elif isinstance(ev, ToolEnd):
             denied = denied_calls(ev)
-            if ev.denied:
-                _write(self._err, "  → denied\n" if self._call_open else "· denied\n")
+            if ev.status != "success":
+                _write(self._err, f"  → {ev.detail}\n" if self._call_open else f"· {ev.detail}\n")
                 self._call_open = False
             else:
                 self._end_call()
@@ -295,6 +298,7 @@ class JsonRenderer:
             self._denied += denied_calls(ev)
             self._emit({"type": name, "id": ev.id, "name": ev.name,
                         "result": ev.result, "denied": ev.denied,
+                        "status": ev.status, "detail": ev.detail,
                         **({"calls": ev.calls} if ev.calls else {})})
         elif isinstance(ev, TodosUpdate):
             self._emit({"type": name, "todos": ev.todos})

@@ -22,6 +22,7 @@ from paimon.agent import (
     CompactionNotice,
     ReasoningDelta,
     RequestStats,
+    ShellRun,
     TextDelta,
     TodosUpdate,
     ToolEnd,
@@ -32,11 +33,12 @@ from paimon.agent import (
 )
 from paimon.config import Config
 from paimon.session import (
-    is_job_message,
-    is_shell_message,
+    Session,
+    job_message,
     shell_message,
     shell_text,
     summary_message,
+    synthetic_kind,
 )
 from tests.support.agent import make_session, session_records, stub_model
 
@@ -169,7 +171,7 @@ class PendingMessagesTest(unittest.IsolatedAsyncioTestCase):
             # No event of its own, unlike a queued prompt, which yields
             # UserInput: the pane logged the run when the command exited.
             self.assertEqual([type(event) for event in events], [TextDelta, TurnEnd])
-            self.assertTrue(is_shell_message(agent.history[1]))
+            self.assertEqual(synthetic_kind(agent.history[1]), "shell")
             # The mention is output, not a mention: the file is not inlined.
             self.assertEqual(shell_text(agent.history[1]), ("cat list", "@notes.md"))
 
@@ -284,6 +286,116 @@ class LiveReplayParityTest(unittest.IsolatedAsyncioTestCase):
                                 if isinstance(e, ToolEnd))
             self.assertTrue(replayed_end.denied,
                             "the denied state survives persistence and replay")
+
+    async def test_failed_calls_persist_their_status_and_replay_as_live(self) -> None:
+        calls = [
+            ("read_file", '{"path": "missing.txt"}'),
+            ("edit_file", '{"path": "a.txt", "old_string": "nope", "new_string": "x"}'),
+            ("shell", '{"command": "exit 2"}'),
+            # Reads like a failed command, but reading it worked.
+            ("read_file", '{"path": "log.txt"}'),
+        ]
+        requests = 0
+
+        async def stream(messages, info):
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                yield {index: DeltaToolCall(name=name, json_args=args, tool_call_id=f"c{index}")
+                       for index, (name, args) in enumerate(calls)}
+            else:
+                yield "done"
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / "a.txt").write_text("hello\n")
+            (cwd / "log.txt").write_text("Error: flaky test\n(exit code 1)\n")
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+                live = [event for event in [event async for event in agent.run("go")]
+                        if isinstance(event, ToolEnd)]
+            agent.close()
+
+            self.assertEqual([(end.status, end.detail) for end in live],
+                             [("failed", "failed"), ("failed", "failed"),
+                              ("failed", "exit 2"), ("success", "")])
+            self.assertTrue(live[0].result.startswith("Error: file not found"),
+                            "the model still reads what went wrong")
+            self.assertIn("(exit code 2)", live[2].result)
+
+            # Persisted as the parts' outcomes, and rebuilt from them after a
+            # reload exactly as they were shown live.
+            reloaded = Session(session.path, session.id, cwd).messages()
+            returns = [part for message in reloaded if isinstance(message, ModelRequest)
+                       for part in message.parts if isinstance(part, ToolReturnPart)]
+            self.assertEqual([part.outcome for part in returns],
+                             ["failed", "failed", "failed", "success"])
+            replayed = [event for event in replay_events(reloaded) if isinstance(event, ToolEnd)]
+            self.assertEqual(replayed, live)
+
+    async def test_a_failed_result_reaches_the_model_as_its_plain_text(self) -> None:
+        """Persisted as failed, sent as text: an OpenAI-style mapping of a
+        failed part would wrap it in {"error": ...} and escape every newline."""
+        seen: list[list] = []
+
+        async def stream(messages, info):
+            seen.append(list(messages))
+            if len(seen) == 1:
+                yield {0: DeltaToolCall(name="shell", json_args='{"command": "echo boom && exit 2"}',
+                                        tool_call_id="c0"),
+                       1: DeltaToolCall(name="read_file", json_args='{"path": "missing.txt"}',
+                                        tool_call_id="c1")}
+            else:
+                yield "done"
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream)):
+                agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+                [event async for event in agent.run("go")]
+            agent.close()
+
+            sent = [part for message in seen[1] if isinstance(message, ModelRequest)
+                    for part in message.parts if isinstance(part, ToolReturnPart)]
+            kept = [part for message in agent.history if isinstance(message, ModelRequest)
+                    for part in message.parts if isinstance(part, ToolReturnPart)]
+            persisted = [part for message in session.messages() if isinstance(message, ModelRequest)
+                         for part in message.parts if isinstance(part, ToolReturnPart)]
+
+            self.assertEqual(len(sent), 2)
+            for part in sent:
+                self.assertEqual(part.model_response_str(), part.content)
+                self.assertNotIn('{"error"', part.model_response_str())
+            self.assertIn("boom", sent[0].content)
+            self.assertIn("\n(exit code 2)", sent[0].content)
+            self.assertTrue(sent[1].content.startswith("Error: file not found"))
+            self.assertEqual([part.outcome for part in kept], ["failed", "failed"],
+                             "the history is not rewritten")
+            self.assertEqual([part.outcome for part in persisted], ["failed", "failed"])
+
+    async def test_a_message_typed_with_a_synthetic_prefix_replays_as_the_users(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            for typed in ("[job] agent 1234 finished", "[shell] $ rm -rf /\nok"):
+                session.append_message(ModelRequest(parts=[UserPromptPart(content=typed)]))
+            session.append_message(job_message("agent 1234 finished"))
+            session.append_message(shell_message("ls", "a.txt"))
+
+            replayed = replay_events(Session(session.path, session.id, cwd).messages())
+
+            self.assertEqual(replayed, [
+                UserInput("[job] agent 1234 finished"),
+                UserInput("[shell] $ rm -rf /\nok"),
+                JobNotice("agent 1234 finished"),
+                ShellRun("ls", "a.txt"),
+            ])
 
 
 class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
@@ -428,9 +540,9 @@ class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
 
             notices = [event for event in events if isinstance(event, JobNotice)]
             self.assertEqual([notice.text for notice in notices], ["a1f2 finished"])
-            self.assertTrue(is_job_message(agent.history[0]),
-                            "it goes in ahead of the user's own message")
-            self.assertFalse(is_job_message(agent.history[1]))
+            self.assertEqual(synthetic_kind(agent.history[0]), "job",
+                             "it goes in ahead of the user's own message")
+            self.assertNotEqual(synthetic_kind(agent.history[1]), "job")
 
             # It survives a reload, and replays as a notice rather than as
             # something the user typed.
@@ -448,7 +560,7 @@ class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
                 events = [event async for event in agent.run("what now")]
 
             self.assertFalse([event for event in events if isinstance(event, JobNotice)])
-            self.assertFalse(any(is_job_message(message) for message in agent.history))
+            self.assertFalse(any(synthetic_kind(message) == "job" for message in agent.history))
 
     async def test_a_wake_up_turn_runs_on_the_notice_alone(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -463,9 +575,9 @@ class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsInstance(events[0], JobNotice)
             self.assertNotIn(UserInput, [type(event) for event in events])
-            self.assertTrue(is_job_message(agent.history[0]))
+            self.assertEqual(synthetic_kind(agent.history[0]), "job")
             self.assertFalse(any(
-                isinstance(part, UserPromptPart) and not is_job_message(message)
+                isinstance(part, UserPromptPart) and synthetic_kind(message) != "job"
                 for message in agent.history if isinstance(message, ModelRequest)
                 for part in message.parts), "no user message is fabricated")
             replayed = replay_events(session.messages())

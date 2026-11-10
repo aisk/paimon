@@ -32,9 +32,10 @@ class Tool:
     """One tool: what the model is told about it, its executor, and gating class.
 
     ``params`` is the TypedDict of its arguments. ``run`` takes (args, cwd,
-    mode, ctx) and returns a string or an awaitable
-    of one; it is None for tools the agent loop handles itself (write_todos,
-    the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
+    mode, ctx) and returns the result text, a ToolResult when it has more to
+    say than success, or an awaitable of either; it fails the call by raising
+    ToolError. It is None for tools the agent loop handles itself
+    (write_todos, the agent tools). ``access`` drives gate(): "read" runs freely inside cwd,
     "write" runs freely inside cwd in auto mode, "execute" is held outside
     yolo except for commands safe_command() recognizes as read-only,
     "background" is "execute" with no such exception, "none" is never gated.

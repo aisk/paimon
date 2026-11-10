@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from .files import _GLOB_IGNORE, _inside, _resolve
+from .result import ToolError
 
 
 _GREP_DEFAULT_RESULTS = 50
@@ -46,7 +47,7 @@ def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     try:
         pattern = re.compile(str(args["pattern"]))
     except re.error as exc:
-        return f"Error: invalid regular expression: {exc}"
+        raise ToolError(f"Error: invalid regular expression: {exc}") from None
     base = _resolve(args["path"], cwd) if args.get("path") else cwd
     try:
         limit = int(args.get("max_results") or _GREP_DEFAULT_RESULTS)
@@ -58,7 +59,7 @@ def _grep(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     elif base.is_dir():
         files = _grep_files(base, str(args["glob"]) if args.get("glob") else None, sandboxed)
     else:
-        return f"Error: no such file or directory: {base}"
+        raise ToolError(f"Error: no such file or directory: {base}")
 
     lines: list[str] = []
     skipped_large = 0
@@ -118,7 +119,11 @@ _GREP_TIMEOUT = 10.0
 
 
 async def _grep_async(args: dict, cwd: Path, sandboxed: bool = False) -> str:
-    """Use a killable process: a regex can hold the GIL indefinitely."""
+    """Use a killable process: a regex can hold the GIL indefinitely.
+
+    The worker writes the result text as a JSON string, or an object with the
+    error text when the search failed (see paimon._grep_worker).
+    """
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "paimon._grep_worker",
         stdin=asyncio.subprocess.PIPE,
@@ -130,10 +135,15 @@ async def _grep_async(args: dict, cwd: Path, sandboxed: bool = False) -> str:
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(payload), _GREP_TIMEOUT)
         except asyncio.TimeoutError:
-            return "Error: search timed out; simplify the regular expression or narrow the path/glob."
+            raise ToolError("Error: search timed out; simplify the regular expression or "
+                            "narrow the path/glob.", detail="timed out") from None
         if proc.returncode:
-            return f"Error: search worker failed: {stderr.decode('utf-8', errors='replace')[:1000]}"
-        return json.loads(stdout)
+            raise ToolError("Error: search worker failed: "
+                            f"{stderr.decode('utf-8', errors='replace')[:1000]}")
+        result = json.loads(stdout)
+        if isinstance(result, dict):
+            raise ToolError(str(result.get("error")))
+        return result
     finally:
         if proc.returncode is None:
             try:

@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 from .base import Tool, ToolContext
 from .files import _inside, _real, _resolve
 from .registry import REGISTRY, execute_tool
+from .result import ToolResult
 from .shell import shell_executable
 
 
@@ -403,8 +404,8 @@ async def run_tool(name: str, args: dict, cwd: Path, mode: str,
                    registry: dict[str, Tool] | None = None,
                    safe_commands: bool = True,
                    ctx: ToolContext | None = None,
-                   review: ReviewFn | None = None) -> tuple[str, bool]:
-    """Authorize, then execute a tool call. Returns ``(result, denied)``.
+                   review: ReviewFn | None = None) -> ToolResult:
+    """Authorize, then execute a tool call. A refusal is a "denied" result.
 
     ``registry`` narrows the available tools (an agent's own set); None means
     the full REGISTRY. ``ctx`` carries the calling agent's own state, so gating
@@ -413,5 +414,5 @@ async def run_tool(name: str, args: dict, cwd: Path, mode: str,
     refusal = await authorize(name, args, mode, cwd, confirm, review, registry,
                               safe_commands=safe_commands, ctx=ctx)
     if refusal is not None:
-        return refusal, True
-    return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx), False
+        return ToolResult(refusal, "denied")
+    return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx)

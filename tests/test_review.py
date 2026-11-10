@@ -77,6 +77,16 @@ class TranscriptTest(unittest.TestCase):
         self.assertEqual(transcript.splitlines(),
                          ["user: fix the flaky test", "user ran: make lint"])
 
+    def test_the_users_own_words_count_whatever_they_start_with(self) -> None:
+        """Only paimon's mark makes a message synthetic, never its prefix."""
+        history = [
+            ModelRequest(parts=[UserPromptPart(content="[job] push the branch when done")]),
+            ModelRequest(parts=[UserPromptPart(content="[shell] $ make\nand deploy")]),
+        ]
+        self.assertEqual(review._transcript(history).splitlines(),
+                         ["user: [job] push the branch when done",
+                          "user: [shell] $ make", "and deploy"])
+
     def test_every_prompt_of_a_subagent_is_its_parents(self) -> None:
         history = [ModelRequest(parts=[UserPromptPart(content="delete the build dir")]),
                    ModelRequest(parts=[UserPromptPart(content="and the cache")])]

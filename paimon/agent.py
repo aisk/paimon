@@ -39,15 +39,16 @@ from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
 from .session import (
+    JOB,
+    SHELL,
+    SUMMARY,
     Session,
     SessionIncompleteError,
     job_message,
     job_text,
-    is_job_message,
-    is_shell_message,
-    is_summary_message,
     shell_message,
     shell_text,
+    synthetic_kind,
 )
 from .tools.background import BackgroundCommand, start_background, tail_text
 from .tools.base import Tool, ToolContext
@@ -58,13 +59,13 @@ from .tools.registry import (
     AskFn,
     definitions,
     execute_tool,
-    failure,
     normalize_todos,
     render_todos,
     schemas,
     validate_args,
     without,
 )
+from .tools.result import Status, ToolError, ToolResult
 from .tools.shell import user_shell
 
 # Transient compaction failures tolerated in one turn before it is left off.
@@ -124,11 +125,30 @@ class ToolEnd:
     id: str
     name: str
     result: str
-    denied: bool = False
+    # How the call went, the same value its ToolReturnPart.outcome persists:
+    # "success", "failed", "denied" or "interrupted". ``detail`` is the short
+    # word a renderer shows for anything but success ("exit 2", "timed out"),
+    # so none of them has to read it back out of the result text.
+    status: Status = "success"
+    detail: str = ""
     # What a run_code script called, in call order: one dict per nested call
     # with its tool "name", one-line "detail", "status" (ok, error, denied or
     # cancelled) and "seconds". Empty for every other tool.
     calls: list[dict] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # The same default a ToolResult has, for events built directly.
+        if self.status != "success" and not self.detail:
+            self.detail = self.status
+
+    @property
+    def denied(self) -> bool:
+        return self.status == "denied"
+
+    @classmethod
+    def of(cls, call_id: str, name: str, result: ToolResult,
+           calls: list[dict] | None = None) -> "ToolEnd":
+        return cls(call_id, name, result.text, result.status, result.detail, calls or [])
 
 
 @dataclass
@@ -255,6 +275,30 @@ def _nested_calls(part: ToolReturnPart) -> list[dict]:
     return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
 
 
+def _settle(slot: ToolReturnPart, result: ToolResult) -> None:
+    """Fill a call's pre-seeded return part with how it went.
+
+    The status is the part's outcome, so the log records it rather than
+    leaving it to be guessed from the text. A detail that says more than the
+    status ("exit 2") goes in the part's metadata, which is persisted but
+    never sent to the model, so a replay renders it exactly as live did.
+    """
+    slot.content = result.text
+    slot.outcome = result.status
+    metadata = dict(slot.metadata) if isinstance(slot.metadata, dict) else {}
+    metadata.pop("detail", None)
+    if result.detail != ("" if result.ok else result.status):
+        metadata["detail"] = result.detail
+    slot.metadata = metadata or None
+
+
+def _returned(part: ToolReturnPart) -> ToolResult:
+    """A persisted return part as the result it recorded; see _settle."""
+    detail = part.metadata.get("detail") if isinstance(part.metadata, dict) else None
+    return ToolResult(str(part.content or "(no output)"), part.outcome,
+                      detail if isinstance(detail, str) else "")
+
+
 def _held(toolset: dict[str, Tool] | None, config: Config) -> dict[str, Tool]:
     """The tools an agent opened with ``toolset`` under ``config`` really holds.
 
@@ -279,18 +323,19 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     Tools run serially, so each call replays as its ToolStart immediately
     followed by its ToolEnd (looked up in the next request), matching the live
     order — not all starts of a batch first. The persisted ``outcome`` field
-    restores denied styling.
+    and its detail restore each call's status as it was shown live.
     """
     events: list[AgentEvent] = []
     consumed: set[str] = set()  # tool returns already replayed with their call
     for index, message in enumerate(messages):
-        if is_summary_message(message):
+        kind = synthetic_kind(message)
+        if kind == SUMMARY:
             events.append(CompactionNotice())
             continue
-        if is_job_message(message):
+        if kind == JOB:
             events.append(JobNotice(job_text(message)))
             continue
-        if is_shell_message(message):
+        if kind == SHELL:
             events.append(ShellRun(*shell_text(message)))
             continue
         if isinstance(message, ModelRequest):
@@ -302,10 +347,8 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                       and part.tool_name != "write_todos"):
                     # A return whose call is gone (compaction cut mid-turn):
                     # better an unpaired result than a silent hole.
-                    events.append(ToolEnd(part.tool_call_id, part.tool_name,
-                                          str(part.content or "(no output)"),
-                                          denied=part.outcome == "denied",
-                                          calls=_nested_calls(part)))
+                    events.append(ToolEnd.of(part.tool_call_id, part.tool_name,
+                                             _returned(part), _nested_calls(part)))
         elif isinstance(message, ModelResponse):
             following = messages[index + 1] if index + 1 < len(messages) else None
             returns: dict[str, ToolReturnPart] = {}
@@ -332,10 +375,8 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                             continue
                     events.append(ToolStart(part.tool_call_id, part.tool_name, args))
                     if result is not None:
-                        events.append(ToolEnd(part.tool_call_id, part.tool_name,
-                                              str(result.content or "(no output)"),
-                                              denied=result.outcome == "denied",
-                                              calls=_nested_calls(result)))
+                        events.append(ToolEnd.of(part.tool_call_id, part.tool_name,
+                                                 _returned(result), _nested_calls(result)))
     return events
 
 
@@ -370,6 +411,32 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
             message = dataclasses.replace(message, parts=parts)
         sanitized.append(message)
     return sanitized
+
+
+def _failures_as_text(history: list[ModelMessage]) -> list[ModelMessage]:
+    """The history with every failed tool return sent as a plain result.
+
+    pydantic-ai sends a "failed" outcome to providers without a native error
+    channel (every OpenAI-compatible one) as a JSON string, {"error": "..."},
+    which turns a failing command's output into one line of escaped newlines.
+    The result text already says what went wrong, so every provider gets it
+    verbatim instead. That gives up Anthropic's is_error flag and Gemini's
+    error field: an accepted trade for one behaviour across providers.
+
+    Only the request being built is touched, on copies; the history and the
+    log keep the outcome that really happened.
+    """
+    sent: list[ModelMessage] = []
+    for message in history:
+        if isinstance(message, ModelRequest) and any(
+                isinstance(part, ToolReturnPart) and part.outcome == "failed"
+                for part in message.parts):
+            message = dataclasses.replace(message, parts=[
+                dataclasses.replace(part, outcome="success")
+                if isinstance(part, ToolReturnPart) and part.outcome == "failed" else part
+                for part in message.parts])
+        sent.append(message)
+    return sent
 
 
 @dataclass
@@ -750,10 +817,14 @@ class Agent:
 
     def _context(self, model: Model) -> list[ModelMessage]:
         """What a request over this conversation opens with: the system prompt,
-        then the history as ``model`` can take it."""
+        then the history as ``model`` can take it.
+
+        Every request that sends the history goes through here (turn steps,
+        the recap); the reviewer and compaction write their own text.
+        """
         return [
             ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
-            *_strip_foreign_thinking(self.history, model),
+            *_failures_as_text(_strip_foreign_thinking(self.history, model)),
         ]
 
     async def recap(self) -> str:
@@ -809,15 +880,14 @@ class Agent:
         todos = normalize_todos(args.get("todos"))
         if todos is None:
             yield ToolStart(call.tool_call_id, call.tool_name, args)
-            slot.content = ("Error: 'todos' must be an array of "
-                            "{content, status} objects.")
-            slot.outcome = "failed"
+            result = ToolResult("Error: 'todos' must be an array of "
+                                "{content, status} objects.", "failed")
+            _settle(slot, result)
             persist()
-            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+            yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
             return
         self.todos = todos
-        slot.content = render_todos(self.todos)
-        slot.outcome = "success"
+        _settle(slot, ToolResult(render_todos(self.todos)))
         persist()
         yield TodosUpdate(list(self.todos))
 
@@ -831,25 +901,22 @@ class Agent:
         question = str(args.get("question") or "").strip()
         options = [str(o).strip() for o in (args.get("options") or []) if str(o).strip()]
         if not question:
-            slot.content = "Error: question is required."
-            slot.outcome = "failed"
+            result = ToolResult("Error: question is required.", "failed")
         elif len(options) > 9:
-            slot.content = "Error: at most 9 options."
-            slot.outcome = "failed"
+            result = ToolResult("Error: at most 9 options.", "failed")
         elif self.ask is None:
-            slot.content = ("Error: nobody is here to answer in this run. State your "
-                            "assumption and continue.")
-            slot.outcome = "failed"
+            result = ToolResult("Error: nobody is here to answer in this run. State your "
+                                "assumption and continue.", "failed")
         else:
             answer = await self.ask(question, options)
             if answer is None:
-                slot.content = ("The user dismissed the question without answering. "
-                                "Proceed on your best judgment and say what you assumed.")
+                result = ToolResult("The user dismissed the question without answering. "
+                                    "Proceed on your best judgment and say what you assumed.")
             else:
-                slot.content = f"User answered: {answer}"
-            slot.outcome = "success"
+                result = ToolResult(f"User answered: {answer}")
+        _settle(slot, result)
         persist()
-        yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+        yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
 
     async def _refusal(self, name: str, args: dict) -> str | None:
         """Authorize a tool the loop runs itself, the way run_tool does the rest:
@@ -901,24 +968,26 @@ class Agent:
         """
         yield ToolStart(call.tool_call_id, call.tool_name, args)
         if (refusal := await self._refusal(call.tool_name, args)) is not None:
-            slot.content = refusal
-            slot.outcome = "denied"
-            persist()
-            yield ToolEnd(call.tool_call_id, call.tool_name, slot.content, denied=True)
-            return
-        slot.content = await self._job_tool(call.tool_name, args)
-        slot.outcome = "success"
+            result = ToolResult(refusal, "denied")
+        else:
+            try:
+                result = ToolResult(await self._job_tool(call.tool_name, args))
+            except ToolError as exc:
+                result = exc.result()
+        _settle(slot, result)
         persist()
-        yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
+        yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
 
     async def _job_tool(self, name: str, args: dict) -> str:
-        """Run one job tool call and render its result for the model."""
+        """Run one job tool call and render its result for the model.
+
+        Fails the call by raising ToolError, the way a registry tool does.
+        """
         if name == "spawn_agent":
             prompt = str(args.get("prompt") or "").strip()
             if not prompt:
-                return "Error: prompt is required."
-            if (full := self._no_room("agent")) is not None:
-                return full
+                raise ToolError("Error: prompt is required.")
+            self._check_room("agent")
             model = str(args.get("model") or "").strip() or None
             if model:
                 # Built here only to be thrown away: the child would not find
@@ -926,12 +995,12 @@ class Agent:
                 try:
                     self._built(model, None)
                 except Exception as exc:  # noqa: BLE001 — unknown provider, no credential
-                    return (f"Error: cannot start an agent on {model!r}: {exc} "
-                            "Call list_models for the ones available.")
+                    raise ToolError(f"Error: cannot start an agent on {model!r}: {exc} "
+                                    "Call list_models for the ones available.") from None
             try:
                 job_id = await self._spawn(prompt, model)
             except Exception as exc:  # noqa: BLE001 — a session or a tab that would not open
-                return f"Error: could not start an agent: {exc}"
+                raise ToolError(f"Error: could not start an agent: {exc}") from None
             return (f"Started agent {job_id}; it is running now. Its answer is delivered "
                     "to you when it finishes, so carry on or end your turn.")
 
@@ -941,17 +1010,16 @@ class Agent:
         if name == "run_background":
             command = str(args.get("command") or "").strip()
             if not command:
-                return "Error: command is required."
+                raise ToolError("Error: command is required.")
             if self.open_job is None:
-                return ("Error: background commands only work in the interactive UI; "
-                        "use shell instead.")
-            if (full := self._no_room("command")) is not None:
-                return full
+                raise ToolError("Error: background commands only work in the interactive UI; "
+                                "use shell instead.")
+            self._check_room("command")
             try:
                 job_id = await self._start_command(
                     command, str(args.get("description") or "").strip())
             except Exception as exc:  # noqa: BLE001 — a command or a tab that would not start
-                return f"Error: could not start the command: {exc}"
+                raise ToolError(f"Error: could not start the command: {exc}") from None
             return (f"Started background command {job_id}; it keeps running after this "
                     "turn and you are told when it exits. Read its output with read_job "
                     "and stop it with stop_job.")
@@ -959,14 +1027,14 @@ class Agent:
         job_id = str(args.get("job_id") or "").strip()
         job = self.jobs.get(job_id)
         if job is None:
-            return (f"Error: no agent or background command {job_id}. Agents leave when "
-                    "they finish, and ids from an earlier run are gone.")
+            raise ToolError(f"Error: no agent or background command {job_id}. Agents leave "
+                            "when they finish, and ids from an earlier run are gone.")
 
         if name == "read_job":
             command = job.command
             if command is None:
-                return (f"Error: {job_id} is an agent; its answer is delivered to you "
-                        "when it finishes.")
+                raise ToolError(f"Error: {job_id} is an agent; its answer is delivered to "
+                                "you when it finishes.")
             start = 0 if args.get("mode") == "all" else job.cursor
             data, job.cursor, dropped = command.output.since(start)
             if command.killed:
@@ -982,12 +1050,12 @@ class Agent:
 
         if name == "stop_job":
             if not self.stop_job(job_id):
-                return f"Error: nothing to stop under {job_id}; it has already ended."
+                raise ToolError(f"Error: nothing to stop under {job_id}; it has already ended.")
             if job.kind == "agent":
                 return f"Stopped agent {job_id}. It reports nothing back."
             return f"Stopped {job_id}. What it printed is still readable with read_job."
 
-        return f"Error: unknown tool {name!r}"
+        raise ToolError(f"Error: unknown tool {name!r}")
 
     def available_models(self) -> list[str]:
         """The models this agent can be put on, as qualified names.
@@ -1019,17 +1087,16 @@ class Agent:
                 + "\n".join(lines)
                 + "\nOther models of the same providers work too, when named exactly.")
 
-    def _no_room(self, kind: str) -> str | None:
-        """The refusal for a job that would exceed a cap, or None when there is room."""
+    def _check_room(self, kind: str) -> None:
+        """Fail a job tool call whose job would exceed a cap."""
         live = [job for job in self.jobs.values() if job.running]
         agents = sum(1 for job in live if job.kind == "agent")
         if kind == "agent" and agents >= MAX_AGENTS:
-            return (f"Error: {agents} agents are already running (limit {MAX_AGENTS}); "
-                    "wait for one to finish or stop one before starting another.")
+            raise ToolError(f"Error: {agents} agents are already running (limit {MAX_AGENTS}); "
+                            "wait for one to finish or stop one before starting another.")
         if len(live) >= MAX_JOBS:
-            return (f"Error: {len(live)} agents and commands are already running (limit "
-                    f"{MAX_JOBS}); stop one before starting another.")
-        return None
+            raise ToolError(f"Error: {len(live)} agents and commands are already running "
+                            f"(limit {MAX_JOBS}); stop one before starting another.")
 
     def _new_job_id(self) -> str:
         """An id no job of this agent is using.
@@ -1207,8 +1274,11 @@ class Agent:
                     raise codemode.ToolCallError(refusal)
                 result = await execute_tool(name, args, self.cwd, mode=self.mode,
                                             registry=self.toolset, ctx=self.tool_context)
-                record["status"] = "ok" if failure(result) is None else "error"
-                return result
+                # A failed call still returns its text to the script, which
+                # reads the error the way the model would; only the record
+                # says it failed.
+                record["status"] = "ok" if result.ok else "error"
+                return result.text
             finally:
                 record["seconds"] = round(time.perf_counter() - started, 3)
 
@@ -1499,41 +1569,33 @@ class Agent:
                 args = _parse_args(call.args)
                 name = call.tool_name
 
-                # The budget check comes before any dispatch, agent-handled
-                # tools included: a refused call never executes, and its slot
-                # records why instead of a generic interrupted placeholder.
-                if (refused := spend()) is not None:
+                # A call refused before it runs is still answered, with a
+                # failed result saying why: "failed" rather than "denied",
+                # which means a permission refusal.
+                refused: ToolResult | None = None
+                if (over := spend()) is not None:
+                    # The budget check comes before any dispatch,
+                    # agent-handled tools included: a refused call never
+                    # executes, and its slot records why instead of a generic
+                    # interrupted placeholder.
+                    refused = ToolResult(over, "failed", "over budget")
+                elif name not in self.toolset:
+                    # Rejected before the agent-handled table below, so
+                    # excluding write_todos or ask_user from a toolset
+                    # actually disables them.
+                    refused = ToolResult(f"Error: unknown tool {name!r}", "failed")
+                elif (invalid := validate_args(name, args, self.toolset)) is not None:
+                    # One schema validation for every call — before gating
+                    # and before the agent-handled dispatch below — so a
+                    # malformed argument is a tool error the model can react
+                    # to, never an exception ending the turn (TOOLS-1).
+                    refused = ToolResult(f"Error: invalid arguments for {name}: {invalid}",
+                                         "failed")
+                if refused is not None:
                     yield ToolStart(call.tool_call_id, name, args)
-                    slot.content = refused
-                    # "failed" like the other calls refused before running;
-                    # not "denied", which means a permission refusal.
-                    slot.outcome = "failed"
+                    _settle(slot, refused)
                     persist()
-                    yield ToolEnd(call.tool_call_id, name, slot.content)
-                    continue
-
-                # A name outside this agent's tool set is rejected before the
-                # agent-handled table below, so excluding write_todos or
-                # ask_user from a toolset actually disables them.
-                if name not in self.toolset:
-                    yield ToolStart(call.tool_call_id, name, args)
-                    slot.content = f"Error: unknown tool {name!r}"
-                    slot.outcome = "failed"
-                    persist()
-                    yield ToolEnd(call.tool_call_id, name, slot.content)
-                    continue
-
-                # One schema validation for every call — before gating and
-                # before the agent-handled dispatch below — so a malformed
-                # argument is a tool error the model can react to, never an
-                # exception ending the turn (TOOLS-1).
-                invalid = validate_args(name, args, self.toolset)
-                if invalid is not None:
-                    yield ToolStart(call.tool_call_id, name, args)
-                    slot.content = f"Error: invalid arguments for {name}: {invalid}"
-                    slot.outcome = "failed"
-                    persist()
-                    yield ToolEnd(call.tool_call_id, name, slot.content)
+                    yield ToolEnd.of(call.tool_call_id, name, refused)
                     continue
 
                 if name == codemode.NAME:
@@ -1541,14 +1603,14 @@ class Agent:
                     # only this scope holds. An interrupt leaves the slot its
                     # placeholder, like any other tool cut short.
                     yield ToolStart(call.tool_call_id, name, args)
-                    result, completed, nested = await self._run_code(args["code"], spend)
-                    slot.content = result
-                    slot.outcome = "success" if completed else "failed"
+                    text, completed, nested = await self._run_code(args["code"], spend)
+                    result = ToolResult(text) if completed else ToolResult(text, "failed")
                     # Kept beside the result, where it is persisted for replay
                     # and never sent to the model.
                     slot.metadata = {"calls": nested}
+                    _settle(slot, result)
                     persist()
-                    yield ToolEnd(call.tool_call_id, name, result, calls=nested)
+                    yield ToolEnd.of(call.tool_call_id, name, result, nested)
                     continue
 
                 handler = self._AGENT_HANDLED.get(name)
@@ -1558,16 +1620,14 @@ class Agent:
                     continue
 
                 yield ToolStart(call.tool_call_id, name, args)
-                result, denied = await run_tool(name, args, self.cwd, self.mode,
-                                                self.confirm, self.toolset,
-                                                safe_commands=self.config.safe_commands,
-                                                ctx=self.tool_context,
-                                                review=self._review)
-
-                slot.content = result
-                slot.outcome = "denied" if denied else "success"
+                result = await run_tool(name, args, self.cwd, self.mode,
+                                        self.confirm, self.toolset,
+                                        safe_commands=self.config.safe_commands,
+                                        ctx=self.tool_context,
+                                        review=self._review)
+                _settle(slot, result)
                 persist()
-                yield ToolEnd(call.tool_call_id, name, result, denied=denied)
+                yield ToolEnd.of(call.tool_call_id, name, result)
 
             if budget_hit:
                 record_outcome("max_tool_calls")

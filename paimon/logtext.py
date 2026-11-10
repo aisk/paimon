@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+from .session import synthetic_kind
+
 
 def summarize_call(name: str, args: dict, limit: int | None = None) -> str:
     """One-line detail for a tool call, shared by the TUI and headless output.
@@ -38,15 +40,33 @@ def _clip(text: object, full: bool) -> str:
     return line if len(line) <= LOG_DETAIL_WIDTH else line[: LOG_DETAIL_WIDTH - 1] + "…"
 
 
+def _result_status(part: dict) -> str | None:
+    """The short word for a persisted tool return that did not succeed
+    ("failed", "exit 2", "denied"), None for one that did.
+
+    Read from the outcome and detail the agent recorded with the part, never
+    from its text.
+    """
+    outcome = part.get("outcome")
+    if not isinstance(outcome, str) or outcome == "success":
+        return None
+    metadata = part.get("metadata")
+    detail = metadata.get("detail") if isinstance(metadata, dict) else None
+    return detail if isinstance(detail, str) and detail else outcome
+
+
 def _render_message(seq: int, record: dict, full: bool) -> list[str]:
     lines = []
-    for part in (record.get("message") or {}).get("parts") or []:
+    message = record.get("message") or {}
+    # A message paimon wrote in the user's place is labelled as what it is.
+    author = synthetic_kind(message) or "user"
+    for part in message.get("parts") or []:
         if not isinstance(part, dict):
             continue
         kind = part.get("part_kind")
         content = part.get("content")
         if kind == "user-prompt":
-            label, detail = "user", _clip(content, full)
+            label, detail = author, _clip(content, full)
         elif kind == "text":
             label, detail = "assistant", _clip(content, full)
         elif kind == "thinking":
@@ -67,6 +87,9 @@ def _render_message(seq: int, record: dict, full: bool) -> list[str]:
             text = content if isinstance(content, str) else json.dumps(
                 content, ensure_ascii=False, default=str)
             label = f"tool_result {part.get('tool_name') or '?'}"
+            status = _result_status(part)
+            if status is not None:
+                label += f" [{status}]"
             detail = text if full else f"({_chars(text)}) {_clip(text, False)}"
         elif kind == "retry-prompt":
             label, detail = "retry_prompt", _clip(content, full)

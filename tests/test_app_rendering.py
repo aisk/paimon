@@ -202,7 +202,7 @@ class ToolRenderingTest(AppTestCase):
             self.assertTrue(group.query_one(".tool-group-body").display)
             row = str(entry.query_one(".tool-entry-header", Static).render())
             self.assertIn("echo one echo two", row)
-            self.assertIn("2 lines", row)
+            self.assertIn("✓", row, "a command that succeeded says so, not how much it printed")
             self.assertNotIn("large", row)
 
             entry.toggle()
@@ -243,12 +243,33 @@ class ToolRenderingTest(AppTestCase):
         async with app.run_test() as pilot:
             renderer = EventRenderer(app.pane.transcript, app.pane.agent)
             await renderer.handle(ToolStart("c1", "shell", {"command": "pytest"}))
-            await renderer.handle(ToolEnd("c1", "shell", "traceback\n(exit code 1)"))
+            await renderer.handle(ToolEnd("c1", "shell", "traceback\n(exit code 1)",
+                                          status="failed", detail="exit 1"))
             await pilot.pause()
             group = app.query_one(ToolGroup)
             self.assertIn("1 failed", str(group.query_one(".tool-group-header", Static).render()))
             self.assertIn("exit 1", str(app.query_one(".tool-entry-header", Static).render()))
             self.assertFalse(group.query_one(".tool-group-body").display)
+
+    async def test_the_status_comes_from_the_event_not_the_text(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            renderer = EventRenderer(app.pane.transcript, app.pane.agent)
+            # A file that ends like a failed command, read successfully...
+            await renderer.handle(ToolStart("c1", "read_file", {"path": "log.txt"}))
+            await renderer.handle(ToolEnd("c1", "read_file", "1  ran\n2  (exit code 1)"))
+            # ...and a failure whose text says nothing of the kind.
+            await renderer.handle(ToolStart("c2", "edit_file", {"path": "a.py"}))
+            await renderer.handle(ToolEnd("c2", "edit_file", "old_string not found",
+                                          status="failed"))
+            await pilot.pause()
+            first, second = app.query(ToolEntry)
+            self.assertTrue(first.has_class("-done"))
+            self.assertIn("2 lines", str(first.query_one(".tool-entry-header", Static).render()))
+            self.assertTrue(second.has_class("-failed"))
+            self.assertIn("failed", str(second.query_one(".tool-entry-header", Static).render()))
+            header = str(app.query_one(ToolGroup).query_one(".tool-group-header", Static).render())
+            self.assertIn("1 failed", header)
 
 
 class ReasoningDisplayTest(AppTestCase):

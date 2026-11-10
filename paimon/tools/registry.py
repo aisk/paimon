@@ -7,8 +7,8 @@ gating. Adding a tool means adding one registry entry.
 """
 
 import asyncio
+import dataclasses
 import inspect
-import re
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Awaitable, Callable, Literal
@@ -22,31 +22,13 @@ from .. import history, websearch
 from .base import MAX_OUTPUT, Tool, ToolContext
 from .files import _edit_file, _glob, _read_file, _write_file
 from .grep import _GREP_DEFAULT_RESULTS, _GREP_MAX_RESULTS, _grep_async
+from .result import ToolError, ToolResult
 from .shell import _shell
 
 
 # An ask callback puts a question (and optional choices) to the user and
 # returns their answer, or None when they dismissed it without answering.
 AskFn = Callable[[str, list[str]], Awaitable[str | None]]
-
-
-_SHELL_STATUS = re.compile(r"\((?:exit code (-?\d+)|(timed out) after [^()]*)\)\s*$")
-
-
-def failure(result: str) -> str | None:
-    """A short word for what went wrong in a tool result, None when nothing did.
-
-    Tools report failure in their text, not out of band: a leading "Error",
-    or for a command the status line that ends its output.
-    """
-    match = _SHELL_STATUS.search(result)
-    if match:
-        if match.group(2):
-            return "timed out"
-        return None if match.group(1) == "0" else f"exit {match.group(1)}"
-    if result.lstrip().lower().startswith(("error", "failed", "script failed")):
-        return "failed"
-    return None
 
 
 _TODO_MARKERS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
@@ -138,23 +120,24 @@ _READ_BUDGET = MAX_OUTPUT - 1_000
 
 def _search_history(args: dict, ctx: ToolContext) -> str:
     if ctx.session is None:
-        return "Error: no session log available"
+        raise ToolError("Error: no session log available")
     return history.search(ctx.session, args)
 
 
 def _read_history(args: dict, ctx: ToolContext) -> str:
     if ctx.session is None:
-        return "Error: no session log available"
+        raise ToolError("Error: no session log available")
     return history.read(ctx.session, args, _READ_BUDGET)
 
 
 async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
                        registry: dict[str, Tool] | None = None,
-                       ctx: ToolContext | None = None) -> str:
-    """Run a registered tool. Always returns a string for the model."""
+                       ctx: ToolContext | None = None) -> ToolResult:
+    """Run a registered tool. Never raises for the tool's own failure: that
+    comes back as a failed result, with text the model can act on."""
     tool = (REGISTRY if registry is None else registry).get(name)
     if tool is None or tool.run is None:
-        return f"Error: unknown tool {name!r}"
+        return ToolResult(f"Error: unknown tool {name!r}", "failed")
     ctx = ToolContext() if ctx is None else ctx
     try:
         result = tool.run(args, cwd, mode, ctx)
@@ -162,10 +145,16 @@ async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
             result = await result
     except asyncio.CancelledError:
         raise
+    except ToolError as exc:
+        result = exc.result()
     except Exception as exc:  # noqa: BLE001 — surface any tool error to the model
-        return f"Error executing {name}: {exc}"
-    if len(result) > MAX_OUTPUT:
-        result = result[:MAX_OUTPUT] + f"\n... (truncated, {len(result) - MAX_OUTPUT} more chars)"
+        return ToolResult(f"Error executing {name}: {exc}", "failed")
+    if not isinstance(result, ToolResult):
+        result = ToolResult(result)
+    text = result.text
+    if len(text) > MAX_OUTPUT:
+        text = text[:MAX_OUTPUT] + f"\n... (truncated, {len(text) - MAX_OUTPUT} more chars)"
+        result = dataclasses.replace(result, text=text)
     return result
 
 

@@ -19,7 +19,7 @@ from pydantic_ai.messages import (
 
 from paimon import cli, commands
 from paimon.config import config_path
-from paimon.session import Session
+from paimon.session import Session, job_message
 
 
 class CommandTestCase(unittest.TestCase):
@@ -379,6 +379,27 @@ class LogTest(CommandTestCase):
         self.assertIn("[3] tool_call shell  ls -la", out)
         self.assertIn("[4] tool_result shell", out)
         self.assertIn("file-a file-b", out)  # collapsed onto one line
+
+    def test_statuses_and_synthetic_messages_come_from_the_record(self) -> None:
+        session = Session.create(Path.cwd())
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="[job] typed")]))
+        session.append_message(job_message("agent ab12 finished"))
+        session.append_message(ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="boom\n(exit code 2)", tool_call_id="c1",
+                           outcome="failed", metadata={"detail": "exit 2"}),
+            ToolReturnPart(tool_name="read_file", content="1  (exit code 1)", tool_call_id="c2"),
+            ToolReturnPart(tool_name="edit_file", content="Error: x", tool_call_id="c3",
+                           outcome="failed"),
+        ]))
+        code, out, err = self._run("log")
+        self.assertIn("[2] user  [job] typed", out)
+        self.assertIn("[3] job  [job] agent ab12 finished", out)
+        self.assertIn("[4] tool_result shell [exit 2]", out)
+        self.assertIn("[4] tool_result read_file  (", out)
+        self.assertIn("[4] tool_result edit_file [failed]", out)
+
+        code, out, err = self._run("log", "--turns", "1")
+        self.assertIn("[2] user  [job] typed", out, "a typed prefix still opens a turn")
 
     def test_corrupt_line_keeps_its_seq(self) -> None:
         session = Session.create(Path.cwd())

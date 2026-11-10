@@ -17,9 +17,9 @@ from paimon.app import PaimonApp
 from paimon.turns import Outcome
 from paimon.transcript import EventRenderer
 from paimon.session import (
-    is_shell_message,
     shell_message,
     shell_text,
+    synthetic_kind,
 )
 from paimon.ui import (
     AssistantMessage,
@@ -423,7 +423,7 @@ class UserCommandTest(AppTestCase):
             self.assertIn("hi", str(app.query(ToolResult).first().render()))
 
             message = app.pane.agent.history[-1]
-            self.assertTrue(is_shell_message(message))
+            self.assertEqual(synthetic_kind(message), "shell")
             command, output = shell_text(message)
             self.assertEqual(command, "echo hi")
             self.assertIn("hi", output)
@@ -455,7 +455,7 @@ class UserCommandTest(AppTestCase):
             self.assertIn("hi", str(app.query(ToolResult).first().render()))
 
             queued = app.pane._take_queued()
-            self.assertTrue(is_shell_message(queued[0]))
+            self.assertEqual(synthetic_kind(queued[0]), "shell")
 
     async def test_a_run_the_turn_never_came_back_for_is_flushed(self) -> None:
         app = self.make_app()
@@ -463,7 +463,7 @@ class UserCommandTest(AppTestCase):
             hold_turn(app.pane)
             await self._run(app, pilot, "!echo hi")
             await end_turn(app.pane)
-            self.assertTrue(is_shell_message(app.pane.agent.history[-1]))
+            self.assertEqual(synthetic_kind(app.pane.agent.history[-1]), "shell")
 
     async def test_queued_runs_come_before_queued_prompts(self) -> None:
         app = self.make_app()
@@ -473,7 +473,7 @@ class UserCommandTest(AppTestCase):
             await self._run(app, pilot, "and now this")
 
             queued = app.pane._take_queued()
-            self.assertTrue(is_shell_message(queued[0]))
+            self.assertEqual(synthetic_kind(queued[0]), "shell")
             self.assertEqual(queued[1], "and now this")
 
     async def test_a_second_command_is_refused_while_one_runs(self) -> None:

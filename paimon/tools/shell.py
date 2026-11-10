@@ -12,6 +12,7 @@ from pathlib import Path
 from ..session import data_dir
 from .base import MAX_OUTPUT, ToolContext
 from .files import _real
+from .result import ToolResult
 
 
 _COMMAND_TIMEOUT = 120.0
@@ -437,7 +438,13 @@ async def _collect(
         await _stop_reader(reader, transport)
 
 
-async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> str:
+async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> ToolResult:
+    """Run a command; a non-zero exit or a timeout is a failed result.
+
+    The exit status is written into the text as well, since that is the only
+    place the model reads it from; the result's own status is what everything
+    else goes by.
+    """
     proc, stream, transport = await _spawn_shell(args["command"], cwd)
     # The child leads its own group, so the group id is its pid. Recorded here
     # because os.getpgid() stops working the moment that leader is reaped.
@@ -447,9 +454,11 @@ async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> str:
         try:
             await _collect(proc, stream, transport, tail)
             status = f"(exit code {proc.returncode})"
+            problem = f"exit {proc.returncode}" if proc.returncode else ""
         except asyncio.TimeoutError:
             await _kill_tree(proc, pgid)
             status = f"(timed out after {_COMMAND_TIMEOUT:g}s)"
+            problem = "timed out"
         except asyncio.CancelledError:
             await _kill_tree(proc, pgid)
             raise
@@ -464,7 +473,8 @@ async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> str:
     out = tail.render()
     # The status follows the output instead of replacing it: a timeout or a
     # non-zero exit is exactly when what the command managed to print matters.
-    return f"{out}\n{status}" if out.strip() else status
+    text = f"{out}\n{status}" if out.strip() else status
+    return ToolResult(text, "failed", problem) if problem else ToolResult(text)
 
 
 async def user_shell(command: str, cwd: Path, ctx: ToolContext | None = None) -> str:
@@ -475,4 +485,4 @@ async def user_shell(command: str, cwd: Path, ctx: ToolContext | None = None) ->
     spilled to a file — so a command the user runs and one the model runs
     behave alike and read alike in the log.
     """
-    return await _shell({"command": command}, cwd, ctx)
+    return (await _shell({"command": command}, cwd, ctx)).text

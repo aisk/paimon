@@ -57,7 +57,7 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as data_home:
             with patch.dict(os.environ, {"PAIMON_DATA_HOME": data_home}):
                 ctx = ToolContext()
-                result = await _shell({"command": filler(3000, "line")}, self.cwd, ctx)
+                result = (await _shell({"command": filler(3000, "line")}, self.cwd, ctx)).text
                 self.assertEqual(ctx.shell_outputs, {overflow_path(result).resolve()})
                 self.assertEqual(gate("read_file", {"path": str(overflow_path(result))},
                                       "read", self.cwd, ctx=ctx), "allow")

@@ -26,20 +26,33 @@ from pydantic_ai.messages import (
 from . import lockfile
 from .errors import PaimonError
 
-# A compaction checkpoint is a synthetic user message. Its shape belongs here
-# rather than to whatever decides *when* to compact: replaying a log has to
-# rebuild it, and previews have to recognize it as not-a-user-message.
+# Paimon writes three kinds of user message the user never typed. Each is
+# marked in its ModelRequest's metadata, under this key, as
+# {"kind": <kind>, ...fields}: the metadata is persisted with the message but
+# never sent to the model, so the mark is what tells them apart from the
+# user's own words, while the text keeps a readable prefix for the model.
+# Nothing may classify a message by that prefix: the user can type it too.
+_MARK = "paimon"
+
+# A compaction checkpoint. Its shape belongs here rather than to whatever
+# decides *when* to compact: replaying a log has to rebuild it, and previews
+# have to recognize it as not-a-user-message.
+SUMMARY = "summary"
 SUMMARY_PREFIX = ("The conversation before this point was compacted into this checkpoint "
                   "(the full history remains searchable with the search_history tool):\n\n")
 
-# The other synthetic user message: what became of an agent or a background
-# command this session started. An agent's notice carries its final answer, so
-# the model learns the result without anything having to interrupt the user.
+# What became of an agent or a background command this session started. An
+# agent's notice carries its final answer, so the model learns the result
+# without anything having to interrupt the user.
+JOB = "job"
 JOB_PREFIX = "[job] "
 
-# The third: a shell command the user ran themselves with the "!" prefix,
-# recorded so the model sees what they just did without a turn having to run.
+# A shell command the user ran themselves with the "!" prefix, recorded so the
+# model sees what they just did without a turn having to run.
+SHELL = "shell"
 SHELL_PREFIX = "[shell] "
+
+SYNTHETIC_KINDS = (SUMMARY, JOB, SHELL)
 
 # The session log format this build writes and the highest it reads. Bump it
 # when a change would make older Paimons misread the log; headers without a
@@ -60,25 +73,41 @@ class SessionIncompleteError(SessionError):
     """The session log is missing the system prompt snapshot it needs to resume."""
 
 
+def _synthetic(kind: str, content: str, **fields: str) -> ModelRequest:
+    return ModelRequest(parts=[UserPromptPart(content=content)],
+                        metadata={_MARK: {"kind": kind, **fields}})
+
+
+def _mark(message: ModelMessage | dict) -> dict:
+    """The paimon mark of a message, {} when it has none.
+
+    Takes the message itself or its persisted form, so code reading the raw
+    log (previews, ``paimon log``, the history tools) asks the same question
+    the same way as code holding the parsed history.
+    """
+    if isinstance(message, ModelRequest):
+        metadata = message.metadata
+    elif isinstance(message, dict) and message.get("kind") == "request":
+        metadata = message.get("metadata")
+    else:
+        return {}
+    mark = metadata.get(_MARK) if isinstance(metadata, dict) else None
+    return mark if isinstance(mark, dict) else {}
+
+
+def synthetic_kind(message: ModelMessage | dict) -> str | None:
+    """SUMMARY, JOB or SHELL for a user message paimon wrote, else None.
+
+    Previews, titles, replay, "where does a turn start" and the reviewer all
+    have to tell these from what the user typed, and all ask here.
+    """
+    kind = _mark(message).get("kind")
+    return kind if kind in SYNTHETIC_KINDS else None
+
+
 def summary_message(summary: str) -> ModelRequest:
     """The synthetic user message placed at the start of compacted context."""
-    return ModelRequest(parts=[UserPromptPart(content=SUMMARY_PREFIX + summary)])
-
-
-def _has_prefixed_user_text(message: ModelMessage, prefix: str) -> bool:
-    return (
-        isinstance(message, ModelRequest)
-        and any(
-            isinstance(part, UserPromptPart)
-            and isinstance(part.content, str)
-            and part.content.startswith(prefix)
-            for part in message.parts
-        )
-    )
-
-
-def is_summary_message(message: ModelMessage) -> bool:
-    return _has_prefixed_user_text(message, SUMMARY_PREFIX)
+    return _synthetic(SUMMARY, SUMMARY_PREFIX + summary)
 
 
 def job_message(summary: str) -> ModelRequest:
@@ -89,20 +118,14 @@ def job_message(summary: str) -> ModelRequest:
     a turn assembled from several queued prompts has no single place to glue it
     onto anyway.
     """
-    return ModelRequest(parts=[UserPromptPart(content=JOB_PREFIX + summary)])
+    return _synthetic(JOB, JOB_PREFIX + summary, text=summary)
 
 
-def is_job_message(message: ModelMessage) -> bool:
-    return _has_prefixed_user_text(message, JOB_PREFIX)
-
-
-def job_text(message: ModelMessage) -> str:
-    """The notice a job message carries, without its marker prefix."""
-    for part in getattr(message, "parts", []):
-        if (isinstance(part, UserPromptPart) and isinstance(part.content, str)
-                and part.content.startswith(JOB_PREFIX)):
-            return part.content[len(JOB_PREFIX):]
-    return ""
+def job_text(message: ModelMessage | dict) -> str:
+    """The notice a job message carries; "" for any other message."""
+    mark = _mark(message)
+    text = mark.get("text") if mark.get("kind") == JOB else None
+    return text if isinstance(text, str) else ""
 
 
 def shell_message(command: str, output: str) -> ModelRequest:
@@ -110,33 +133,21 @@ def shell_message(command: str, output: str) -> ModelRequest:
 
     The command and its output are one user message rather than a tool call
     and its result: no model asked for this, and a tool result with no call to
-    match is exactly the shape providers reject.
+    match is exactly the shape providers reject. Both are kept in the mark as
+    well, so reading them back never depends on how the text was laid out.
     """
-    return ModelRequest(parts=[UserPromptPart(
-        content=f"{SHELL_PREFIX}$ {command}\n{output}")])
+    return _synthetic(SHELL, f"{SHELL_PREFIX}$ {command}\n{output}",
+                      command=command, output=output)
 
 
-def is_shell_message(message: ModelMessage) -> bool:
-    return _has_prefixed_user_text(message, SHELL_PREFIX)
-
-
-def shell_text(message: ModelMessage) -> tuple[str, str]:
-    """The (command, output) a shell message carries, without its marker."""
-    for part in getattr(message, "parts", []):
-        if (isinstance(part, UserPromptPart) and isinstance(part.content, str)
-                and part.content.startswith(SHELL_PREFIX)):
-            command, _, output = part.content[len(SHELL_PREFIX):].partition("\n")
-            return command.removeprefix("$ "), output
-    return "", ""
-
-
-def is_synthetic_user_text(content: str) -> bool:
-    """Whether a user-prompt string is one paimon wrote rather than the user.
-
-    Previews, titles and "where does a turn start" all have to skip these.
-    """
-    return (content.startswith(SUMMARY_PREFIX) or content.startswith(JOB_PREFIX)
-            or content.startswith(SHELL_PREFIX))
+def shell_text(message: ModelMessage | dict) -> tuple[str, str]:
+    """The (command, output) a shell message carries; empty for any other."""
+    mark = _mark(message)
+    if mark.get("kind") != SHELL:
+        return "", ""
+    command, output = mark.get("command"), mark.get("output")
+    return (command if isinstance(command, str) else "",
+            output if isinstance(output, str) else "")
 
 
 def dump_message(message: ModelMessage) -> dict:
@@ -419,6 +430,8 @@ class Session:
                 kept_messages = record.get("kept_messages")
                 if isinstance(summary, str) and isinstance(kept_messages, list):
                     kept = [message for message in kept_messages if isinstance(message, dict)]
+                    # Rebuilt rather than stored, so the checkpoint carries
+                    # its mark exactly as the live one did.
                     raw_messages = [dump_message(summary_message(summary)), *kept]
                     # Compaction snapshots are final: later replacement records
                     # only refer to messages appended after this checkpoint.
@@ -475,12 +488,12 @@ class Session:
             message = record.get("message")
             if record.get("type") != "message" or not isinstance(message, dict):
                 continue
-            if message.get("kind") != "request":
+            if message.get("kind") != "request" or synthetic_kind(message) is not None:
                 continue
             for part in message.get("parts") or []:
                 content = part.get("content") if isinstance(part, dict) else None
                 if (isinstance(part, dict) and part.get("part_kind") == "user-prompt"
-                        and isinstance(content, str) and not is_synthetic_user_text(content)):
+                        and isinstance(content, str)):
                     return content
         return None
 

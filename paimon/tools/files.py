@@ -6,6 +6,8 @@ Standard library only: the grep worker imports this module.
 import codecs
 from pathlib import Path
 
+from .result import ToolError
+
 
 def _resolve(path: str, cwd: Path) -> Path:
     p = Path(path)
@@ -82,8 +84,8 @@ def _encode_preserving(text: str, newline: str, bom: bool) -> bytes:
 def _read_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
-        return f"Error: file not found: {path}"
-    text, _, _ = _decode_preserving(path.read_bytes(), errors="replace")
+        raise ToolError(f"Error: file not found: {path}")
+    text, _, _ =_decode_preserving(path.read_bytes(), errors="replace")
     lines = text.splitlines()
     offset = max(1, int(args.get("offset", 1)))
     limit = args.get("limit")
@@ -117,19 +119,21 @@ def _write_file(args: dict, cwd: Path) -> str:
 def _edit_file(args: dict, cwd: Path) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
-        return f"Error: file not found: {path}"
+        raise ToolError(f"Error: file not found: {path}")
     try:
         text, newline, bom = _decode_preserving(path.read_bytes())
     except UnicodeDecodeError:
-        return (f"Error: {path} is not valid UTF-8 text, and editing it here would corrupt "
-                "every byte outside the edit. Use the shell to change it in its own encoding.")
+        raise ToolError(f"Error: {path} is not valid UTF-8 text, and editing it here would corrupt "
+                        "every byte outside the edit. Use the shell to change it in its own "
+                        "encoding.") from None
     old = str(args["old_string"]).replace("\r\n", "\n")
     new = str(args["new_string"]).replace("\r\n", "\n")
     count = text.count(old)
     if count == 0:
-        return "Error: old_string not found in file."
+        raise ToolError("Error: old_string not found in file.")
     if count > 1:
-        return f"Error: old_string is not unique (found {count} times). Add more context to make it unique."
+        raise ToolError(f"Error: old_string is not unique (found {count} times). "
+                        "Add more context to make it unique.")
     path.write_bytes(_encode_preserving(text.replace(old, new, 1), newline, bom))
     return f"Edited {path}"
 
@@ -148,7 +152,7 @@ _GLOB_IGNORE = {
 def _glob(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     base = _resolve(args["path"], cwd) if args.get("path") else cwd
     if not base.is_dir():
-        return f"Error: not a directory: {base}"
+        raise ToolError(f"Error: not a directory: {base}")
     skip = set() if args.get("include_ignored") else _GLOB_IGNORE
     matches = [
         p

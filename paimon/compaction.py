@@ -113,7 +113,14 @@ def count_tokens(messages: list[ModelMessage], tool_schemas: list[dict] | None =
     The estimate must cover everything a request actually sends, so the
     system prompt (absent from the history) is counted here too.
     """
-    payload = json.dumps(ModelMessagesTypeAdapter.dump_python(messages, mode="json"), ensure_ascii=False)
+    raw = ModelMessagesTypeAdapter.dump_python(messages, mode="json")
+    # Metadata is never sent (a "!" run keeps its output there a second time),
+    # so it is no part of the context. The dump is already a copy.
+    for message in raw:
+        message.pop("metadata", None)
+        for part in message.get("parts") or []:
+            part.pop("metadata", None)
+    payload = json.dumps(raw, ensure_ascii=False)
     if tool_schemas:
         payload += json.dumps(tool_schemas, ensure_ascii=False, default=str)
     if system_prompt:
@@ -162,7 +169,12 @@ def _serialize_messages(messages: list[ModelMessage]) -> str:
                 timestamp=message.timestamp,
             )
         raw = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
+        # Metadata is paimon's own bookkeeping, never sent to the model: a
+        # synthetic message's mark (a "!" run's output again, in full), a
+        # result's status detail, a script's nested calls.
+        raw.pop("metadata", None)
         for part in raw.get("parts") or []:
+            part.pop("metadata", None)
             content = part.get("content")
             if part.get("part_kind") == "tool-return" and isinstance(content, str) and len(content) > _TOOL_RESULT_LIMIT:
                 part["content"] = content[:_TOOL_RESULT_LIMIT] + "\n[tool result truncated for summary]"

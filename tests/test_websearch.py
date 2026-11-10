@@ -12,6 +12,7 @@ from paimon.agent import Agent
 from paimon.config import Config
 from paimon.tools.permissions import MODES, gate
 from paimon.tools.registry import BACKGROUND_TOOLS, INTERACTIVE_TOOLS, SUBAGENT_DENIED, execute_tool
+from paimon.tools.result import ToolError
 from paimon.websearch import Result, WebSearchError
 
 
@@ -23,6 +24,12 @@ def _results(count: int) -> list[Result]:
 class SearchTest(unittest.TestCase):
     def search(self, args: dict, backend) -> str:
         return asyncio.run(websearch.search(args, backend=backend))
+
+    def failure(self, args: dict, backend) -> ToolError:
+        """The ToolError a search that should fail raises."""
+        with self.assertRaises(ToolError) as caught:
+            self.search(args, backend)
+        return caught.exception
 
     def test_results_come_back_as_a_numbered_list(self) -> None:
         result = self.search({"query": "paimon"}, lambda query, n: _results(2))
@@ -56,13 +63,14 @@ class SearchTest(unittest.TestCase):
         def backend(query: str, max_results: int) -> list[Result]:
             raise AssertionError("backend called")
 
-        self.assertEqual(self.search({"query": "  "}, backend), "Error: query must not be empty")
+        self.assertEqual(self.failure({"query": "  "}, backend).text, "Error: query must not be empty")
 
     def test_a_backend_failure_is_reported_readably(self) -> None:
         def backend(query: str, max_results: int) -> list[Result]:
             raise WebSearchError("rate-limited")
 
-        self.assertEqual(self.search({"query": "q"}, backend), "Error: web search failed: rate-limited")
+        self.assertEqual(self.failure({"query": "q"}, backend).text,
+                         "Error: web search failed: rate-limited")
 
     def test_a_search_that_outlasts_the_total_timeout_is_given_up_on(self) -> None:
         def backend(query: str, max_results: int) -> list[Result]:
@@ -71,8 +79,9 @@ class SearchTest(unittest.TestCase):
 
         started = time.monotonic()
         with patch.object(websearch, "_TOTAL_TIMEOUT", 0.01):
-            result = self.search({"query": "q"}, backend)
-        self.assertIn("timed out after 0.01 seconds", result)
+            error = self.failure({"query": "q"}, backend)
+        self.assertIn("timed out after 0.01 seconds", error.text)
+        self.assertEqual(error.detail, "timed out")
         # The abandoned thread must not hold up the loop's shutdown either.
         self.assertLess(time.monotonic() - started, 0.15)
 
@@ -160,7 +169,7 @@ class ToolTest(unittest.TestCase):
     def test_the_registry_entry_runs_the_search(self) -> None:
         with patch.object(websearch, "_ddgs", lambda query, n: _results(1)):
             result = asyncio.run(execute_tool("web_search", {"query": "q"}, Path.cwd()))
-        self.assertEqual(result, "1. Title 1\n   https://example.com/1\n   snippet 1")
+        self.assertEqual(result.text, "1. Title 1\n   https://example.com/1\n   snippet 1")
 
     def test_the_query_is_the_call_summary(self) -> None:
         self.assertEqual(logtext.summarize_call("web_search", {"query": "textual 8 release notes"}),

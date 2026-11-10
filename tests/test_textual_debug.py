@@ -30,14 +30,14 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
                     "textual_inspect", {"selector": "#target", "include_styles": True},
                     cwd, registry=registry,
                 )
-                self.assertIn("Static#target.sample", inspected)
-                self.assertIn("width: 10", inspected)
+                self.assertIn("Static#target.sample", inspected.text)
+                self.assertIn("width: 10", inspected.text)
 
                 evaluated = await execute_tool(
                     "textual_eval", {"expression": "query_one('#target').region.width"},
                     cwd, registry=registry,
                 )
-                self.assertEqual(evaluated, "10")
+                self.assertEqual(evaluated.text, "10")
 
                 executed = await execute_tool(
                     "textual_exec",
@@ -45,7 +45,7 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
                     cwd, registry=registry,
                 )
                 await pilot.pause()
-                self.assertEqual(executed, "'target'")
+                self.assertEqual(executed.text, "'target'")
                 self.assertEqual(app.query_one("#target").region.width, 17)
 
                 applied = await execute_tool(
@@ -53,7 +53,7 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
                     cwd, registry=registry,
                 )
                 await pilot.pause()
-                self.assertIn("applied", applied)
+                self.assertIn("applied", applied.text)
                 self.assertEqual(app.query_one("#target").region.height, 3)
 
                 result = await execute_tool(
@@ -61,7 +61,7 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
                     cwd, registry=registry,
                 )
                 screenshot = cwd / "shots/ui.svg"
-                self.assertIn(str(screenshot), result)
+                self.assertIn(str(screenshot), result.text)
                 self.assertIn("<svg", screenshot.read_text(encoding="utf-8"))
 
     async def test_exec_namespace_persists_and_supports_top_level_await(self) -> None:
@@ -77,4 +77,4 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
             result = await execute_tool(
                 "textual_eval", {"expression": "value + 2"}, Path.cwd(), registry=registry,
             )
-            self.assertEqual(result, "42")
+            self.assertEqual(result.text, "42")

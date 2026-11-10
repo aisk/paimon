@@ -20,7 +20,6 @@ from . import progstatus
 from .diff import locate_line, render_diff
 from .logtext import summarize_call
 from .tools.files import resolve_path
-from .tools.registry import failure
 
 
 def abbreviate(text: str, limit: int) -> str:
@@ -289,14 +288,14 @@ def tool_call_summary(name: str, args: dict) -> str:
     return f"{count} argument{'s' if count != 1 else ''}"
 
 
-def _result_summary(result: str, denied: bool) -> tuple[str, str]:
+def _result_summary(name: str, result: str, status: str, detail: str) -> tuple[str, str]:
     """Return (status word, CSS class) for a finished entry."""
-    if denied:
+    if status == "denied":
         return "denied", "-denied"
-    problem = failure(result)
-    if problem is not None:
-        return problem, "-failed"
-    if result.rstrip().endswith("(exit code 0)"):
+    if status != "success":
+        return detail or status, "-failed"
+    if name == "shell":
+        # A command's line count says nothing; that it exited 0 does.
         return "✓", "-done"
     lines = len(result.splitlines())
     if lines > 1:
@@ -388,10 +387,13 @@ class ToolEntry(Vertical):
         self.query_one(".tool-entry-detail", Vertical).display = self._expanded
         self.query_one(".tool-entry-header", Static).update(self._header())
 
-    async def finish(self, result: str, *, label: str = "", denied: bool = False,
-                     calls: list[dict] | None = None) -> None:
+    async def finish(self, result: str, *, label: str = "", status: str = "success",
+                     detail: str = "", calls: list[dict] | None = None) -> None:
+        """Show the call's result. ``status`` and ``detail`` are the ones the
+        agent reported (see ToolEnd); nothing is read back out of the text."""
+        denied = status == "denied"
         self.remove_class(self._status_class)
-        self._status, self._status_class = _result_summary(result, denied)
+        self._status, self._status_class = _result_summary(self.tool_name, result, status, detail)
         self.add_class(self._status_class)
         detail = self.query_one(".tool-entry-detail", Vertical)
         if calls:

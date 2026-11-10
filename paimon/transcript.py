@@ -229,7 +229,8 @@ class EventRenderer:
                 self._log.add_tool_result(ev.result, label=ev.name, denied=ev.denied)
             else:
                 label = f"{ev.name} {entry.summary}"
-                await entry.finish(ev.result, label=label, denied=ev.denied, calls=ev.calls)
+                await entry.finish(ev.result, label=label, status=ev.status,
+                                   detail=ev.detail, calls=ev.calls)
                 if self._tool_group is not None:
                     self._tool_group.refresh_header()
 

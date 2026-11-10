@@ -11,6 +11,8 @@ import threading
 from dataclasses import dataclass
 from typing import Callable
 
+from .tools.result import ToolError
+
 DEFAULT_RESULTS = 5
 MAX_RESULTS = 10
 
@@ -108,7 +110,7 @@ def _start(backend: Backend, query: str, max_results: int) -> asyncio.Future:
 async def search(args: dict, backend: Backend | None = None) -> str:
     query = str(args.get("query") or "").strip()
     if not query:
-        return "Error: query must not be empty"
+        raise ToolError("Error: query must not be empty")
     max_results = args.get("max_results")
     max_results = DEFAULT_RESULTS if max_results is None else max(1, min(int(max_results), MAX_RESULTS))
     future = _start(backend or _ddgs, query, max_results)
@@ -117,10 +119,10 @@ async def search(args: dict, backend: Backend | None = None) -> str:
     done, _ = await asyncio.wait([future], timeout=_TOTAL_TIMEOUT)
     if not done:
         future.cancel()
-        return (f"Error: web search timed out after {_TOTAL_TIMEOUT:g} seconds; "
-                "the network may be unreachable")
+        raise ToolError(f"Error: web search timed out after {_TOTAL_TIMEOUT:g} seconds; "
+                        "the network may be unreachable", detail="timed out")
     try:
         results = future.result()
     except WebSearchError as exc:
-        return f"Error: web search failed: {exc}"
+        raise ToolError(f"Error: web search failed: {exc}") from None
     return render(query, results)

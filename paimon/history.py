@@ -12,7 +12,8 @@ import json
 import re
 
 from .logtext import render_record, superseded_seqs
-from .session import Session
+from .session import Session, synthetic_kind
+from .tools.result import ToolError
 
 _HISTORY_TOOLS = ("search_history", "read_history")
 _SEARCH_CONTEXT = 100  # chars of context shown on each side of a match
@@ -54,13 +55,16 @@ def _searchable_parts(record: dict):
     The history tools' own calls and results are skipped: they quote earlier
     matches, so searching them would return every past search over again.
     """
-    for part in (record.get("message") or {}).get("parts") or []:
+    message = record.get("message") or {}
+    # A job notice or a "!" run is labelled as such, never as the user's words.
+    author = synthetic_kind(message) or "user"
+    for part in message.get("parts") or []:
         if not isinstance(part, dict):
             continue
         kind = part.get("part_kind")
         content = part.get("content")
         if kind == "user-prompt":
-            yield "user", str(content or "")
+            yield author, str(content or "")
         elif kind == "text":
             yield "assistant", str(content or "")
         elif kind == "thinking":
@@ -90,11 +94,11 @@ def _snippet(text: str, match: re.Match) -> str:
 def search(session: Session, args: dict) -> str:
     query = str(args.get("query") or "")
     if not query:
-        return "Error: query must not be empty"
+        raise ToolError("Error: query must not be empty")
     try:
         limit = max(1, min(int(args.get("max_results") or _DEFAULT_SEARCH_RESULTS), _MAX_SEARCH_RESULTS))
     except (TypeError, ValueError):
-        return "Error: max_results must be an integer"
+        raise ToolError("Error: max_results must be an integer") from None
     note = ""
     try:
         pattern = re.compile(query, re.IGNORECASE)
@@ -126,10 +130,10 @@ def read(session: Session, args: dict, budget: int) -> str:
         seq = int(args["seq"])
         count = max(1, min(int(args.get("count") or 1), _MAX_READ_RECORDS))
     except (KeyError, TypeError, ValueError):
-        return "Error: seq (and optional count) must be integers"
+        raise ToolError("Error: seq (and optional count) must be integers") from None
     entries = session.entries()
     if seq < 1 or seq > len(entries):
-        return f"Error: seq out of range (the log has {len(entries)} records)"
+        raise ToolError(f"Error: seq out of range (the log has {len(entries)} records)")
     superseded = superseded_seqs(entries)
     lines: list[str] = []
     used = 0

@@ -64,6 +64,15 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.out.getvalue(), "")
         self.assertEqual(self.err.getvalue(), "· shell  find . \\ -name '*.py'\n")
 
+    async def test_a_failed_call_ends_its_line_with_what_went_wrong(self) -> None:
+        renderer = self._renderer()
+        await _feed(
+            renderer,
+            ToolStart("call-1", "shell", {"command": "false"}),
+            ToolEnd("call-1", "shell", "(exit code 1)", status="failed", detail="exit 1"),
+        )
+        self.assertEqual(self.err.getvalue(), "· shell  false  → exit 1\n")
+
     async def test_long_detail_is_truncated(self) -> None:
         renderer = self._renderer()
         await _feed(renderer, ToolStart("call-1", "shell", {"command": "x" * 500}))
@@ -76,9 +85,9 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
         await _feed(
             renderer,
             ToolStart("call-1", "edit_file", {"path": "README.md"}),
-            ToolEnd("call-1", "edit_file", "User denied this operation.", denied=True),
+            ToolEnd("call-1", "edit_file", "User denied this operation.", status="denied"),
             ToolStart("call-2", "shell", {"command": "ls"}),
-            ToolEnd("call-2", "shell", "User denied this operation.", denied=True),
+            ToolEnd("call-2", "shell", "User denied this operation.", status="denied"),
         )
         err = self.err.getvalue()
         self.assertEqual(err.count("→ denied"), 2)  # both outcomes reported
@@ -91,7 +100,7 @@ class TextRendererTest(unittest.IsolatedAsyncioTestCase):
         await _feed(
             renderer,
             ToolStart("call-1", "shell", {"command": "git push"}),
-            ToolEnd("call-1", "shell", "Denied by the auto mode reviewer: no.", denied=True),
+            ToolEnd("call-1", "shell", "Denied by the auto mode reviewer: no.", status="denied"),
         )
         err = self.err.getvalue()
         self.assertIn("--mode yolo", err)
@@ -152,7 +161,7 @@ class JsonRendererTest(unittest.IsolatedAsyncioTestCase):
             ReasoningDelta("think"),
             TextDelta("Looking."),
             ToolStart("call-1", "shell", {"command": "ls"}),
-            ToolEnd("call-1", "shell", "denied", denied=True),
+            ToolEnd("call-1", "shell", "denied", status="denied"),
             TodosUpdate([{"content": "a", "status": "pending"}]),
             ContextCompacted(100, 20),
             TextDelta("Done."),
@@ -168,6 +177,26 @@ class JsonRendererTest(unittest.IsolatedAsyncioTestCase):
         # Text blocks are split where a tool call interrupts them.
         self.assertEqual(lines[-1]["text"], "Looking.\n\nDone.")
         self.assertEqual(lines[-1]["denied"], 1)
+        result = lines[4]
+        self.assertEqual((result["denied"], result["status"], result["detail"]),
+                         (True, "denied", "denied"))
+
+    async def test_a_failed_call_carries_its_status(self) -> None:
+        renderer = headless.JsonRenderer(self.out)
+        renderer.begin("sid")
+        await _feed(
+            renderer,
+            ToolStart("call-1", "shell", {"command": "false"}),
+            ToolEnd("call-1", "shell", "(exit code 2)", status="failed", detail="exit 2"),
+            ToolStart("call-2", "read_file", {"path": "log.txt"}),
+            ToolEnd("call-2", "read_file", "1  (exit code 1)"),
+        )
+        renderer.finish()
+
+        results = [line for line in self._lines() if line["type"] == "tool_result"]
+        self.assertEqual([(line["status"], line["detail"], line["denied"]) for line in results],
+                         [("failed", "exit 2", False), ("success", "", False)])
+        self.assertEqual(self._lines()[-1]["denied"], 0)
 
     async def test_reasoning_is_emitted_even_when_display_is_off(self) -> None:
         renderer = headless.JsonRenderer(self.out, _config(show_reasoning=False))
@@ -200,7 +229,7 @@ class ResultRendererTest(unittest.IsolatedAsyncioTestCase):
             ReasoningDelta("think"),
             TextDelta("Looking."),
             ToolStart("call-1", "shell", {"command": "ls"}),
-            ToolEnd("call-1", "shell", "denied", denied=True),
+            ToolEnd("call-1", "shell", "denied", status="denied"),
             TextDelta("Done."),
         )
         renderer.finish()

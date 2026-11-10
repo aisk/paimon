@@ -16,7 +16,8 @@ from paimon import agent as agent_module
 from paimon import headless, lockfile
 from paimon.agent import Agent, JobNotice, TextDelta, ToolEnd, UserInput
 from paimon.config import Config
-from paimon.session import Session, is_job_message, job_text
+from paimon.session import Session, job_text, synthetic_kind
+from paimon.tools.result import ToolError
 from tests.support.agent import make_session, spawning_model, stub_model
 from tests.support.turns import FakeCommand, settle
 
@@ -80,7 +81,7 @@ class SpawnAgentTest(JobsTestCase):
         notices = [event for event in events if isinstance(event, JobNotice)]
         self.assertEqual(len(notices), 1)
         self.assertTrue(notices[0].text.endswith("finished:\ndone"))
-        delivered = [message for message in agent.history if is_job_message(message)]
+        delivered = [message for message in agent.history if synthetic_kind(message) == "job"]
         self.assertEqual([job_text(message) for message in delivered], [notices[0].text])
         self.assertEqual(agent.notices, [], "a notice is delivered once")
 
@@ -212,9 +213,9 @@ class SpawnAgentTest(JobsTestCase):
             raise RuntimeError("all 8 panes are in use")
 
         agent.open_job = open_job
-        answer = await agent._job_tool("spawn_agent", {"prompt": "check the parser"})
+        with self.assertRaisesRegex(ToolError, "could not start an agent: all 8 panes are in use"):
+            await agent._job_tool("spawn_agent", {"prompt": "check the parser"})
 
-        self.assertIn("could not start an agent: all 8 panes are in use", answer)
         self.assertEqual(agent.jobs, {})
         for session in Session.list(self.cwd, include_children=True):
             if session.path not in before:
@@ -282,8 +283,10 @@ class ListModelsTest(JobsTestCase):
 
     async def test_a_model_that_cannot_be_built_starts_nothing(self) -> None:
         agent = self.agent()
-        with patch("paimon.agent.build_model", side_effect=ValueError("Unknown provider: nope.")):
-            answer = await agent._job_tool("spawn_agent", {"prompt": "go", "model": "nope:x"})
+        with (patch("paimon.agent.build_model", side_effect=ValueError("Unknown provider: nope.")),
+              self.assertRaises(ToolError) as caught):
+            await agent._job_tool("spawn_agent", {"prompt": "go", "model": "nope:x"})
+        answer = caught.exception.text
         self.assertIn("cannot start an agent on 'nope:x': Unknown provider: nope.", answer)
         self.assertIn("list_models", answer)
         self.assertEqual(agent.jobs, {})
@@ -486,7 +489,8 @@ class BackgroundCommandTest(JobsTestCase):
 
         self.assertTrue(command.killed)
         self.assertEqual(agent.notices, [])
-        self.assertIn("already ended", await agent._job_tool("stop_job", {"job_id": job_id}))
+        with self.assertRaisesRegex(ToolError, "already ended"):
+            await agent._job_tool("stop_job", {"job_id": job_id})
 
     async def test_a_tab_the_user_closed_is_reported(self) -> None:
         agent = self.agent()
@@ -503,11 +507,11 @@ class BackgroundCommandTest(JobsTestCase):
             raise RuntimeError("all 8 panes are in use")
 
         agent.open_job = open_job
-        with patch("paimon.agent.start_background", return_value=command):
-            answer = await agent._job_tool(
-                "run_background", {"command": "npm run dev", "description": "dev"})
+        with (patch("paimon.agent.start_background", return_value=command),
+              self.assertRaisesRegex(ToolError,
+                                     "could not start the command: all 8 panes are in use")):
+            await agent._job_tool("run_background", {"command": "npm run dev", "description": "dev"})
 
-        self.assertIn("could not start the command: all 8 panes are in use", answer)
         self.assertTrue(command.killed, "or it would outlive the app in its own group")
         self.assertEqual(agent.jobs, {})
 
@@ -527,7 +531,8 @@ class BackgroundCommandTest(JobsTestCase):
         gate = asyncio.Event()
         await self.turn(agent, model=spawning_model(["check"], gate=gate))
         (job_id,) = agent.jobs
-        self.assertIn("is an agent", await agent._job_tool("read_job", {"job_id": job_id}))
+        with self.assertRaisesRegex(ToolError, "is an agent"):
+            await agent._job_tool("read_job", {"job_id": job_id})
 
 
 class HeadlessTest(JobsTestCase):

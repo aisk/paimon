@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from paimon.tools.grep import _grep, _grep_async
 from paimon.tools.permissions import run_tool
+from paimon.tools.result import ToolError
 
 
 class GrepTest(unittest.TestCase):
@@ -59,12 +60,13 @@ class GrepTest(unittest.TestCase):
         self.assertEqual(len(lines), 4)
         self.assertIn("first 3 matches shown", lines[-1])
 
-    def test_a_bad_regex_is_an_error_not_an_exception(self) -> None:
-        self.assertIn("invalid regular expression", _grep({"pattern": "("}, self.cwd))
+    def test_a_bad_regex_is_a_tool_error_not_a_crash(self) -> None:
+        with self.assertRaisesRegex(ToolError, "invalid regular expression"):
+            _grep({"pattern": "("}, self.cwd)
 
     def test_a_missing_base_is_an_error(self) -> None:
-        result = _grep({"pattern": "x", "path": "nowhere"}, self.cwd)
-        self.assertIn("no such file or directory", result)
+        with self.assertRaisesRegex(ToolError, "no such file or directory"):
+            _grep({"pattern": "x", "path": "nowhere"}, self.cwd)
 
     def test_no_matches_says_so(self) -> None:
         self.write("a.txt", "quiet\n")
@@ -165,9 +167,15 @@ class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             path = cwd / "a.txt"
             path.write_text("needle\n")
-            result, denied = await run_tool("grep", {"pattern": "needle"}, cwd, mode="read")
-            self.assertFalse(denied)
-            self.assertEqual(result, f"{path}:1:needle")
+            result = await run_tool("grep", {"pattern": "needle"}, cwd, mode="read")
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.text, f"{path}:1:needle")
+
+    async def test_a_failed_search_crosses_the_worker_as_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = await run_tool("grep", {"pattern": "("}, Path(directory), mode="yolo")
+        self.assertEqual(result.status, "failed")
+        self.assertIn("invalid regular expression", result.text)
 
     async def test_pathological_regex_times_out_without_blocking_loop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,8 +195,10 @@ class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(_grep_async({"pattern": "(a+)+$"}, cwd))
                 await asyncio.sleep(0.1)
                 self.assertFalse(task.done())
-                result = await asyncio.wait_for(task, 5)
-            self.assertIn("timed out", result)
+                with self.assertRaises(ToolError) as caught:
+                    await asyncio.wait_for(task, 5)
+            self.assertIn("timed out", caught.exception.text)
+            self.assertEqual(caught.exception.detail, "timed out")
             self.assertIsNotNone(processes[0].returncode)
 
     async def test_cancellation_reaps_worker(self) -> None:

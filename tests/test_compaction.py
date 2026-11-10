@@ -1,3 +1,4 @@
+import dataclasses
 import tempfile
 import threading
 import unittest
@@ -15,7 +16,7 @@ from pydantic_ai.messages import (
 
 from paimon import compaction
 from paimon.llm import build_model
-from paimon.session import Session, job_message, is_summary_message
+from paimon.session import Session, job_message, shell_message, synthetic_kind
 
 
 def _user(content: str) -> ModelRequest:
@@ -60,6 +61,19 @@ class CompactionHelpersTest(unittest.TestCase):
         bare = compaction.count_tokens(messages)
         with_prompt = compaction.count_tokens(messages, system_prompt="x" * 4_000)
         self.assertGreaterEqual(with_prompt - bare, 900)
+
+    def test_count_leaves_out_metadata_the_model_is_never_sent(self) -> None:
+        output = "x" * 8_000
+        marked = shell_message("make", output)
+        unmarked = dataclasses.replace(marked, metadata=None)
+        result = ModelRequest(parts=[ToolReturnPart(
+            tool_name="run_code", content="ok", tool_call_id="c1",
+            metadata={"calls": [{"detail": "y" * 8_000}]})])
+        bare_result = ModelRequest(parts=[dataclasses.replace(result.parts[0], metadata=None)])
+
+        self.assertEqual(compaction.count_tokens([marked]), compaction.count_tokens([unmarked]))
+        self.assertEqual(compaction.count_tokens([result]), compaction.count_tokens([bare_result]))
+        self.assertIsNotNone(marked.metadata, "the message itself is left alone")
 
     def test_count_weighs_cjk_by_bytes(self) -> None:
         # A CJK character is three UTF-8 bytes, so a thousand of them count
@@ -204,7 +218,7 @@ class SessionCompactionTest(unittest.TestCase):
 
             replayed = session.messages()
             self.assertEqual(len(replayed), 3)
-            self.assertTrue(is_summary_message(replayed[0]))
+            self.assertEqual(synthetic_kind(replayed[0]), "summary")
             self.assertIn("checkpoint", replayed[0].parts[0].content)
             self.assertEqual(replayed[1], recent)
             self.assertEqual(replayed[2], after)

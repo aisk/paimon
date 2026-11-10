@@ -25,7 +25,7 @@ from .config import UNSET, Config, config_path
 from .errors import PaimonError
 from .llm import LOGIN_PROVIDERS, build_model, require_provider, signed_in_plans, split_model_string
 from .logtext import render_record, superseded_seqs
-from .session import Session, is_synthetic_user_text
+from .session import Session, synthetic_kind
 
 
 def resolve_session(prefix: str) -> Session:
@@ -336,17 +336,18 @@ def sessions(argv: list) -> int:
 
 
 def _is_turn_start(record: dict | None) -> bool:
-    """True for a message that opens a turn: a real user prompt, not a
-    compaction summary (same test as Session.first_user_text)."""
+    """True for a message that opens a turn: a real user prompt, not one
+    paimon wrote (same test as Session.first_user_text)."""
     if not record or record.get("type") != "message":
         return False
     message = record.get("message")
-    if not isinstance(message, dict) or message.get("kind") != "request":
+    if (not isinstance(message, dict) or message.get("kind") != "request"
+            or synthetic_kind(message) is not None):
         return False
     for part in message.get("parts") or []:
         content = part.get("content") if isinstance(part, dict) else None
         if (isinstance(part, dict) and part.get("part_kind") == "user-prompt"
-                and isinstance(content, str) and not is_synthetic_user_text(content)):
+                and isinstance(content, str)):
             return True
     return False
 

@@ -41,8 +41,10 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
         # 300 * 101 bytes overshoots the byte budget while staying well under
         # the line budget, so this is byte truncation alone.
         command = filler(300, "x" * 100, last="FINAL-ERROR", exit_code=7)
-        result = await _shell({"command": command}, self.cwd)
+        outcome = await _shell({"command": command}, self.cwd)
+        result = outcome.text
 
+        self.assertEqual((outcome.status, outcome.detail), ("failed", "exit 7"))
         self.assertIn("FINAL-ERROR", result, "the tail is what the model needs")
         self.assertIn("(exit code 7)", result)
         self.assertIn("showing last", result)
@@ -58,8 +60,10 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_line_budget_truncates_before_the_byte_budget(self) -> None:
         command = filler(3000, "line")  # ~15KB, far under the byte cap
-        result = await _shell({"command": command}, self.cwd)
+        outcome = await _shell({"command": command}, self.cwd)
+        result = outcome.text
 
+        self.assertEqual((outcome.status, outcome.detail), ("success", ""))
         body = result.split("\n\n[")[0]
         self.assertEqual(len(body.splitlines()), 2_000)
         self.assertIn("of 3,000 lines", result)
@@ -68,14 +72,14 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_multibyte_output_stays_within_the_result_budget(self) -> None:
         command = filler(400, "😀" * 40, last="TAIL-OK")
-        result = await _shell({"command": command}, self.cwd)
+        result = (await _shell({"command": command}, self.cwd)).text
 
         self.assertIn("TAIL-OK", result, "the cut must not eat the last line")
         self.assertLessEqual(len(result), MAX_OUTPUT)
 
     async def test_one_enormous_line_keeps_its_end(self) -> None:
         """No newline to cut on, so the end of the line is the whole answer."""
-        result = await _shell({"command": filler(400, "x" * 100, newline=False)}, self.cwd)
+        result = (await _shell({"command": filler(400, "x" * 100, newline=False)}, self.cwd)).text
 
         self.assertIn("of line 1 (line is ", result)
         self.assertLessEqual(len(result), MAX_OUTPUT)
@@ -89,8 +93,10 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
             patch("paimon.tools.shell._KILL_GRACE", 0.05),
             patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
         ):
-            result = await _shell({"command": command}, self.cwd)
+            outcome = await _shell({"command": command}, self.cwd)
+        result = outcome.text
 
+        self.assertEqual((outcome.status, outcome.detail), ("failed", "timed out"))
         self.assertIn("partial-output", result, "a timeout is when output matters most")
         self.assertIn("(timed out after 0.3s)", result)
 
@@ -98,7 +104,7 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
         """The command is finished even though something it started holds the pipe."""
         with patch("paimon.tools.shell._COMMAND_TIMEOUT", 10.0):
             started = time.monotonic()
-            result = await _shell({"command": spawner(then_sleep=False)}, self.cwd)
+            result = (await _shell({"command": spawner(then_sleep=False)}, self.cwd)).text
             elapsed = time.monotonic() - started
         self.addCleanup(reap, pid_from(result))
 
@@ -114,7 +120,7 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
             patch("paimon.tools.shell._KILL_GRACE", 0.05),
             patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
         ):
-            result = await _shell({"command": command}, self.cwd)
+            result = (await _shell({"command": command}, self.cwd)).text
         pid = pid_from(result)
         self.addCleanup(reap, pid)
 
@@ -297,13 +303,13 @@ class ShellExecutableTest(unittest.IsolatedAsyncioTestCase):
 
     @posix_shell
     async def test_commands_run_in_the_reported_shell(self) -> None:
-        result = await _shell({"command": "echo shell=$0"}, self.cwd)
+        result = (await _shell({"command": "echo shell=$0"}, self.cwd)).text
         self.assertIn(f"shell={shell_executable()}", result)
 
     @posix_shell
     @unittest.skipUnless(shutil.which("bash"), "bash not installed")
     async def test_bashisms_work_when_bash_is_installed(self) -> None:
         self.assertIn("bash", shell_executable())
-        result = await _shell({"command": "[[ 1 == 1 ]] && echo yes-bash"}, self.cwd)
+        result = (await _shell({"command": "[[ 1 == 1 ]] && echo yes-bash"}, self.cwd)).text
         self.assertIn("yes-bash", result)
         self.assertIn("(exit code 0)", result)

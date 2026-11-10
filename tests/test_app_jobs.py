@@ -10,7 +10,8 @@ from paimon import lockfile
 from paimon.agentpane import AgentPane
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.commandpane import CommandPane
-from paimon.session import Session, is_job_message
+from paimon.session import Session, synthetic_kind
+from paimon.tools.result import ToolError
 from paimon.ui import (
     ConfirmPanel,
     PromptInput,
@@ -28,7 +29,7 @@ class SpawnAgentTest(AppTestCase):
     async def _spawn(self, app: PaimonApp, pilot) -> str:
         app.pane.handle_submit(PromptInput.Submitted("go"))
         await self._wait_for(pilot, lambda: bool(app.pane.agent.jobs) or bool(
-            [m for m in app.pane.agent.history if is_job_message(m)]))
+            [m for m in app.pane.agent.history if synthetic_kind(m) == "job"]))
         return next(iter(app.pane.agent.jobs), "")
 
     async def test_an_agent_runs_in_a_background_tab_that_goes_when_it_does(self) -> None:
@@ -109,7 +110,7 @@ class SpawnAgentTest(AppTestCase):
                     pilot, lambda: f"agent {job_id} finished" in self._log_text(parent))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
 
-                self.assertTrue(any(is_job_message(message)
+                self.assertTrue(any(synthetic_kind(message) == "job"
                                     for message in parent.agent.history))
                 self.assertEqual(parent.agent.notices, [])
                 self.assertEqual(parent.agent.session.first_user_text(), "go",
@@ -131,7 +132,7 @@ class SpawnAgentTest(AppTestCase):
 
                 await end_turn(parent)
                 await self._wait_for(pilot, lambda: any(
-                    is_job_message(message) for message in parent.agent.history))
+                    synthetic_kind(message) == "job" for message in parent.agent.history))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
                 self.assertEqual(parent.agent.notices, [])
 
@@ -512,19 +513,19 @@ class BackgroundTaskTest(AppTestCase):
                 running.output.append(b"listening on 3000\n")
                 mine = await first.agent._job_tool("read_job", {"job_id": job_id})
                 self.assertIn("listening on 3000", mine)
-                theirs = await second.agent._job_tool("read_job", {"job_id": job_id})
-                self.assertIn("no agent or background command", theirs)
+                with self.assertRaisesRegex(ToolError, "no agent or background command"):
+                    await second.agent._job_tool("read_job", {"job_id": job_id})
 
                 # The exit is news for the pane that started it, and only for
                 # that one: the other conversation never heard of this command.
                 running.exit(1)
                 await self._wait_for(
-                    pilot, lambda: any(is_job_message(message)
+                    pilot, lambda: any(synthetic_kind(message) == "job"
                                        for message in first.agent.history))
                 await self._wait_for(pilot, lambda: not first.is_busy)
                 self.assertIn(f"command {job_id} exited (code 1)", self._log_text(first))
                 self.assertFalse(second.is_busy, "nothing woke the pane on screen")
-                self.assertFalse(any(is_job_message(message)
+                self.assertFalse(any(synthetic_kind(message) == "job"
                                      for message in second.agent.history))
 
     async def test_crlf_lines_are_shown_and_redrawn_lines_keep_their_last_state(self) -> None:
@@ -606,4 +607,4 @@ class BackgroundTaskTest(AppTestCase):
                     pilot, lambda: f"command {job_id} exited (code 3)"
                     in self._log_text(parent))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
-                self.assertTrue(any(is_job_message(m) for m in parent.agent.history))
+                self.assertTrue(any(synthetic_kind(m) == "job" for m in parent.agent.history))

@@ -27,7 +27,7 @@ from pydantic_ai.models import Model
 
 from .errors import PaimonError
 from .llm import ask_once, split_model_string
-from .session import JOB_PREFIX, SHELL_PREFIX, SUMMARY_PREFIX
+from .session import SHELL, shell_text, synthetic_kind
 
 # Seconds one review may take before it counts as unavailable.
 TIMEOUT = 60.0
@@ -147,16 +147,16 @@ def _transcript(history: list[ModelMessage], subagent: bool = False) -> str:
     author = "parent agent asked" if subagent else "user"
     lines = []
     for message in history:
+        kind = synthetic_kind(message)
+        if kind == SHELL:
+            command, _ = shell_text(message)
+            lines.append(f"user ran: {_clip(command, _MAX_USER_TEXT)}")
+            continue
+        if kind is not None:
+            continue
         for part in message.parts:
             if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                text = part.content
-                if text.startswith(SUMMARY_PREFIX) or text.startswith(JOB_PREFIX):
-                    continue
-                if text.startswith(SHELL_PREFIX):
-                    command = text[len(SHELL_PREFIX):].partition("\n")[0].removeprefix("$ ")
-                    lines.append(f"user ran: {_clip(command, _MAX_USER_TEXT)}")
-                    continue
-                lines.append(f"{author}: {_clip(text, _MAX_USER_TEXT)}")
+                lines.append(f"{author}: {_clip(part.content, _MAX_USER_TEXT)}")
             elif isinstance(part, ToolCallPart):
                 lines.append(f"agent called {part.tool_name}: "
                              f"{_clip(part.args_as_json_str(), _MAX_PAST_CALL)}")
