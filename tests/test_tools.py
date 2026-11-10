@@ -217,6 +217,26 @@ class ReadFileTest(unittest.TestCase):
             with self.assertRaisesRegex(ToolError, "1-indexed"):
                 self._read(offset=offset)
 
+    def test_lines_are_numbered_the_way_grep_numbers_them(self) -> None:
+        """Only LF and CRLF end a line, as in grep and edit_file; a form feed
+        or a Unicode separator is part of the line it sits in."""
+        from paimon.tools.files import _edit_file
+        from paimon.tools.grep import _grep
+        path = self.cwd / "f.txt"
+        path.write_bytes("one\x0ctwo\r\nthree x\x1c\x85y\r\nfour".encode("utf-8"))
+        self.assertEqual(self._read(), "1  one\x0ctwo\n2  three x\x1c\x85y\n3  four")
+        self.assertEqual(_grep({"pattern": "four"}, self.cwd), f"{path}:3:four")
+        self.assertEqual(self._read(offset=3), "3  four")
+        _edit_file({"path": "f.txt", "old_string": "one\x0ctwo\nthree", "new_string": "1"}, self.cwd)
+        self.assertEqual(path.read_bytes(), "1 x\x1c\x85y\r\nfour".encode("utf-8"))
+
+    def test_a_final_newline_starts_no_extra_line(self) -> None:
+        self.assertEqual(self._read(), "1  a\n2  b\n3  c")
+        (self.cwd / "f.txt").write_bytes(b"a\r\nb\r\n\r\n")
+        self.assertEqual(self._read(), "1  a\n2  b\n3  ")
+        (self.cwd / "f.txt").write_bytes(b"")
+        self.assertEqual(self._read(), "(file is empty or offset past end of file)")
+
 
 class GlobTest(unittest.TestCase):
     def setUp(self) -> None:

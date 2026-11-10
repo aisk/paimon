@@ -86,7 +86,13 @@ def _read_file(args: dict, cwd: Path) -> str:
     if not path.exists():
         raise ToolError(f"Error: file not found: {path}")
     text, _, _ =_decode_preserving(path.read_bytes(), errors="replace")
-    lines = text.splitlines()
+    # "\n" only, CRLF having become "\n" above: str.splitlines() also breaks
+    # at form feeds, \x1c-\x1e, NEL and the Unicode separators, and drops
+    # them, so line numbers would disagree with grep's and an old_string
+    # copied from this output would not be found by edit_file.
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()  # the newline ending the last line starts no new one
     # Refused rather than clamped or ignored: a limit of 0 read as "no limit"
     # hands back the whole file, and an offset of 0 is a model counting from
     # zero, which deserves to hear that lines count from 1.
