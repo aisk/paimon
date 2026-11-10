@@ -17,6 +17,7 @@ from paimon.app import PaimonApp
 from paimon.config import Config
 from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen, PromptScreen
 from paimon.pane import _session_label
+from paimon.session import SessionError
 from paimon.ui import (
     AssistantMessage,
     ToolResult,
@@ -129,6 +130,37 @@ class ForkSessionTest(AppTestCase):
             app.action_fork_session()
             await pilot.pause()
             self.assertIs(app.pane.agent, before)
+
+    async def test_a_failed_log_copy_is_reported_and_keeps_the_session(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            before = app.pane.agent
+            with patch.object(before.session, "fork", side_effect=OSError("disk full")):
+                app.action_fork_session()
+                await pilot.pause()
+            self.assertIs(app.pane.agent, before)
+            self.assertIn("Cannot fork", _log_text(app))
+            self.assertIn("disk full", _log_text(app))
+
+
+class NewSessionTest(AppTestCase):
+    async def test_a_session_that_cannot_open_is_reported_and_keeps_the_old_one(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            before = app.pane.agent
+            with patch("paimon.pane.Agent.open", side_effect=SessionError("no prompt")):
+                app.action_new_session()
+                await pilot.pause()
+            self.assertIs(app.pane.agent, before)
+            self.assertTrue(lockfile.held(before.session.path))
+            self.assertIn("Cannot start a new session", _log_text(app))
+            self.assertIn("no prompt", _log_text(app))
+
+
+def _log_text(app: PaimonApp) -> str:
+    return " ".join(str(widget.render()) for widget in app.query_one("#log").walk_children())
 
 
 class LoginTest(AppTestCase):

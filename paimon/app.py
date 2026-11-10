@@ -351,6 +351,10 @@ class PaimonApp(App):
         return super().check_action(action, parameters)
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        # A focus change queued behind the shutdown arrives after the screen
+        # stack has been pruned, where asking for the screen raises.
+        if not self.screen_stack:
+            return
         if (self.screen is self._switcher.screen and event.widget is self.focused
                 and self.pane in event.widget.ancestors):
             self.pane._last_focus = event.widget
@@ -423,6 +427,8 @@ class PaimonApp(App):
         if not self._panes:
             # The app always has one conversation in it.
             await self._replace_last_pane(pane)
+            if not self._panes:
+                return  # no replacement could be opened: the app is exiting
         current = self._panes[min(index, len(self._panes) - 1)]
         await pane.remove()
         if self._current is pane:

@@ -7,6 +7,7 @@ from paimon import lockfile
 from paimon.agent import Agent
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.pane import SessionPane
+from paimon.session import SessionError
 from paimon.tabs import PaneTab
 from paimon.ui import (
     ConfirmPanel,
@@ -128,6 +129,16 @@ class MultiPaneTest(AppTestCase):
             await pilot.pause()
             self.assertEqual(len(app.panes), 1)
             self.assertIn("last pane stays open", self._log_text(app.pane))
+
+    async def test_dropping_the_last_pane_exits_when_no_replacement_opens(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            with (patch("paimon.app.Agent.open", side_effect=SessionError("busy")),
+                  patch.object(app, "exit") as exit_app):
+                await app._drop_pane(app.pane)  # raised IndexError before
+            exit_app.assert_called_once()
+            self.assertEqual(app.panes, [])
 
     async def test_pane_count_is_capped(self) -> None:
         app = self.make_app()

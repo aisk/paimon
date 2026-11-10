@@ -432,8 +432,13 @@ class SessionPane(Pane):
         if self.is_busy:
             return
         # The toolset travels with the pane, not with the session.
-        agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
-                           config=self.config, toolset=self.agent.toolset)
+        try:
+            agent = Agent.open(cwd=self.agent.cwd, confirm=self._confirm, mode=self.mode,
+                               config=self.config, toolset=self.agent.toolset)
+        except SessionError as exc:
+            self.transcript.add(Content.from_markup("[$text-error b]Cannot start a new session:[/] $body",
+                                                    body=str(exc)))
+            return
         killed = self._retire_agent()
         self._swap_agent(agent)
         self._title = ""
@@ -450,11 +455,13 @@ class SessionPane(Pane):
     def fork_session(self) -> None:
         if self.is_busy:
             return
-        forked = self.agent.session.fork()
         try:
+            # Copying the log is file I/O of its own and can fail (disk full,
+            # permissions) before any agent exists to open.
+            forked = self.agent.session.fork()
             agent = Agent.open(cwd=self.agent.cwd, session=forked, confirm=self._confirm,
                                mode=self.mode, config=self.config, toolset=self.agent.toolset)
-        except SessionError as exc:
+        except (SessionError, OSError) as exc:
             self.transcript.add(Content.from_markup("[$text-error b]Cannot fork:[/] $body", body=str(exc)))
             return
         # The conversation on screen is the fork's history verbatim, so the
