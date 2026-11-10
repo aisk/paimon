@@ -430,9 +430,14 @@ class Session:
                 kept_messages = record.get("kept_messages")
                 if isinstance(summary, str) and isinstance(kept_messages, list):
                     kept = [message for message in kept_messages if isinstance(message, dict)]
-                    # Rebuilt rather than stored, so the checkpoint carries
-                    # its mark exactly as the live one did.
-                    raw_messages = [dump_message(summary_message(summary)), *kept]
+                    # The checkpoint exactly as the live history held it,
+                    # timestamp and mark included, so a replay is the context
+                    # the agent had. Rebuilt from the summary for a record
+                    # that does not carry one.
+                    checkpoint = record.get("checkpoint")
+                    if not isinstance(checkpoint, dict):
+                        checkpoint = dump_message(summary_message(summary))
+                    raw_messages = [checkpoint, *kept]
                     # Compaction snapshots are final: later replacement records
                     # only refer to messages appended after this checkpoint.
                     positions = {}
@@ -535,13 +540,21 @@ class Session:
         record.update({key: value for key, value in fields.items() if value is not None})
         self.append(record)
 
-    def append_compaction(self, summary: str, kept_messages: list[ModelMessage], tokens_before: int) -> None:
-        """Persist a checkpoint without deleting any earlier JSONL records."""
+    def append_compaction(self, summary: str, kept_messages: list[ModelMessage], tokens_before: int,
+                          *, checkpoint: ModelRequest | None = None) -> None:
+        """Persist a checkpoint without deleting any earlier JSONL records.
+
+        ``checkpoint`` is the summary message the compacted context opens
+        with, persisted as is so every replay gives back that same message;
+        built from ``summary`` when the caller holds none.
+        """
+        checkpoint = checkpoint or summary_message(summary)
         self.append({
             "type": "compaction",
             "id": str(uuid4()),
             "timestamp": _now(),
             "summary": summary,
+            "checkpoint": dump_message(checkpoint),
             "kept_messages": [dump_message(message) for message in kept_messages],
             "tokens_before": tokens_before,
         })

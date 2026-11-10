@@ -8,7 +8,7 @@ recent suffix is kept verbatim.
 import asyncio
 import json
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from genai_prices.data_snapshot import get_snapshot
 from pydantic_ai.messages import (
@@ -67,11 +67,18 @@ class CompactionResult:
     kept_messages: list[ModelMessage]
     tokens_before: int
     tokens_after: int
+    # The summary message the new context opens with. Built once, so the
+    # context that is measured, the one that becomes the history and the one
+    # the log persists all open with the very same message, timestamp included.
+    checkpoint: ModelRequest = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.checkpoint = summary_message(self.summary)
 
     @property
     def messages(self) -> list[ModelMessage]:
         """The context that replaces the old one: checkpoint plus recent tail."""
-        return [summary_message(self.summary), *self.kept_messages]
+        return [self.checkpoint, *self.kept_messages]
 
 
 def _window_by_name(model_name: str) -> int | None:

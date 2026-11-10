@@ -806,7 +806,8 @@ class Agent:
 
         # Mirrors how Session.messages() replays a compaction record, so the
         # append-message invariant (see _append_message) still holds afterwards.
-        self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before)
+        self.session.append_compaction(result.summary, result.kept_messages, result.tokens_before,
+                                       checkpoint=result.checkpoint)
         self.history = result.messages
         # The provider's count described the old context.
         self._usage_anchor = None

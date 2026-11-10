@@ -60,6 +60,8 @@ class ManualCompactionTest(unittest.IsolatedAsyncioTestCase):
             replayed = session.messages()
             self.assertEqual(len(replayed), 2)
             self.assertIn("checkpoint", replayed[0].parts[0].content)
+            self.assertEqual(replayed, agent.history, "the very checkpoint, timestamp and all")
+            self.assertIs(agent.history[0], result.messages[0], "built once")
 
 
     async def test_a_cancelled_compaction_leaves_history_and_log_alone(self) -> None:

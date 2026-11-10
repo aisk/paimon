@@ -176,6 +176,7 @@ class SyntheticMarkTest(SessionScanTestCase):
 
         self.assertEqual([synthetic_kind(message) for message in loaded], ["summary", None])
         self.assertTrue(loaded[0].parts[0].content.endswith("the summary"))
+        self.assertEqual(session.messages(), loaded, "every replay gives back the same checkpoint")
 
 
 class EntriesTest(SessionScanTestCase):
@@ -395,12 +396,9 @@ class ForkTest(SessionScanTestCase):
         kept = ModelResponse(parts=[TextPart(content="hello!")])
         source.append_compaction("earlier talk", [kept], tokens_before=100)
 
-        # The summary message is synthesized on replay with a fresh timestamp,
-        # so compare part contents rather than whole messages.
-        contents = [[part.content for part in message.parts] for message in source.fork().messages()]
-        self.assertEqual(contents, [[part.content for part in message.parts]
-                                    for message in source.messages()])
-        self.assertIn("earlier talk", contents[0][0])
+        forked = source.fork().messages()
+        self.assertEqual(forked, source.messages())
+        self.assertIn("earlier talk", forked[0].parts[0].content)
 
 
 class LockTest(SessionScanTestCase):

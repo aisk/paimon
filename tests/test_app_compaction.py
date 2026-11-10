@@ -49,13 +49,10 @@ class ManualCompactionTest(AppTestCase):
         return str(status.query_one(".status-label").render()) if status.display else ""
 
     def assert_replays_to(self, pane) -> None:
-        """The agent's context is what its log replays. The checkpoint is
-        rebuilt on every replay, timestamp and all, so it is compared by what
-        it says."""
+        """The agent's context is what its log replays, checkpoint included."""
         history, replayed = pane.agent.history, pane.agent.session.messages()
         self.assertEqual(synthetic_kind(replayed[0]), SUMMARY)
-        self.assertEqual(history[0].parts[0].content, replayed[0].parts[0].content)
-        self.assertEqual(history[1:], replayed[1:])
+        self.assertEqual(history, replayed)
 
     @staticmethod
     def _prompts(history) -> list[str]:
