@@ -292,8 +292,11 @@ class OutputDecodingTest(unittest.TestCase):
             self.skipTest("no test character in this OEM code page")
         proc = subprocess.run(["cmd", "/d", "/c", f"echo {char * 3} done"],
                               capture_output=True, timeout=30)
-        self.assertEqual(proc.stdout, f"{char * 3} done\r\n".encode("oem"))
-        self.assertEqual(decode_output(proc.stdout), f"{char * 3} done\r\n")
+        # cmd writes in the console's code page, which a machine may have set
+        # to something other than the OEM one (a CI runner on UTF-8); the
+        # real output is only evidence where the two are the same.
+        if proc.stdout == f"{char * 3} done\r\n".encode("oem"):
+            self.assertEqual(decode_output(proc.stdout), f"{char * 3} done\r\n")
         self.assertEqual(decode_output(f"ok\n{char}\n".encode("oem") * 50), f"ok\n{char}\n" * 50)
 
 

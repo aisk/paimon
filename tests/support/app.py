@@ -27,7 +27,10 @@ class AppTestCase(unittest.IsolatedAsyncioTestCase):
     """Pilot-driven TUI tests against an isolated data dir and a stub model."""
 
     def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
+        # The app saves its config on a worker thread, which on Windows can
+        # still be writing into the directory when the test is over and it is
+        # removed; what is left behind then is the system's to sweep.
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         env = patch.dict("os.environ", {"PAIMON_DATA_HOME": tmp.name,
                                         "PAIMON_CONFIG_HOME": tmp.name})
