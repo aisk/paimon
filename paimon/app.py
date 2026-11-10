@@ -427,11 +427,13 @@ class PaimonApp(App):
             if not self._panes:
                 return  # no replacement could be opened: the app is exiting
         current = self._panes[min(index, len(self._panes) - 1)]
-        await pane.remove()
+        # Switched away from before the removal is awaited: the pane is off
+        # the list already, and nothing that runs meanwhile should find the
+        # screen still on a pane that is no longer one.
         if self._current is pane:
             self._switch_to(current)
-        else:
-            self._sync_panes()
+        await pane.remove()
+        self._sync_panes()
 
     async def _replace_last_pane(self, closed: Pane) -> None:
         try:

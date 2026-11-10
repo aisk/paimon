@@ -90,7 +90,9 @@ class RecapTest(AppTestCase):
         with patch("paimon.agent.build_model", return_value=self._model()):
             async with app.run_test() as pilot:
                 await self._finish_a_turn(app, pilot)
-                await self._wait_for(pilot, lambda: bool(app.query(RecapMessage)))
+                # Waited on the words rather than the widget: the Markdown mounts
+                # its blocks a step after it is mounted itself.
+                await self._wait_for(pilot, lambda: self.RECAP in self._recap_text(app))
 
                 self.assertIn(self.RECAP, self._recap_text(app))
                 self.assertIn("While you were away", self._recap_text(app))
@@ -197,7 +199,9 @@ class RecapTest(AppTestCase):
             # the resume, not from the timer.
             app = self.make_app(session=session, config=self._config(idle=30))
             async with app.run_test() as pilot:
-                await self._wait_for(pilot, lambda: bool(app.query(RecapMessage)))
+                # Waited on the words rather than the widget: the Markdown mounts
+                # its blocks a step after it is mounted itself.
+                await self._wait_for(pilot, lambda: self.RECAP in self._recap_text(app))
 
                 self.assertIn(self.RECAP, self._recap_text(app))
 
