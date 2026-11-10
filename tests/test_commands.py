@@ -515,6 +515,36 @@ class LogTest(CommandTestCase):
         self.assertNotIn("Interrupted by user.", out)
         self.assertIn("ok (exit code 0)", out)
 
+    def _make_settled_tool_turn(self, session: Session) -> None:
+        """A two-call batch where only the first call settled (seq 5)."""
+        session.append_message(ModelRequest(parts=[UserPromptPart(content="run it")]))
+        session.append_message(ModelResponse(parts=[
+            ToolCallPart(tool_name="shell", args={"command": "printf ok"}, tool_call_id="c1"),
+            ToolCallPart(tool_name="shell", args={"command": "sleep 99"}, tool_call_id="c2"),
+        ]))
+        request = ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="Interrupted by user.", tool_call_id=call_id)
+            for call_id in ("c1", "c2")])
+        record_id = session.append_message(request)
+        request.parts[0].content = "ok (exit code 0)"
+        session.append_tool_result(record_id, 0, request)
+
+    def test_a_settled_slot_shows_once_at_its_own_seq(self) -> None:
+        session = Session.create(Path.cwd())
+        self._make_settled_tool_turn(session)
+        code, out, err = self._run("log")
+        self.assertEqual(code, 0)
+        results = [line for line in out.splitlines() if "tool_result" in line]
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0].startswith("[4] tool_result shell"))
+        self.assertIn("Interrupted by user.", results[0], "the unsettled call keeps its placeholder")
+        self.assertTrue(results[1].startswith("[5] tool_result shell"))
+        self.assertIn("ok (exit code 0)", results[1])
+
+        code, out, err = self._run("log", "--after", "4")
+        self.assertNotIn("Interrupted by user.", out)
+        self.assertIn("[5] tool_result shell", out)
+
     def test_turn_end_records_render_with_error_and_partial(self) -> None:
         session = Session.create(Path.cwd())
         session.append_message(ModelRequest(parts=[UserPromptPart(content="hi")]))

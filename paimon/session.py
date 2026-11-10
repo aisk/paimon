@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import TypeAdapter
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -58,7 +59,18 @@ SYNTHETIC_KINDS = (SUMMARY, JOB, SHELL)
 # when a change would make older Paimons misread the log; headers without a
 # version are format 1, from before the field existed. A log from a NEWER
 # format refuses to resume instead of being silently misread.
-SESSION_FORMAT_VERSION = 1
+#
+# 2: a settled tool call is written as a ``tool_result`` record holding that
+#    one slot, instead of a ``replaces`` revision of the whole tool request
+#    (which made a batch of N calls cost N² results on disk). An older Paimon
+#    would skip those records and replay every call as interrupted, which is
+#    what the bump guards against.
+SESSION_FORMAT_VERSION = 2
+
+# The first format whose logs may hold ``tool_result`` records.
+_TOOL_RESULT_FORMAT = 2
+
+_TOOL_RETURN = TypeAdapter(ToolReturnPart)
 
 
 class SessionError(PaimonError):
@@ -253,6 +265,10 @@ class Session:
         # refcounted per process, so unlocking twice would drop one somebody
         # else has since taken; this is what makes unlock() idempotent.
         self.locked = False
+        # The format the header declares, read once on the first write that
+        # depends on it: the header is line 1 of an append-only file, so it
+        # never changes under a session.
+        self._format: int | None = None
 
     def lock(self) -> None:
         """Mark this session active: only one agent may run a session.
@@ -425,6 +441,17 @@ class Session:
         raw_messages: list[dict] = []
         positions: dict[str, int] = {}
         for record in self._iter_records(self.path):
+            if record.get("type") == "tool_result":
+                # One settled slot of a tool request appended earlier. A target
+                # that is unknown, or behind a compaction checkpoint (whose
+                # snapshot already holds the final parts), is skipped, the
+                # same way a stray ``replaces`` is.
+                target, index, part = record.get("of"), record.get("index"), record.get("part")
+                if target in positions and isinstance(index, int) and isinstance(part, dict):
+                    parts = raw_messages[positions[target]].get("parts")
+                    if isinstance(parts, list) and 0 <= index < len(parts):
+                        parts[index] = part
+                continue
             if record.get("type") == "compaction":
                 summary = record.get("summary")
                 kept_messages = record.get("kept_messages")
@@ -527,6 +554,25 @@ class Session:
             record["replaces"] = replaces
         self.append(record)
         return record_id
+
+    def append_tool_result(self, request_id: str, index: int, request: ModelRequest) -> None:
+        """Persist slot ``index`` of the tool request appended as ``request_id``,
+        now that its call has settled.
+
+        Only that one part is written, so a batch of N calls costs N results
+        on disk rather than N revisions of all N. A log whose header predates
+        the ``tool_result`` record gets a whole-request ``replaces`` revision
+        instead: the header cannot be rewritten in an append-only file, and an
+        older Paimon resuming that log must still read every result.
+        """
+        if self._format is None:
+            self._format = self.format_version()
+        if self._format < _TOOL_RESULT_FORMAT:
+            self.append_message(request, replaces=request_id)
+            return
+        self.append({"type": "tool_result", "of": request_id, "index": index,
+                     "timestamp": _now(),
+                     "part": _TOOL_RETURN.dump_python(request.parts[index], mode="json")})
 
     def append_meta(self, kind: str, **fields) -> None:
         """Persist a lifecycle record that is not part of the conversation.

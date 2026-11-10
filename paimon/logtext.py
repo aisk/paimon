@@ -7,6 +7,7 @@ tool call on one line. Seq is a record's 1-based physical line number.
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 
 from .session import synthetic_kind
 
@@ -55,47 +56,50 @@ def _result_status(part: dict) -> str | None:
     return detail if isinstance(detail, str) and detail else outcome
 
 
-def _render_message(seq: int, record: dict, full: bool) -> list[str]:
+def _render_part(seq: int, part: dict, full: bool, author: str = "user") -> str:
+    kind = part.get("part_kind")
+    content = part.get("content")
+    if kind == "user-prompt":
+        label, detail = author, _clip(content, full)
+    elif kind == "text":
+        label, detail = "assistant", _clip(content, full)
+    elif kind == "thinking":
+        text = str(content or "")
+        label, detail = "thinking", text if full else f"({_chars(text)})"
+    elif kind == "tool-call":
+        args = part.get("args")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {"args": args}
+        name = str(part.get("tool_name") or "?")
+        detail = summarize_call(name, args if isinstance(args, dict) else {},
+                                limit=None if full else LOG_DETAIL_WIDTH)
+        label = f"tool_call {name}"
+    elif kind == "tool-return":
+        text = content if isinstance(content, str) else json.dumps(
+            content, ensure_ascii=False, default=str)
+        label = f"tool_result {part.get('tool_name') or '?'}"
+        status = _result_status(part)
+        if status is not None:
+            label += f" [{status}]"
+        detail = text if full else f"({_chars(text)}) {_clip(text, False)}"
+    elif kind == "retry-prompt":
+        label, detail = "retry_prompt", _clip(content, full)
+    else:
+        label, detail = str(kind or "?"), ""
+    return f"[{seq}] {label}  {detail}".rstrip()
+
+
+def _render_message(seq: int, record: dict, full: bool, skip: Collection[int]) -> list[str]:
     lines = []
     message = record.get("message") or {}
     # A message paimon wrote in the user's place is labelled as what it is.
     author = synthetic_kind(message) or "user"
-    for part in message.get("parts") or []:
-        if not isinstance(part, dict):
-            continue
-        kind = part.get("part_kind")
-        content = part.get("content")
-        if kind == "user-prompt":
-            label, detail = author, _clip(content, full)
-        elif kind == "text":
-            label, detail = "assistant", _clip(content, full)
-        elif kind == "thinking":
-            text = str(content or "")
-            label, detail = "thinking", text if full else f"({_chars(text)})"
-        elif kind == "tool-call":
-            args = part.get("args")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {"args": args}
-            name = str(part.get("tool_name") or "?")
-            detail = summarize_call(name, args if isinstance(args, dict) else {},
-                                    limit=None if full else LOG_DETAIL_WIDTH)
-            label = f"tool_call {name}"
-        elif kind == "tool-return":
-            text = content if isinstance(content, str) else json.dumps(
-                content, ensure_ascii=False, default=str)
-            label = f"tool_result {part.get('tool_name') or '?'}"
-            status = _result_status(part)
-            if status is not None:
-                label += f" [{status}]"
-            detail = text if full else f"({_chars(text)}) {_clip(text, False)}"
-        elif kind == "retry-prompt":
-            label, detail = "retry_prompt", _clip(content, full)
-        else:
-            label, detail = str(kind or "?"), ""
-        lines.append(f"[{seq}] {label}  {detail}".rstrip())
+    for index, part in enumerate(message.get("parts") or []):
+        if isinstance(part, dict) and index not in skip:
+            lines.append(_render_part(seq, part, full, author))
     replaces = record.get("replaces")
     if lines and isinstance(replaces, str):
         lines[0] += f" (replaces {replaces[:8]})"
@@ -105,11 +109,13 @@ def _render_message(seq: int, record: dict, full: bool) -> list[str]:
 def superseded_seqs(entries: list) -> dict[int, int]:
     """Seq of every message revision a later record replaced → the final seq.
 
-    The log is append-only, so a tool result exists first as the pre-seeded
-    "Interrupted by user." placeholder and then as one replacement per
-    completed tool. Only the last revision reflects what actually happened;
-    anything rendering the log as events must skip the seqs mapped here or it
-    shows interruptions and intermediate snapshots that never occurred.
+    The log is append-only, so in a format 1 log a tool result exists first as
+    the pre-seeded "Interrupted by user." placeholder and then as one
+    replacement per completed tool. Only the last revision reflects what
+    actually happened; anything rendering the log as events must skip the
+    seqs mapped here or it shows interruptions and intermediate snapshots that
+    never occurred. Newer logs settle one slot at a time instead; see
+    settled_parts.
     """
     id_seq: dict[str, int] = {}
     replacements: dict[str, list[int]] = {}
@@ -130,12 +136,41 @@ def superseded_seqs(entries: list) -> dict[int, int]:
     return superseded
 
 
-def render_record(seq: int, record: dict | None, full: bool) -> list[str]:
+def settled_parts(entries: list) -> dict[int, dict[int, int]]:
+    """Seq of every tool request whose slots later records settled →
+    {slot index: seq of the ``tool_result`` record that settled it}.
+
+    The pre-seeded placeholder of a settled slot is not what happened, so a
+    renderer skips those parts and shows each result at its own seq instead;
+    a slot never settled keeps its placeholder, which then is the truth.
+    """
+    id_seq: dict[str, int] = {}
+    settled: dict[int, dict[int, int]] = {}
+    for seq, record in entries:
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("type")
+        if kind == "message" and isinstance(record.get("id"), str):
+            id_seq[record["id"]] = seq
+        elif kind == "tool_result":
+            target, index = id_seq.get(record.get("of")), record.get("index")
+            if target is not None and isinstance(index, int):
+                settled.setdefault(target, {})[index] = seq
+    return settled
+
+
+def render_record(seq: int, record: dict | None, full: bool,
+                  skip: Collection[int] = ()) -> list[str]:
+    """``record`` as text lines; ``skip`` names message parts left out (the
+    slots settled_parts reports as answered elsewhere)."""
     if record is None:
         return [f"[{seq}] <corrupt>"]
     kind = record.get("type")
     if kind == "message":
-        return _render_message(seq, record, full)
+        return _render_message(seq, record, full, skip)
+    if kind == "tool_result":
+        part = record.get("part")
+        return [_render_part(seq, part, full)] if isinstance(part, dict) else [f"[{seq}] tool_result"]
     if kind == "session":
         return [f"[{seq}] session {str(record.get('id') or '')[:8]} "
                 f"created {record.get('created_at') or '?'}"]

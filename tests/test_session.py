@@ -284,6 +284,70 @@ class FormatVersionTest(SessionScanTestCase):
         self.assertEqual(messages[2].parts[0].content, "a.py")
 
 
+class ToolResultRecordTest(SessionScanTestCase):
+    """A settled tool call is appended as its one slot, not as a revision of
+    the whole tool request."""
+
+    @staticmethod
+    def _placeholders(count: int) -> ModelRequest:
+        return ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="Interrupted by user.",
+                           tool_call_id=f"c{index}", outcome="interrupted")
+            for index in range(count)])
+
+    def _settle(self, request: ModelRequest, index: int, content: str) -> None:
+        part = request.parts[index]
+        part.content, part.outcome, part.metadata = content, "failed", {"detail": "exit 2"}
+
+    def test_a_settled_slot_is_written_alone_and_replays_in_place(self) -> None:
+        session = Session.create(self.cwd)
+        request = self._placeholders(3)
+        record_id = session.append_message(request)
+        self._settle(request, 1, "second")
+        session.append_tool_result(record_id, 1, request)
+
+        record = session.entries()[-1][1]
+        self.assertEqual(record["type"], "tool_result")
+        self.assertEqual((record["of"], record["index"]), (record_id, 1))
+        self.assertEqual(record["part"]["content"], "second")
+        self.assertNotIn("Interrupted", json.dumps(record))
+        (replayed,) = Session(session.path, session.id, self.cwd).messages()
+        self.assertEqual(replayed, request)
+        self.assertEqual(replayed.parts[1].metadata, {"detail": "exit 2"})
+
+    def test_a_format_1_log_keeps_getting_records_format_1_reads(self) -> None:
+        # Resumed by this build and later by an older one: the header still
+        # says v1, so nothing it cannot read may be appended.
+        path = _project_dir(self.cwd) / "old.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"type": "session", "version": 1, "id": "old11111", "cwd": "x"}\n')
+        session = Session(path, "old11111", self.cwd)
+        request = self._placeholders(2)
+        record_id = session.append_message(request)
+        self._settle(request, 0, "first")
+        session.append_tool_result(record_id, 0, request)
+
+        record = session.entries()[-1][1]
+        self.assertEqual((record["type"], record["replaces"]), ("message", record_id))
+        self.assertEqual(session.format_version(), 1)
+        self.assertEqual(session.messages(), [request])
+
+    def test_a_stray_tool_result_is_ignored(self) -> None:
+        session = Session.create(self.cwd)
+        request = self._placeholders(1)
+        record_id = session.append_message(request)
+        part = {**session.entries()[-1][1]["message"]["parts"][0], "content": "stray"}
+        for target, index in (("unknown", 0), (record_id, 1), (record_id, -1), (record_id, "0")):
+            session.append({"type": "tool_result", "of": target, "index": index, "part": part})
+        self.assertEqual(session.messages(), [request])
+
+        # Behind a compaction checkpoint the snapshot already holds the
+        # final parts, so a late record for one of them changes nothing.
+        session.append_compaction("summary", [request], tokens_before=10)
+        session.append({"type": "tool_result", "of": record_id, "index": 0, "part": part})
+        self.assertEqual(session.messages()[1:], [request])
+
+
 class OrphanToolCallTest(SessionScanTestCase):
     """SESSION-4: a crash between the tool-call response and its pre-seeded
     results must not leave a history providers reject."""

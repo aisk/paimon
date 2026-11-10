@@ -7,6 +7,7 @@ render however it likes.
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import time
 import weakref
 from pathlib import Path
@@ -436,9 +437,10 @@ class Agent:
         self.history.append(message)
         return self.session.append_message(message)
 
-    def _replace_message(self, record_id: str, message: ModelMessage) -> None:
-        """Persist the final version of a message already present in ``self.history``."""
-        self.session.append_message(message, replaces=record_id)
+    def _persist_slot(self, record_id: str, index: int, request: ModelRequest) -> None:
+        """Persist slot ``index`` of a tool request already present in
+        ``self.history``, after its result was filled in place."""
+        self.session.append_tool_result(record_id, index, request)
 
     async def _maybe_compact(self, *, force: bool = False) -> compaction.CompactionResult | None:
         """Compact the context if it is close to full.
@@ -596,8 +598,8 @@ class Agent:
     # ---- Tools the agent loop runs itself ----------------------------------
     # These mutate agent-held state, so they cannot go through
     # the stateless run_tool. Each handler fills ``slot`` with the tool
-    # result, calls ``persist()`` after every slot update, and yields the
-    # events to forward.
+    # result, calls ``persist()`` (which writes that slot) after every slot
+    # update, and yields the events to forward.
 
     async def _run_write_todos(self, call: ToolCallPart, args: dict, slot: ToolReturnPart,
                                persist: Callable[[], None]) -> AsyncIterator[AgentEvent]:
@@ -1140,11 +1142,10 @@ class Agent:
             tool_request = ModelRequest(parts=returns)
             record_id = self._append_message(tool_request)
 
-            def persist() -> None:
-                """Re-persist the tool request with the slots filled so far."""
-                self._replace_message(record_id, tool_request)
-
-            for slot, call in zip(returns, calls):
+            for index, (slot, call) in enumerate(zip(returns, calls)):
+                # Writes this one slot as it stands, so each result is durable
+                # the moment it is settled without rewriting the others.
+                persist = functools.partial(self._persist_slot, record_id, index, tool_request)
                 args = parse_args(call.args)
                 name = call.tool_name
 

@@ -398,6 +398,92 @@ class LiveReplayParityTest(unittest.IsolatedAsyncioTestCase):
             ])
 
 
+class ToolBatchLogTest(unittest.IsolatedAsyncioTestCase):
+    """A batch of tool calls writes each result to the log once, as it
+    settles, and replays to exactly the live history."""
+
+    FILES = 6
+
+    @staticmethod
+    def _batch_model(calls: list[tuple[str, str]]) -> FunctionModel:
+        requests = 0
+
+        async def stream(messages, info):
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                yield {index: DeltaToolCall(name=name, json_args=args, tool_call_id=f"c{index}")
+                       for index, (name, args) in enumerate(calls)}
+            else:
+                yield "done"
+
+        return FunctionModel(stream_function=stream)
+
+    def _open(self, cwd: Path) -> Agent:
+        session = make_session(cwd)
+        session.append_system_prompt("snapshot")
+        agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+        self.addCleanup(agent.close)
+        return agent
+
+    async def test_each_result_is_written_once_and_the_batch_replays_as_live(self) -> None:
+        calls = [("read_file", f'{{"path": "f{index}.txt"}}') for index in range(self.FILES)]
+        calls += [
+            ("run_code", '{"code": "await read_file(path=\'f0.txt\')\\n\'script done\'"}'),
+            ("shell", '{"command": "exit 2"}'),
+            ("write_todos", '{"todos": [{"content": "a", "status": "pending"}]}'),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            for index in range(self.FILES):
+                # Large enough that rewriting it once per settled slot would
+                # be what dominates the log.
+                (cwd / f"f{index}.txt").write_text(f"marker-{index}-start\n" + "filler\n" * 2000)
+            agent = self._open(cwd)
+            with patch("paimon.agent.build_model", return_value=self._batch_model(calls)):
+                [event async for event in agent.run("go")]
+
+            log = agent.session.path.read_text(encoding="utf-8")
+            for index in range(1, self.FILES):
+                self.assertEqual(log.count(f"marker-{index}-start"), 1,
+                                 "each result is on disk once, not once per later slot")
+            # f0 is read twice: by its own call and by the script, whose
+            # result is the script's answer rather than the file.
+            self.assertEqual(log.count("marker-0-start"), 1)
+            records = session_records(agent.session)
+            self.assertFalse(any("replaces" in record for record in records))
+            settled = [record for record in records if record["type"] == "tool_result"]
+            self.assertEqual([record["index"] for record in settled], list(range(len(calls))))
+
+            replayed = Session(agent.session.path, agent.session.id, cwd).messages()
+            self.assertEqual(replayed, agent.history)
+            returns = {part.tool_call_id: part for message in replayed
+                       if isinstance(message, ModelRequest)
+                       for part in message.parts if isinstance(part, ToolReturnPart)}
+            script = returns[f"c{self.FILES}"]
+            self.assertEqual([call["name"] for call in script.metadata["calls"]], ["read_file"])
+            self.assertEqual(returns[f"c{self.FILES + 1}"].metadata, {"detail": "exit 2"})
+
+    async def test_an_interrupted_batch_replays_with_every_call_answered(self) -> None:
+        calls = [("read_file", '{"path": "a.txt"}'), ("read_file", '{"path": "a.txt"}')]
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            (cwd / "a.txt").write_text("hello\n")
+            agent = self._open(cwd)
+            with patch("paimon.agent.build_model", return_value=self._batch_model(calls)):
+                run = agent.run("go")
+                async for event in run:
+                    if isinstance(event, ToolEnd):
+                        break
+                await run.aclose()
+
+            replayed = Session(agent.session.path, agent.session.id, cwd).messages()
+            self.assertEqual(replayed, agent.history)
+            first, second = replayed[-1].parts
+            self.assertEqual((first.outcome, second.outcome), ("success", "interrupted"))
+            self.assertIn("hello", first.content)
+
+
 class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
     """SESSION-1: every turn leaves a terminal turn_end record, and failures
     with partial output are persisted without entering the LLM context."""

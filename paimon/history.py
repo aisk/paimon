@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 
-from .logtext import render_record, superseded_seqs
+from .logtext import render_record, settled_parts, superseded_seqs
 from .session import Session, synthetic_kind
 from .tools.result import ToolError
 
@@ -23,12 +23,15 @@ _MAX_READ_RECORDS = 20
 
 
 def _surviving_entries(session: Session) -> list[tuple[int, dict]]:
-    """Message and compaction records with ``replaces`` applied, seq attached.
+    """Message, tool result and compaction records with revisions applied,
+    seq attached.
 
     Unlike Session.messages(), a compaction record does not reset the list:
     recovering what compaction dropped is the whole point here. A replaced
     record keeps its original position but carries the replacement's seq, so
-    read_history on that seq returns exactly what search matched.
+    read_history on that seq returns exactly what search matched. A settled
+    slot is searched in its own ``tool_result`` record, at that record's seq,
+    and blanked out of the placeholder request it settles.
     """
     survivors: list[tuple[int, dict]] = []
     positions: dict[str, int] = {}
@@ -37,6 +40,16 @@ def _surviving_entries(session: Session) -> list[tuple[int, dict]]:
             continue
         kind = record.get("type")
         if kind == "compaction":
+            survivors.append((seq, record))
+        elif kind == "tool_result" and isinstance(record.get("part"), dict):
+            target, index = record.get("of"), record.get("index")
+            if isinstance(target, str) and target in positions and isinstance(index, int):
+                held_seq, held = survivors[positions[target]]
+                parts = list((held.get("message") or {}).get("parts") or [])
+                if 0 <= index < len(parts):
+                    parts[index] = None
+                    held = {**held, "message": {**held["message"], "parts": parts}}
+                    survivors[positions[target]] = (held_seq, held)
             survivors.append((seq, record))
         elif kind == "message" and isinstance(record.get("message"), dict):
             replaced = record.get("replaces")
@@ -55,7 +68,10 @@ def _searchable_parts(record: dict):
     The history tools' own calls and results are skipped: they quote earlier
     matches, so searching them would return every past search over again.
     """
-    message = record.get("message") or {}
+    if record.get("type") == "tool_result":
+        message = {"parts": [record.get("part")]}
+    else:
+        message = record.get("message") or {}
     # A job notice or a "!" run is labelled as such, never as the user's words.
     author = synthetic_kind(message) or "user"
     for part in message.get("parts") or []:
@@ -135,6 +151,7 @@ def read(session: Session, args: dict, budget: int) -> str:
     if seq < 1 or seq > len(entries):
         raise ToolError(f"Error: seq out of range (the log has {len(entries)} records)")
     superseded = superseded_seqs(entries)
+    settled = settled_parts(entries)
     lines: list[str] = []
     used = 0
     for number, record in entries[seq - 1 : seq - 1 + count]:
@@ -145,7 +162,14 @@ def read(session: Session, args: dict, budget: int) -> str:
             lines.append(f"[{number}] (superseded revision; the final version "
                          f"is at seq {superseded[number]})")
             continue
-        rendered = "\n".join(render_record(number, record, full=True))
+        skip = settled.get(number, {})
+        rendered = "\n".join(render_record(number, record, full=True, skip=skip))
+        if skip and not rendered:
+            # Every placeholder of this tool request was settled later; the
+            # same reasoning as for a superseded revision applies.
+            seqs = ", ".join(str(at) for at in sorted(skip.values()))
+            rendered = (f"[{number}] (placeholder results, all settled later; "
+                        f"the final ones are at seq {seqs})")
         if used + len(rendered) > budget:
             if not lines:
                 rendered = rendered[:budget] + "\n... (record truncated)"

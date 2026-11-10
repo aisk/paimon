@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import UNSET, Config, config_path
 from .errors import PaimonError
 from .llm import LOGIN_PROVIDERS, build_model, require_provider, signed_in_plans, split_model_string
-from .logtext import render_record, superseded_seqs
+from .logtext import render_record, settled_parts, superseded_seqs
 from .session import Session, synthetic_kind
 
 
@@ -361,9 +361,9 @@ def log(argv: list) -> int:
     it to ``--after`` to see exactly what happened since.
 
     The log stores revisions (a tool result is pre-seeded as an interrupted
-    placeholder and replaced when the tool finishes), which are storage detail
-    rather than events: rendered output folds them, showing only each record's
-    final revision at the seq where it was written. ``--json`` is the audit
+    placeholder and settled when the tool finishes), which are storage detail
+    rather than events: rendered output folds them, showing each result once,
+    at the seq where its final version was written. ``--json`` is the audit
     view and keeps every physical record.
     """
     parser = argparse.ArgumentParser(
@@ -406,6 +406,7 @@ def log(argv: list) -> int:
     # Over the whole log, before any window: a --after window may hold the
     # replacement while the placeholder it supersedes lies before the cursor.
     superseded = superseded_seqs(entries)
+    settled = settled_parts(entries)
 
     if args.after is not None:
         entries = [entry for entry in entries if entry[0] > args.after]
@@ -422,7 +423,7 @@ def log(argv: list) -> int:
         else:
             if seq in superseded:
                 continue
-            for line in render_record(seq, record, args.full):
+            for line in render_record(seq, record, args.full, settled.get(seq, ())):
                 print(line)
     return 0
 

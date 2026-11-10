@@ -11,7 +11,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from paimon import agent as agent_module
 from paimon import events as events_module
 from paimon.config import Config
-from paimon.session import Session
+from paimon.session import SESSION_FORMAT_VERSION, Session
 
 # Constructor arguments for one instance of every event ``Agent.run`` and
 # ``replay_events`` can yield. Every renderer is checked against this list, so
@@ -56,6 +56,7 @@ def make_session(cwd: Path) -> Session:
     session = Session(cwd / "session.jsonl", "session-id", cwd)
     session.append({
         "type": "session",
+        "version": SESSION_FORMAT_VERSION,
         "id": "session-id",
         "cwd": str(cwd),
         "created_at": "2026-01-01T00:00:00+00:00",

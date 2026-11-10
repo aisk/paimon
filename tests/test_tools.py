@@ -334,6 +334,23 @@ class HistoryToolsTest(unittest.TestCase):
                       "one hit for the original record, one for the summary, none for kept_messages")
         self.assertIn("compaction summary", result)
 
+    def test_a_settled_slot_is_searched_and_read_at_its_own_seq(self) -> None:
+        request = ModelRequest(parts=[
+            ToolReturnPart(tool_name="shell", content="Interrupted by user.", tool_call_id=call_id)
+            for call_id in ("call-1", "call-2")])
+        record_id = self.session.append_message(request)
+        for index in (0, 1):
+            request.parts[index].content = f"settled output {index}"
+            self.session.append_tool_result(record_id, index, request)
+
+        self.assertIn("No matches", _search_history({"query": "Interrupted"}, self.ctx))
+        result = _search_history({"query": "settled output 1"}, self.ctx)
+        self.assertIn("[4] tool_result shell", result)
+        placeholder = _read_history({"seq": 2}, self.ctx)
+        self.assertNotIn("Interrupted by user.", placeholder)
+        self.assertIn("seq 3, 4", placeholder)
+        self.assertIn("settled output 0", _read_history({"seq": 3}, self.ctx))
+
     def test_a_replaced_record_is_searched_only_in_its_final_form(self) -> None:
         record_id = self._tool_return("shell", "first-draft output")
         replacement = ModelRequest(parts=[ToolReturnPart(
