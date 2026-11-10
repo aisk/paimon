@@ -69,7 +69,7 @@ class CommandPane(Pane):
 
     @property
     def tab_title(self) -> str:
-        return f"{self.job_id} {' '.join(self.job.label.split()) or 'command'}"
+        return self.job.title(self.job_id)
 
     @property
     def status_text(self) -> str:

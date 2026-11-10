@@ -19,6 +19,7 @@ from paimon.agent import Agent, AgentBusyError
 from paimon.events import JobNotice, TextDelta, ToolEnd, UserInput
 from paimon.config import Config
 from paimon.session import Session, job_text, synthetic_kind
+from paimon.tools.permissions import confirm_origin
 from paimon.tools.result import ToolError
 from tests.support.agent import make_session, spawning_model, stub_model
 from tests.support.turns import FakeCommand, settle
@@ -460,6 +461,53 @@ class ChildConfirmTest(JobsTestCase):
         (notice,) = agent.jobs.notices
         self.assertEqual(notice, f"agent {opened[0]} finished:\nwritten")
         self.assertEqual(agent.jobs, {})
+
+    async def test_the_parent_is_told_which_agent_is_asking(self) -> None:
+        # A plain two-argument hook, as an embedder writes one: the origin
+        # comes alongside the call, not as an argument it has to accept.
+        origins: list = []
+        opened: list = []
+
+        async def confirm(name: str, args: dict) -> bool:
+            origins.append(confirm_origin())
+            return False
+
+        agent = self.agent(mode="auto", confirm=confirm)
+
+        async def open_job(job_id: str, job) -> None:
+            opened.append(job_id)
+            raise jobs_module.PaneLimitError("all 8 panes are in use; close one first")
+
+        agent.jobs.open_job = open_job
+        await self._child_writes(agent)
+
+        self.assertEqual(origins, [(f"{opened[0]} write it",)])
+        self.assertEqual(confirm_origin(), (), "the mark ends with the call")
+
+    async def test_a_grandchild_is_named_through_every_agent_between(self) -> None:
+        # spawn_agent is withheld from subagents today, so this drives the
+        # fallback chain directly: each level adds its own title, outermost
+        # first, and the hook at the top sees all of them.
+        origins: list = []
+
+        async def confirm(name: str, args: dict) -> bool:
+            origins.append(confirm_origin())
+            return True
+
+        agent = self.agent(confirm=confirm)
+        child = agent._open_child(None)
+        self.addCleanup(child.close)
+        agent.jobs._table["a1b2"] = jobs_module.Job("agent", label="outer task", agent=child)
+        grandchild = child._open_child(None)
+        self.addCleanup(grandchild.close)
+        child.jobs._table["c3d4"] = jobs_module.Job("agent", label="inner\ntask", agent=grandchild)
+        try:
+            self.assertTrue(await grandchild.confirm("shell", {"command": "ls"}))
+        finally:
+            agent.jobs._table.clear()
+            child.jobs._table.clear()
+
+        self.assertEqual(origins, [("a1b2 outer task", "c3d4 inner task")])
 
     async def test_with_nobody_to_ask_it_is_denied(self) -> None:
         agent = self.agent(mode="auto")

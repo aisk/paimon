@@ -314,6 +314,46 @@ class ChildConfirmationTest(AppTestCase):
                 gate.set()
                 await self._wait_for(pilot, lambda: len(app.panes) == 1)
 
+    async def test_an_unseen_childs_confirmation_in_the_parent_names_the_child(self) -> None:
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                for _ in range(MAX_PANES - 1):
+                    await app.action_new_pane()
+                parent = app.panes[0]
+                app._switch_to(parent)
+                parent.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: bool(parent.agent.jobs))
+                await self._wait_for(pilot, lambda: not parent.is_busy)
+                (job_id,) = parent.agent.jobs
+
+                # Through the hook the unseen child was opened with, as its
+                # loop would: it falls back to the parent's pane.
+                child = parent.agent.jobs[job_id].agent
+                task = asyncio.ensure_future(child.confirm("shell", {"command": "rm -rf build"}))
+                await self._wait_for(pilot, lambda: parent.needs_confirm)
+                panel = parent.query_one(ConfirmPanel)
+                origin = str(panel.query_one(".confirm-origin", Static).render())
+                self.assertIn("asked by subagent", origin)
+                self.assertIn(f"{job_id} check the parser", origin)
+
+                await self._wait_for(pilot, lambda: app.focused is panel)
+                await pilot.press("n")
+                self.assertFalse(await task)
+
+                # The parent's own call is not labelled.
+                own = asyncio.ensure_future(parent._confirm("shell", {"command": "ls"}))
+                await self._wait_for(pilot, lambda: parent.needs_confirm)
+                self.assertFalse(parent.query_one(ConfirmPanel).query(".confirm-origin"))
+                await self._wait_for(
+                    pilot, lambda: app.focused is parent.query_one(ConfirmPanel))
+                await pilot.press("n")
+                self.assertFalse(await own)
+                gate.set()
+                await self._wait_for(pilot, lambda: not parent.agent.jobs)
+
     async def test_closing_the_tab_with_a_panel_up_stops_the_agent(self) -> None:
         app = self.make_app(mode="yolo")
         with patch("paimon.agent.build_model",

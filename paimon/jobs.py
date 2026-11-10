@@ -72,6 +72,10 @@ class Job:
     sink: Callable[[AgentEvent], Awaitable[None]] | None = None
     on_done: Callable[[], None] | None = None
 
+    def title(self, job_id: str) -> str:
+        """How the job is named on screen, wherever it is: its id and its task."""
+        return f"{job_id} {' '.join(self.label.split()) or self.kind}"
+
     @property
     def running(self) -> bool:
         if self.command is not None:
@@ -178,6 +182,13 @@ class Jobs(Mapping[str, Job]):
         for job in self._table.values():
             if job.agent is not None:
                 job.agent.mode = mode
+
+    def title_of(self, agent: "Agent | None") -> str | None:
+        """The on-screen title of the job running ``agent``, None for none."""
+        if agent is None:
+            return None
+        return next((job.title(job_id) for job_id, job in self._table.items()
+                     if job.agent is agent), None)
 
     def take_notices(self) -> list[str]:
         """The waiting notices, taken: each one is handed over once."""

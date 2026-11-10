@@ -37,7 +37,7 @@ from .events import (
     replay_events,
 )
 from .jobs import Job
-from .tools.permissions import MODES
+from .tools.permissions import MODES, confirm_origin
 from .turns import CompactionOver, CompactionStarted, Outcome, Result, TurnDriver, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError
@@ -555,7 +555,10 @@ class SessionPane(Pane):
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        panel = ConfirmPanel(tool_name, args, future, cwd=self.agent.cwd)
+        # A call from a subagent running unseen lands here too, marked with
+        # where it came from so the panel can say so.
+        panel = ConfirmPanel(tool_name, args, future, cwd=self.agent.cwd,
+                             origin=confirm_origin())
         return await self._block_on(panel, future) == "allow"
 
     async def _ask(self, question: str, options: list[str]) -> str | None:

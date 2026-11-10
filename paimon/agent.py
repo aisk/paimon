@@ -64,7 +64,7 @@ from .session import (
     shell_message,
 )
 from .tools.base import Tool, ToolContext
-from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, run_tool
+from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, confirm_for, run_tool
 from .tools.registry import (
     REGISTRY,
     SUBAGENT_DENIED,
@@ -744,15 +744,25 @@ class Agent:
         """A subagent of this one, for the job manager to run: its own session,
         marked as this one's child, on ``model`` or else this agent's model."""
 
+        # Weak, like the jobs' hold on this agent: the closure lives on the
+        # child, and a strong reference back would make the child a cycle.
+        child_ref: "weakref.ReferenceType[Agent] | None" = None
+
         async def confirm(name: str, args: dict) -> bool:
             # For a child nothing put on screen; a UI that shows it asks there
             # instead. Through the parent, its hook looked up per call: whoever
             # can ask for this conversation answers for the child too, and
             # with nobody to ask (headless) it is denied, exactly as it would
-            # be for the parent.
-            return await self.confirm(name, args) if self.confirm else False
+            # be for the parent. The request is marked with the child's title,
+            # so the parent's UI can say it is not the parent's own call; the
+            # job is looked up per call because its id is only given once the
+            # child is open.
+            if not self.confirm:
+                return False
+            origin = self.jobs.title_of(child_ref and child_ref()) or "agent"
+            return await confirm_for(self.confirm, origin, name, args)
 
-        return Agent.open(
+        child = Agent.open(
             cwd=self.cwd, mode=self.mode, config=self.config, confirm=confirm,
             # Narrowed from this agent's own set, so a parent that was given
             # less never hands more to what it starts.
@@ -761,6 +771,8 @@ class Agent:
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
             parent_session_id=self.session.id)
+        child_ref = weakref.ref(child)
+        return child
 
     def _take_notices(self) -> list[JobNotice]:
         """Move the waiting notices into the history, one message each."""

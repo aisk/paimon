@@ -3,6 +3,7 @@ recognizer, the gate, and running a call once it is authorized."""
 
 import os
 import shlex
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -16,6 +17,32 @@ from .shell import shell_executable
 
 # A confirm callback returns True to allow a dangerous tool, False to deny.
 ConfirmFn = Callable[[str, dict], Awaitable[bool]]
+
+# Who a confirmation is being asked for, when it is not the conversation whose
+# hook is called: the titles of the subagents it passed through on the way up,
+# outermost first, () for the conversation's own calls. A context variable
+# rather than a third argument, so an embedder's two-argument hook keeps
+# working and only a hook that wants to say where a request came from reads it.
+_ORIGIN: ContextVar[tuple[str, ...]] = ContextVar("paimon_confirm_origin", default=())
+
+
+def confirm_origin() -> tuple[str, ...]:
+    """The subagents the confirmation now being asked comes from, outermost
+    first; () when it is the asking conversation's own. For confirm hooks."""
+    return _ORIGIN.get()
+
+
+async def confirm_for(confirm: ConfirmFn, origin: str, name: str, args: dict) -> bool:
+    """Ask ``confirm`` about a call that ``origin`` (a subagent's title) made.
+
+    Set only for the duration of the call, in the asking task's context, so
+    nothing else running concurrently sees it.
+    """
+    token = _ORIGIN.set((origin, *_ORIGIN.get()))
+    try:
+        return await confirm(name, args)
+    finally:
+        _ORIGIN.reset(token)
 
 # A review callback judges a call auto mode will not let through on its own:
 # None lets it run, a string is the refusal the model is shown.

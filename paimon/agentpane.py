@@ -15,6 +15,7 @@ from .agent import Agent
 from .events import TurnEnd
 from .jobs import Job
 from .pane import Pane
+from .tools.permissions import confirm_origin
 from .transcript import EventRenderer, Transcript
 from .ui import BlockingPanel, ConfirmPanel
 
@@ -57,7 +58,7 @@ class AgentPane(Pane):
 
     @property
     def tab_title(self) -> str:
-        return f"{self.job_id} {' '.join(self.job.label.split()) or 'agent'}"
+        return self.job.title(self.job_id)
 
     def compose(self) -> ComposeResult:
         yield self.transcript
@@ -114,7 +115,7 @@ class AgentPane(Pane):
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        panel = ConfirmPanel(tool_name, args, future, cwd=self.cwd)
+        panel = ConfirmPanel(tool_name, args, future, cwd=self.cwd, origin=confirm_origin())
         async with self._panel_lock:
             # Removal below is asynchronous, so the previous panel may still
             # be mounted; under the lock it cannot be a live one.

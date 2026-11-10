@@ -618,13 +618,22 @@ class ConfirmPanel(BlockingPanel):
     ]
     kind = progstatus.PERMISSION
 
+    # Chars of one subagent's title shown in the "asked by" line: the title is
+    # its whole task, and the line only has to tell it apart.
+    _ORIGIN_WIDTH = 60
+
     def __init__(self, tool_name: str, args: dict, future: "asyncio.Future[str]",
-                 cwd: Path | None = None) -> None:
+                 cwd: Path | None = None, origin: tuple[str, ...] = ()) -> None:
         # No ID: several panes can have a panel up at once, and a shared ID
         # would make an app-wide query resolve to whichever one is first.
         super().__init__(classes="blocking-panel confirm-panel")
         self.tool_name = tool_name
         self.args = args
+        # The subagents the call came from, outermost first (see
+        # permissions.confirm_origin); () for the pane's own conversation. A
+        # call from an agent running unseen is asked in its parent's pane, and
+        # without this it would read as the parent's own.
+        self.origin = origin
         self.summary = f"{tool_name}: {summarize_call(tool_name, args, limit=200)}"
         # The agent's cwd: previews resolve paths against it, exactly like the
         # execution will, so the file shown is the file touched.
@@ -638,6 +647,12 @@ class ConfirmPanel(BlockingPanel):
                 "[b]Paimon needs permission![/]  [$text-warning b]$tool[/]", tool=self.tool_name
             )
         )
+        if self.origin:
+            titles = [title if len(title) <= self._ORIGIN_WIDTH
+                      else title[: self._ORIGIN_WIDTH - 1] + "…" for title in self.origin]
+            yield Static(Content.from_markup(
+                "[$text-muted]asked by subagent[/] [$text-accent b]$origin[/]",
+                origin=" › ".join(titles)), classes="confirm-origin")
         with VerticalScroll(id="confirm-detail"):
             yield Static(self._detail())
         yield Static(id="confirm-options")
