@@ -210,6 +210,43 @@ class OverflowRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(attempts, 2, "exactly one retry, then the error surfaces")
 
+    async def test_the_overflow_retry_leaves_every_transient_retry(self) -> None:
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        from paimon import retry
+
+        attempts = 0
+
+        async def stream(messages, info):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ModelHTTPError(400, "stub", {"message": "context length exceeded"})
+            if attempts <= retry.MAX_ATTEMPTS:  # the compacted request and all but its last retry
+                raise ModelHTTPError(503, "stub", {"message": "overloaded"})
+            yield "done"
+
+        result = compaction.CompactionResult("checkpoint", [], 100, 10)
+
+        async def fake_compact(force: bool = False):
+            return result if force else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with (
+                patch("paimon.agent.build_model",
+                      return_value=FunctionModel(stream_function=stream)),
+                patch("paimon.agent.Agent._maybe_compact", new=AsyncMock(side_effect=fake_compact)),
+                patch("paimon.agent.retry.backoff", return_value=0),
+            ):
+                agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
+                events = [event async for event in agent.run("go")]
+
+            self.assertEqual(attempts, retry.MAX_ATTEMPTS + 1)
+            self.assertEqual("".join(e.text for e in events if isinstance(e, TextDelta)), "done")
+
 
 class CompactionFailureTest(unittest.IsolatedAsyncioTestCase):
     """A failed compaction must not silently disable the safety net for the turn."""

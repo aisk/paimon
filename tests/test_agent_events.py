@@ -382,6 +382,23 @@ class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):
             [event async for event in agent.run("go", max_tool_calls=0)]
             self.assertEqual(session_records(agent.session)[-1]["outcome"], "max_tool_calls")
 
+    async def test_a_call_refused_by_the_budget_is_recorded_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._open(Path(directory), stub_model("read_file", '{"path": "a.txt"}'))
+            live = [event async for event in agent.run("go", max_tool_calls=0)]
+            refused = agent.session.messages()[-1].parts[0]
+            self.assertIsInstance(refused, ToolReturnPart)
+            self.assertEqual(refused.outcome, "failed")
+
+            # Replayed the way it ran: the call and its refusal, not a denial.
+            replayed = replay_events(agent.session.messages())
+            live_end = next(e for e in live if isinstance(e, ToolEnd))
+            replayed_end = next(e for e in replayed if isinstance(e, ToolEnd))
+            self.assertEqual(replayed_end, live_end)
+            self.assertIn("max_tool_calls=0", replayed_end.result)
+            self.assertFalse(replayed_end.denied)
+            self.assertTrue([e for e in replayed if isinstance(e, ToolStart)])
+
     async def test_compaction_failure_is_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with patch("paimon.agent.Agent._maybe_compact",

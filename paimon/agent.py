@@ -1415,7 +1415,6 @@ class Agent:
                     record_outcome("interrupted", partial_text=content or None)
                     raise
                 except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
-                    attempt += 1
                     if (not started and not overflow_retried
                             and retry.is_context_overflow(exc)):
                         # The provider says the request exceeded the window:
@@ -1435,6 +1434,9 @@ class Agent:
                                                    compacted.tokens_after)
                             request_messages = self._context(model)
                             continue
+                    # Counted only here: the compact-and-retry above is its own
+                    # allowance, not one of the transient retries.
+                    attempt += 1
                     if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
                         # Recorded here rather than in run()'s outer boundary
                         # because only this scope still holds the partial text
@@ -1490,6 +1492,9 @@ class Agent:
                 if (refused := spend()) is not None:
                     yield ToolStart(call.tool_call_id, name, args)
                     slot.content = refused
+                    # "failed" like the other calls refused before running;
+                    # not "denied", which means a permission refusal.
+                    slot.outcome = "failed"
                     persist()
                     yield ToolEnd(call.tool_call_id, name, slot.content)
                     continue
