@@ -243,13 +243,13 @@ class AppReportingTest(AppTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             job = SimpleNamespace(kind="agent", agent=object(), running=True)
-            app.panes[0].agent.jobs["a1"] = job
+            app.panes[0].agent.jobs._table["a1"] = job
             app._sync_panes()
             self.assertEqual(recorder.reports[-1].state, herdr.WORKING)
             job.running = False
             app._sync_panes()
             self.assertEqual(recorder.reports[-1].state, herdr.IDLE)
-            del app.panes[0].agent.jobs["a1"]
+            del app.panes[0].agent.jobs._table["a1"]
 
     async def test_background_command_is_not_work(self) -> None:
         recorder = _Recorder()
@@ -257,10 +257,10 @@ class AppReportingTest(AppTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             job = SimpleNamespace(kind="command", agent=None, running=True)
-            app.panes[0].agent.jobs["c1"] = job
+            app.panes[0].agent.jobs._table["c1"] = job
             app._sync_panes()
             self.assertEqual(recorder.reports[-1].state, herdr.IDLE)
-            del app.panes[0].agent.jobs["c1"]
+            del app.panes[0].agent.jobs._table["c1"]
 
     async def test_confirmation_in_a_hidden_pane_blocks(self) -> None:
         recorder = _Recorder()

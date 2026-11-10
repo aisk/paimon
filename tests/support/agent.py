@@ -9,6 +9,7 @@ from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from paimon import agent as agent_module
+from paimon import events as events_module
 from paimon.config import Config
 from paimon.session import Session
 
@@ -38,9 +39,9 @@ SILENT_EVENTS = {"TurnEnd", "RequestStats", "ToolBudgetExhausted"}
 
 
 def agent_events() -> list[object]:
-    """One instance of every event in paimon.agent's AgentEvent union."""
+    """One instance of every event in paimon.events' AgentEvent union."""
     events = []
-    for attribute in sorted(typing.get_args(agent_module.AgentEvent), key=lambda e: e.__name__):
+    for attribute in sorted(typing.get_args(events_module.AgentEvent), key=lambda e: e.__name__):
         name = attribute.__name__
         if name not in EVENT_SAMPLES:
             raise AssertionError(f"add an EVENT_SAMPLES entry for the new event {name}")

@@ -12,7 +12,7 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from textual.widgets import Input, Static
 from textual.worker import WorkerCancelled
 
-from paimon.agent import replay_events
+from paimon.events import replay_events
 from paimon.app import PaimonApp
 from paimon.turns import Outcome
 from paimon.transcript import EventRenderer

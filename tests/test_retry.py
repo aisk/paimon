@@ -9,7 +9,8 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import retry
-from paimon.agent import Agent, ModelRetry, TextDelta
+from paimon.agent import Agent
+from paimon.events import ModelRetry, TextDelta
 from paimon.config import Config
 from tests.support.agent import make_session
 

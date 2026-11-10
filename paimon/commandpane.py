@@ -17,7 +17,7 @@ from textual.app import ComposeResult
 from textual.content import Content
 from textual.widgets import RichLog, Static
 
-from .agent import Job
+from .jobs import Job
 from .pane import Pane
 from .tools.shell import decode_output
 

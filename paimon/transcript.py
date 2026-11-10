@@ -10,8 +10,8 @@ from textual.widget import Widget
 from textual.widgets import Static
 from textual.widgets.markdown import MarkdownStream
 
-from .agent import (
-    Agent,
+from .agent import Agent
+from .events import (
     JobNotice,
     CompactionNotice,
     ContextCompactionFailed,

@@ -11,8 +11,8 @@ from unittest.mock import patch
 from pydantic_ai.messages import ModelRequest
 
 from paimon import headless
-from paimon.agent import (
-    Agent,
+from paimon.agent import Agent
+from paimon.events import (
     ContextCompacted,
     ReasoningDelta,
     TextDelta,

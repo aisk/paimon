@@ -1,6 +1,6 @@
 import unittest
 
-from paimon.agent import UserInput
+from paimon.events import UserInput
 from paimon.turns import CompactionOver, CompactionStarted, Outcome, TurnDriver, TurnOver
 from tests.support.turns import FakeAgent, settle
 
@@ -188,7 +188,7 @@ class TurnDriverTest(unittest.IsolatedAsyncioTestCase):
                 job = self.make()
                 job.submit("go")
                 await settle()
-                self.agent.notices.append("agent a1f2 finished:\nfound it")
+                self.agent.jobs.notices.append("agent a1f2 finished:\nfound it")
                 if stop == "interrupt":
                     job.interrupt()
                 else:
@@ -210,7 +210,7 @@ class TurnDriverTest(unittest.IsolatedAsyncioTestCase):
         job.sink = sink
         job.submit("go")
         await settle()
-        self.agent.notices.append("agent a1f2 finished:\nfound it")
+        self.agent.jobs.notices.append("agent a1f2 finished:\nfound it")
         await self.finish(job)
         await settle()
         self.assertEqual(self.agent.prompts, ["go", "queued meanwhile"],

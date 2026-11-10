@@ -16,8 +16,8 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-from paimon.agent import (
-    Agent,
+from paimon.agent import Agent
+from paimon.events import (
     JobNotice,
     CompactionNotice,
     ReasoningDelta,
@@ -533,7 +533,7 @@ class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-            agent.notices.append("a1f2 finished")
+            agent.jobs.notices.append("a1f2 finished")
 
             with patch("paimon.agent.build_model", return_value=stub_model()):
                 events = [event async for event in agent.run("what now")]
@@ -568,7 +568,7 @@ class JobNoticeTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"))
-            agent.notices.append("a1f2 finished")
+            agent.jobs.notices.append("a1f2 finished")
 
             with patch("paimon.agent.build_model", return_value=stub_model()):
                 events = [event async for event in agent.run(None)]

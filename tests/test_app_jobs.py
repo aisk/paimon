@@ -74,24 +74,36 @@ class SpawnAgentTest(AppTestCase):
                 await self._wait_for(pilot, lambda: "agent running" not in str(
                     app.query_one("#statusbar", Static).render()))
 
-    async def test_no_free_pane_refuses_the_agent(self) -> None:
+    async def test_no_free_pane_runs_the_agent_unseen(self) -> None:
+        # The pane cap is about the screen, not about what the agent can do.
         app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
         with patch("paimon.agent.build_model",
-                   return_value=spawning_model(["check the parser"])):
+                   return_value=spawning_model(["check the parser"], gate=gate,
+                                               answer="the parser is fine")):
             async with app.run_test() as pilot:
                 for _ in range(MAX_PANES - 1):
                     await app.action_new_pane()
                 parent = app.panes[0]
                 app._switch_to(parent)
-                parent.handle_submit(PromptInput.Submitted("go"))
+                job_id = await self._spawn(app, pilot)
+                await self._wait_for(pilot, lambda: not parent.is_busy)
+
+                self.assertEqual(len(app.panes), MAX_PANES, "no tab was opened for it")
+                self.assertNotIn("panes are in use", self._log_text(parent))
+                self.assertTrue(parent.agent.jobs[job_id].running)
+                self.assertIn("1 agent running",
+                              str(app.query_one("#statusbar", Static).render()),
+                              "the status bar counts agents, not tabs")
+
+                gate.set()
                 await self._wait_for(
-                    pilot, lambda: "panes are in use" in self._log_text(parent))
-                self.assertEqual(len(app.panes), MAX_PANES)
-                self.assertEqual(parent.agent.jobs, {})
+                    pilot, lambda: f"agent {job_id} finished" in self._log_text(parent))
+                await self._wait_for(pilot, lambda: not parent.agent.jobs)
                 for session in Session.list(parent.cwd, include_children=True):
                     if session.parent_id == parent.agent.session.id:
                         self.assertFalse(lockfile.held(session.path),
-                                         "the child that never ran holds nothing")
+                                         "the child releases its session when done")
 
     async def test_a_finished_child_wakes_the_idle_parent(self) -> None:
         app = self.make_app(mode="yolo")
@@ -112,7 +124,7 @@ class SpawnAgentTest(AppTestCase):
 
                 self.assertTrue(any(synthetic_kind(message) == "job"
                                     for message in parent.agent.history))
-                self.assertEqual(parent.agent.notices, [])
+                self.assertEqual(parent.agent.jobs.notices, [])
                 self.assertEqual(parent.agent.session.first_user_text(), "go",
                                  "the wake-up never becomes the session title")
                 self.assertEqual(parent.tab_title, "go")
@@ -125,27 +137,27 @@ class SpawnAgentTest(AppTestCase):
             async with app.run_test() as pilot:
                 parent = app.pane
                 hold_turn(parent)
-                parent.agent.notices.append("agent a1f2 finished:\nfound it")
-                parent.agent.on_jobs_changed()
+                parent.agent.jobs.notices.append("agent a1f2 finished:\nfound it")
+                parent.agent.jobs.on_changed()
                 await pilot.pause()
-                self.assertEqual(len(parent.agent.notices), 1, "busy: nothing starts yet")
+                self.assertEqual(len(parent.agent.jobs.notices), 1, "busy: nothing starts yet")
 
                 await end_turn(parent)
                 await self._wait_for(pilot, lambda: any(
                     synthetic_kind(message) == "job" for message in parent.agent.history))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
-                self.assertEqual(parent.agent.notices, [])
+                self.assertEqual(parent.agent.jobs.notices, [])
 
     async def test_a_turn_the_user_stopped_does_not_restart_itself(self) -> None:
         app = self.make_app(mode="yolo")
         async with app.run_test() as pilot:
             parent = app.pane
             hold_turn(parent)
-            parent.agent.notices.append("agent a1f2 finished:\nfound it")
+            parent.agent.jobs.notices.append("agent a1f2 finished:\nfound it")
             await end_turn(parent, Outcome.INTERRUPTED)
             await pilot.pause()
             self.assertFalse(parent.is_busy)
-            self.assertEqual(len(parent.agent.notices), 1, "it waits for whatever runs next")
+            self.assertEqual(len(parent.agent.jobs.notices), 1, "it waits for whatever runs next")
 
     async def test_the_parent_stays_conversational_while_a_child_runs(self) -> None:
         app = self.make_app(mode="yolo")
@@ -196,10 +208,10 @@ class SpawnAgentTest(AppTestCase):
                 job_id = await self._spawn(app, pilot)
                 await self._wait_for(pilot, lambda: not parent.is_busy)
 
-                answer = await parent.agent._job_tool("stop_job", {"job_id": job_id})
+                answer = await parent.agent.jobs.call("stop_job", {"job_id": job_id})
                 self.assertIn("Stopped agent", answer)
                 await self._wait_for(pilot, lambda: len(app.panes) == 1)
-                self.assertEqual(parent.agent.notices, [])
+                self.assertEqual(parent.agent.jobs.notices, [])
 
     async def test_changing_the_session_stops_its_agents(self) -> None:
         app = self.make_app(mode="yolo")
@@ -222,7 +234,7 @@ class SpawnAgentTest(AppTestCase):
                 self.assertIn("Stopped 1 job", log)
                 self.assertIn(job_id, log)
                 self.assertEqual(parent.agent.jobs, {})
-                self.assertEqual(old.notices, [], "the conversation left behind hears nothing")
+                self.assertEqual(old.jobs.notices, [], "the conversation left behind hears nothing")
                 await self._wait_for(pilot, lambda: len(app.panes) == 1)
 
 
@@ -376,7 +388,7 @@ class BackgroundTaskTest(AppTestCase):
                 parent = app.pane
                 task = await self._start(app, pilot)
 
-                answer = await parent.agent._job_tool("read_job", {"job_id": task.job_id})
+                answer = await parent.agent.jobs.call("read_job", {"job_id": task.job_id})
                 self.assertRegex(answer, PID)
                 self.assertIn("running", answer)
                 self.assertNotRegex(self._command_log_text(task), PID,
@@ -452,7 +464,7 @@ class BackgroundTaskTest(AppTestCase):
 
                 self.assertIs(app.pane, parent)
                 self.assertFalse(job.command.killed, "it ended by itself")
-                answer = await parent.agent._job_tool(
+                answer = await parent.agent.jobs.call(
                     "read_job", {"job_id": job_id, "mode": "all"})
                 self.assertIn("[exited, code 1]", answer)
                 self.assertIn("built", answer, "the output outlives the tab")
@@ -461,11 +473,11 @@ class BackgroundTaskTest(AppTestCase):
         app = self.make_app(mode="yolo")
         running = FakeCommand("build")
         with patch("paimon.agent.build_model", return_value=stub_model()), \
-                patch("paimon.agent.start_background",
+                patch("paimon.jobs.start_background",
                       new=AsyncMock(return_value=running)):
             async with app.run_test() as pilot:
                 parent = app.pane
-                await parent.agent._job_tool(
+                await parent.agent.jobs.call(
                     "run_background", {"command": "build", "description": "build"})
                 await self._wait_for(pilot, lambda: len(app.panes) == 2)
                 task = app.panes[1]
@@ -491,7 +503,7 @@ class BackgroundTaskTest(AppTestCase):
         # the test's to time.
         running = FakeCommand("npm run dev")
         with patch("paimon.agent.build_model", return_value=stub_model()), \
-                patch("paimon.agent.start_background",
+                patch("paimon.jobs.start_background",
                       new=AsyncMock(return_value=running)):
             async with app.run_test() as pilot:
                 first = app.pane
@@ -500,7 +512,7 @@ class BackgroundTaskTest(AppTestCase):
                 second = app.pane
                 self.assertIsNot(second, first)
 
-                answer = await first.agent._job_tool(
+                answer = await first.agent.jobs.call(
                     "run_background", {"command": "npm run dev", "description": "dev server"})
                 self.assertIn("Started background command", answer)
                 await self._wait_for(pilot, lambda: len(app.panes) == 3)
@@ -511,10 +523,10 @@ class BackgroundTaskTest(AppTestCase):
                 self.assertNotIn(job_id, second.agent.jobs)
 
                 running.output.append(b"listening on 3000\n")
-                mine = await first.agent._job_tool("read_job", {"job_id": job_id})
+                mine = await first.agent.jobs.call("read_job", {"job_id": job_id})
                 self.assertIn("listening on 3000", mine)
                 with self.assertRaisesRegex(ToolError, "no agent or background command"):
-                    await second.agent._job_tool("read_job", {"job_id": job_id})
+                    await second.agent.jobs.call("read_job", {"job_id": job_id})
 
                 # The exit is news for the pane that started it, and only for
                 # that one: the other conversation never heard of this command.
@@ -532,10 +544,10 @@ class BackgroundTaskTest(AppTestCase):
         app = self.make_app(mode="yolo")
         running = FakeCommand("build")
         with patch("paimon.agent.build_model", return_value=stub_model()), \
-                patch("paimon.agent.start_background",
+                patch("paimon.jobs.start_background",
                       new=AsyncMock(return_value=running)):
             async with app.run_test() as pilot:
-                await app.pane.agent._job_tool(
+                await app.pane.agent.jobs.call(
                     "run_background", {"command": "build", "description": "build"})
                 await self._wait_for(pilot, lambda: len(app.panes) == 2)
                 task = app.panes[1]
@@ -587,11 +599,11 @@ class BackgroundTaskTest(AppTestCase):
                 pid = self._pid(task)
                 await self._wait_for(pilot, lambda: not parent.is_busy)
 
-                answer = await parent.agent._job_tool("stop_job", {"job_id": task.job_id})
+                answer = await parent.agent.jobs.call("stop_job", {"job_id": task.job_id})
                 self.assertIn("Stopped", answer)
                 await self._wait_for(pilot, lambda: len(app.panes) == 1)
                 await self._wait_for(pilot, lambda: not self._alive(pid))
-                self.assertEqual(parent.agent.notices, [])
+                self.assertEqual(parent.agent.jobs.notices, [])
 
     async def test_an_exit_wakes_the_parent_with_the_code(self) -> None:
         app = self.make_app(mode="yolo")

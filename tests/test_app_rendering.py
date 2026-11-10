@@ -11,7 +11,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 
 from paimon import skills
-from paimon.agent import ReasoningDelta, RequestStats, TextDelta, ToolEnd, ToolStart
+from paimon.events import ReasoningDelta, RequestStats, TextDelta, ToolEnd, ToolStart
 from paimon.config import Config
 from paimon.pane import _session_label
 from paimon.transcript import EventRenderer

@@ -62,7 +62,8 @@ agent 循环本身是可以导入的，Python 程序不必经过 CLI 就能驱�
 ```python
 import asyncio
 
-from paimon.agent import Agent, TextDelta
+from paimon.agent import Agent
+from paimon.events import TextDelta
 
 async def main():
     agent = Agent.open(mode="auto")
@@ -153,6 +154,7 @@ flowchart TD
         Compaction["compaction.py"]
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path 展开"]
+        JobMgr["jobs.py<br/>子代理、后台命令"]
         Jobs["turns.py<br/>回合驱动"]
     end
 
@@ -195,9 +197,10 @@ flowchart TD
     AgentLoop --> Compaction
     AgentLoop --> Retry
     AgentLoop --> Mentions
-    AgentLoop -. "spawn_agent" .-> AgentLoop
-    AgentLoop -. "spawn_agent" .-> AgentPane
-    AgentLoop -. "run_background" .-> CommandPane
+    AgentLoop --> JobMgr
+    JobMgr -. "spawn_agent" .-> AgentLoop
+    JobMgr -. "spawn_agent" .-> AgentPane
+    JobMgr -. "run_background" .-> CommandPane
 
     PromptMod --> Skills
 

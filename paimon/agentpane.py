@@ -11,7 +11,9 @@ import asyncio
 
 from textual.app import ComposeResult
 
-from .agent import Agent, Job, TurnEnd
+from .agent import Agent
+from .events import TurnEnd
+from .jobs import Job
 from .pane import Pane
 from .transcript import EventRenderer, Transcript
 from .ui import BlockingPanel, ConfirmPanel
@@ -86,7 +88,7 @@ class AgentPane(Pane):
         self._pane_closing = True
         self.job.sink = None
         if self.job.running:
-            self._owner.stop_job(self.job_id, by_user=True)
+            self._owner.jobs.stop(self.job_id, by_user=True)
 
     def shutdown(self) -> None:
         # The parent's pane closes its agent, and the children go with it.

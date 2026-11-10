@@ -11,7 +11,8 @@ from textual.widgets import Static
 from typing_extensions import TypedDict
 
 from paimon import codemode, headless
-from paimon.agent import Agent, ToolBudgetExhausted, ToolEnd, ToolStart, replay_events
+from paimon.agent import Agent
+from paimon.events import ToolBudgetExhausted, ToolEnd, ToolStart, replay_events
 from paimon.config import Config
 from paimon.session import Session
 from paimon.tools.base import MAX_OUTPUT, Tool

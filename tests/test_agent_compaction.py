@@ -15,8 +15,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import FunctionModel
 
 from paimon import compaction
-from paimon.agent import (
-    Agent,
+from paimon.agent import Agent
+from paimon.events import (
     ContextCompactionFailed,
     TextDelta,
 )

@@ -7,12 +7,10 @@ render however it likes.
 import asyncio
 import contextlib
 import dataclasses
-import json
 import time
-from dataclasses import dataclass, field
+import weakref
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Sequence
-from uuid import uuid4
+from typing import AsyncIterator, Callable, Sequence
 
 from pydantic_ai.direct import model_request_stream
 from pydantic_ai.messages import (
@@ -35,24 +33,35 @@ from pydantic_ai.models import Model, ModelRequestParameters
 from . import codemode, compaction, logtext, retry, review
 from .config import Config
 from .errors import PaimonError
+from .events import (
+    AgentEvent,
+    ContextCompacted,
+    ContextCompactionFailed,
+    JobNotice,
+    ModelRetry,
+    ReasoningDelta,
+    RequestStats,
+    TextDelta,
+    TodosUpdate,
+    ToolBudgetExhausted,
+    ToolEnd,
+    ToolStart,
+    TurnEnd,
+    UserInput,
+    parse_args,
+)
+from .jobs import Jobs
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string)
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
 from .session import (
-    JOB,
-    SHELL,
-    SUMMARY,
     Session,
     SessionIncompleteError,
     job_message,
-    job_text,
     shell_message,
-    shell_text,
-    synthetic_kind,
 )
-from .tools.background import BackgroundCommand, start_background, tail_text
 from .tools.base import Tool, ToolContext
 from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, run_tool
 from .tools.registry import (
@@ -67,26 +76,11 @@ from .tools.registry import (
     validate_args,
     without,
 )
-from .tools.result import Status, ToolError, ToolResult
+from .tools.result import ToolError, ToolResult
 from .tools.shell import user_shell
 
 # Transient compaction failures tolerated in one turn before it is left off.
 _MAX_COMPACTION_FAILURES = 3
-
-# Agents and running background commands one agent may hold at a time: each
-# holds a model context or a process. A bound on how wide the work fans out,
-# not on how long it goes on, since a finished agent frees its slot.
-MAX_JOBS = 8
-
-# Of those, how many may be agents. Tighter than the cap they share with
-# commands: every agent running is another model context being paid for at the
-# same time, and a model left to fan out freely burns through a quota fast.
-MAX_AGENTS = 4
-
-# Chars of a child agent's answer delivered to its parent. The answer lands in
-# the parent's context without the parent having asked for it, so it is kept
-# to what a report needs; the child's session log has the rest.
-ANSWER_LIMIT = 8_000
 
 _RECAP_MAX_TOKENS = 2_048
 
@@ -113,181 +107,6 @@ RECAP_PROMPT = (
 )
 
 
-# ---- Events yielded by Agent.run -------------------------------------------
-
-
-@dataclass
-class TextDelta:
-    text: str
-
-
-@dataclass
-class ReasoningDelta:
-    text: str
-
-
-@dataclass
-class ToolStart:
-    id: str
-    name: str
-    args: dict
-
-
-@dataclass
-class ToolEnd:
-    id: str
-    name: str
-    result: str
-    # How the call went, the same value its ToolReturnPart.outcome persists:
-    # "success", "failed", "denied" or "interrupted". ``detail`` is the short
-    # word a renderer shows for anything but success ("exit 2", "timed out"),
-    # so none of them has to read it back out of the result text.
-    status: Status = "success"
-    detail: str = ""
-    # What a run_code script called, in call order: one dict per nested call
-    # with its tool "name", one-line "detail", "status" (ok, error, denied or
-    # cancelled) and "seconds". Empty for every other tool.
-    calls: list[dict] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        # The same default a ToolResult has, for events built directly.
-        if self.status != "success" and not self.detail:
-            self.detail = self.status
-
-    @property
-    def denied(self) -> bool:
-        return self.status == "denied"
-
-    @classmethod
-    def of(cls, call_id: str, name: str, result: ToolResult,
-           calls: list[dict] | None = None) -> "ToolEnd":
-        return cls(call_id, name, result.text, result.status, result.detail, calls or [])
-
-
-@dataclass
-class TodosUpdate:
-    todos: list[dict]
-
-
-@dataclass
-class RequestStats:
-    """Output speed and cache usage of one finished model request, from
-    provider-reported usage. ``input_tokens`` includes the cached portion
-    (pydantic-ai normalizes providers that report them separately), so the
-    cache hit rate is ``cache_read_tokens / input_tokens``. Providers that
-    do not report caching leave both cache fields at zero.
-    """
-
-    output_tokens: int
-    seconds: float
-    input_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-
-
-@dataclass
-class ToolBudgetExhausted:
-    """The turn hit its tool-call budget: the remaining calls were refused
-    with an explicit result and the turn ends without another model request.
-    """
-
-    limit: int
-
-
-@dataclass
-class TurnEnd:
-    pass
-
-
-@dataclass
-class ContextCompacted:
-    tokens_before: int
-    tokens_after: int
-
-
-@dataclass
-class ContextCompactionFailed:
-    error: str
-
-
-@dataclass
-class ModelRetry:
-    """A transient model failure is about to be retried after ``delay`` seconds."""
-
-    attempt: int
-    max_attempts: int
-    delay: float
-    error: str
-
-
-# ---- Replay-only events (history has no deltas, so these mark structure) ----
-
-
-@dataclass
-class UserInput:
-    text: str
-
-
-@dataclass
-class CompactionNotice:
-    """A compaction checkpoint encountered while replaying history."""
-
-
-@dataclass
-class JobNotice:
-    """What became of an agent or a background command this session started.
-
-    The first line says which job and how it ended; an agent that finished
-    follows it with its answer. Not replay-only: it is written into the
-    history, so it is both yielded live and rebuilt when the session is
-    resumed.
-    """
-
-    text: str
-
-
-@dataclass
-class ShellRun:
-    """A command the user ran themselves with the "!" prefix.
-
-    Like JobNotice this is not replay-only: the run is persisted as a
-    synthetic user message, so it is both yielded when it happens and rebuilt
-    when the session is resumed.
-    """
-
-    command: str
-    output: str
-
-
-# Everything ``Agent.run`` and ``replay_events`` can yield. Renderers dispatch
-# on isinstance; the alias exists so a type checker can flag an unhandled one.
-AgentEvent = (
-    TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
-    | RequestStats | ToolBudgetExhausted | TurnEnd
-    | ContextCompacted | ContextCompactionFailed | ModelRetry | UserInput
-    | CompactionNotice | JobNotice | ShellRun
-)
-
-
-def _parse_args(args: object) -> dict:
-    """Tool-call arguments as a dict, tolerating malformed JSON from the model."""
-    if isinstance(args, dict):
-        return args
-    if isinstance(args, str) and args:
-        try:
-            parsed = json.loads(args)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _nested_calls(part: ToolReturnPart) -> list[dict]:
-    """The nested calls persisted with a run_code result, tolerating old logs."""
-    calls = part.metadata.get("calls") if isinstance(part.metadata, dict) else None
-    return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
-
-
 def _settle(slot: ToolReturnPart, result: ToolResult) -> None:
     """Fill a call's pre-seeded return part with how it went.
 
@@ -305,13 +124,6 @@ def _settle(slot: ToolReturnPart, result: ToolResult) -> None:
     slot.metadata = metadata or None
 
 
-def _returned(part: ToolReturnPart) -> ToolResult:
-    """A persisted return part as the result it recorded; see _settle."""
-    detail = part.metadata.get("detail") if isinstance(part.metadata, dict) else None
-    return ToolResult(str(part.content or "(no output)"), part.outcome,
-                      detail if isinstance(detail, str) else "")
-
-
 def _held(toolset: dict[str, Tool] | None, config: Config) -> dict[str, Tool]:
     """The tools an agent opened with ``toolset`` under ``config`` really holds.
 
@@ -327,70 +139,6 @@ def _held(toolset: dict[str, Tool] | None, config: Config) -> dict[str, Tool]:
     if codemode.NAME in held:
         held[codemode.NAME] = codemode.tool(held)
     return held
-
-
-def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
-    """Persisted messages replayed as the events a live ``Agent.run`` yields.
-
-    Lets a UI render resumed history through the same code path as live turns.
-    Tools run serially, so each call replays as its ToolStart immediately
-    followed by its ToolEnd (looked up in the next request), matching the live
-    order — not all starts of a batch first. The persisted ``outcome`` field
-    and its detail restore each call's status as it was shown live.
-    """
-    events: list[AgentEvent] = []
-    consumed: set[str] = set()  # tool returns already replayed with their call
-    for index, message in enumerate(messages):
-        kind = synthetic_kind(message)
-        if kind == SUMMARY:
-            events.append(CompactionNotice())
-            continue
-        if kind == JOB:
-            events.append(JobNotice(job_text(message)))
-            continue
-        if kind == SHELL:
-            events.append(ShellRun(*shell_text(message)))
-            continue
-        if isinstance(message, ModelRequest):
-            for part in message.parts:
-                if isinstance(part, UserPromptPart) and isinstance(part.content, str) and part.content:
-                    events.append(UserInput(part.content))
-                elif (isinstance(part, ToolReturnPart)
-                      and part.tool_call_id not in consumed
-                      and part.tool_name != "write_todos"):
-                    # A return whose call is gone (compaction cut mid-turn):
-                    # better an unpaired result than a silent hole.
-                    events.append(ToolEnd.of(part.tool_call_id, part.tool_name,
-                                             _returned(part), _nested_calls(part)))
-        elif isinstance(message, ModelResponse):
-            following = messages[index + 1] if index + 1 < len(messages) else None
-            returns: dict[str, ToolReturnPart] = {}
-            if isinstance(following, ModelRequest):
-                returns = {part.tool_call_id: part for part in following.parts
-                           if isinstance(part, ToolReturnPart)}
-            for part in message.parts:
-                if isinstance(part, ThinkingPart) and part.content:
-                    events.append(ReasoningDelta(part.content))
-                elif isinstance(part, TextPart) and part.content:
-                    events.append(TextDelta(part.content))
-                elif isinstance(part, ToolCallPart):
-                    args = _parse_args(part.args)
-                    result = returns.get(part.tool_call_id)
-                    if result is not None:
-                        consumed.add(part.tool_call_id)
-                    if part.tool_name == "write_todos":
-                        todos = normalize_todos(args.get("todos"))
-                        # Live, a write_todos that actually ran yields only a
-                        # TodosUpdate; one that was rejected or never executed
-                        # yields a normal failed call.
-                        if todos is not None and (result is None or result.outcome == "success"):
-                            events.append(TodosUpdate(todos))
-                            continue
-                    events.append(ToolStart(part.tool_call_id, part.tool_name, args))
-                    if result is not None:
-                        events.append(ToolEnd.of(part.tool_call_id, part.tool_name,
-                                                 _returned(result), _nested_calls(result)))
-    return events
 
 
 def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[ModelMessage]:
@@ -452,55 +200,6 @@ def _failures_as_text(history: list[ModelMessage]) -> list[ModelMessage]:
     return sent
 
 
-@dataclass
-class Job:
-    """An agent or a background command another agent started."""
-
-    kind: str  # "agent" or "command"
-    label: str = ""
-    agent: "Agent | None" = None
-    command: BackgroundCommand | None = None
-    # What ends with the job: the child's one turn, or the wait for the
-    # command to exit. Cancelling it is how a job is stopped without a notice.
-    # None only until the job has been put on screen, which comes first.
-    task: asyncio.Task | None = None
-    # How much of the command's output read_job has already handed over.
-    cursor: int = 0
-    # Set by whoever shows an agent. The sink is awaited with every event of
-    # its turn, so drawing them is what paces it; on_done is called once when
-    # its task is over, however it ended.
-    sink: Callable[[AgentEvent], Awaitable[None]] | None = None
-    on_done: Callable[[], None] | None = None
-
-    @property
-    def running(self) -> bool:
-        if self.command is not None:
-            return self.command.running and not self.command.killed
-        return self.task is None or not self.task.done()
-
-
-def _answer(history: list[ModelMessage], session_id: str) -> str:
-    """A child's final answer, clipped: its last assistant text and nothing else.
-
-    Never its thinking or its tool output: an agent exists to keep those out
-    of the caller's context, and handing them back would spend the tokens the
-    split was meant to save.
-    """
-    text = ""
-    for message in reversed(history):
-        if isinstance(message, ModelResponse):
-            text = "\n\n".join(part.content.strip() for part in message.parts
-                               if isinstance(part, TextPart) and part.content.strip())
-            if text:
-                break
-    if not text:
-        return "(it ended without an answer)"
-    if len(text) > ANSWER_LIMIT:
-        text = (f"{text[:ANSWER_LIMIT]}\n... (clipped, {len(text) - ANSWER_LIMIT} more chars; "
-                f"`paimon log {session_id[:8]} --tail 1 --full` prints all of it)")
-    return text
-
-
 # Takes what the user queued while a turn was already running, clearing the
 # queue as it goes. The loop calls it before every model request, so what it
 # returns reaches the model at the next step rather than the next turn. A
@@ -541,10 +240,15 @@ class Agent:
         # How ask_user reaches the user. None where nobody is at the keyboard
         # (headless, tests): the tool then fails with a readable error.
         self.ask = ask
-        # The agents and background commands this agent started, by the id the
-        # model quotes back. An agent leaves when it ends; a command stays, so
-        # what it printed can still be read.
-        self.jobs: dict[str, Job] = {}
+        # The agents and background commands this agent started, and what
+        # became of them. It opens children through the two callables, and
+        # knows nothing else about this agent. Through a weak reference: bound
+        # methods would tie the agent into a cycle with its own jobs, and
+        # __del__, the backstop that unlocks a forgotten agent's session,
+        # would then wait for the cycle collector instead of the last reference.
+        me = weakref.ref(self)
+        self.jobs = Jobs(self.cwd, open_child=lambda model: me()._open_child(model),
+                         check_model=lambda name: me()._built(name, None))
         self.mode = mode
         self.config = config or Config.load()
         # Per-agent model choice. One Config instance is shared by every agent
@@ -552,21 +256,7 @@ class Agent:
         # this overrides the model for this agent alone, credentials included
         # (they come from the config either way).
         self.model_override = model_override
-        # What became of the jobs, waiting to be shown to the model: taken
-        # at the top of a turn and between its steps, like queued user input.
-        self.notices: list[str] = []
-        # Set by the UI. Called whenever a job starts or ends or a notice
-        # arrives, so it can redraw and wake an idle conversation.
-        self.on_jobs_changed: Callable[[], None] | None = None
-        # Set by the UI: puts a job on screen before it gets under way,
-        # awaited with (job id, job). None where there is no tab to show it
-        # in: an agent then runs unseen, and run_background refuses.
-        self.open_job: Callable[[str, Job], Awaitable[None]] | None = None
-        self._closed = False
-        # The tool budget of the turn in flight, which the agents it starts
-        # inherit: an unattended run bounded for one agent is bounded for all.
-        self._max_tool_calls: int | None = None
-        # Set by the UI too: the hook the loop pulls queued user messages from.
+        # Set by the UI: the hook the loop pulls queued user messages from.
         # None where nobody can type while a turn runs (headless, tests).
         self.pending: PendingFn | None = None
         # Per-agent tool state, kept off the tool functions so one agent's
@@ -596,8 +286,6 @@ class Agent:
         # two (the TUI's TurnDriver does), and this turns a caller that does
         # not into an error instead of a corrupted log.
         self._in_flight: str | None = None
-        # Events run_until_idle waits on, set whenever the jobs move.
-        self._job_waiters: set[asyncio.Event] = set()
 
     @classmethod
     def open(cls, cwd: Path | None = None, *, session: Session | None = None,
@@ -672,14 +360,7 @@ class Agent:
         The jobs go with it: their ids only mean anything inside this
         conversation, so nothing would ever hear from them again.
         """
-        self._closed = True
-        for job in self.jobs.values():
-            if not job.task.done():
-                job.task.cancel()
-            if job.command is not None:
-                job.command.kill()
-        self.jobs.clear()
-        self.notices.clear()
+        self.jobs.close()
         self.session.unlock()
 
     def __enter__(self) -> "Agent":
@@ -706,12 +387,8 @@ class Agent:
 
     @mode.setter
     def mode(self, mode: str) -> None:
-        # The agents this one started follow it: tightening the mode while a
-        # child is at work must not leave the child running under the old one.
         self._mode = mode
-        for job in self.jobs.values():
-            if job.agent is not None:
-                job.agent.mode = mode
+        self.jobs.set_mode(mode)
 
     @property
     def model_name(self) -> str | None:
@@ -1022,91 +699,14 @@ class Agent:
             result = ToolResult(refusal, "denied")
         else:
             try:
-                result = ToolResult(await self._job_tool(call.tool_name, args))
+                # list_models is about this agent's models, not its jobs.
+                result = ToolResult(self._list_models() if call.tool_name == "list_models"
+                                    else await self.jobs.call(call.tool_name, args))
             except ToolError as exc:
                 result = exc.result()
         _settle(slot, result)
         persist()
         yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
-
-    async def _job_tool(self, name: str, args: dict) -> str:
-        """Run one job tool call and render its result for the model.
-
-        Fails the call by raising ToolError, the way a registry tool does.
-        """
-        if name == "spawn_agent":
-            prompt = str(args.get("prompt") or "").strip()
-            if not prompt:
-                raise ToolError("Error: prompt is required.")
-            self._check_room("agent")
-            model = str(args.get("model") or "").strip() or None
-            if model:
-                # Built here only to be thrown away: the child would not find
-                # out before its first request, a turn too late to pick again.
-                try:
-                    self._built(model, None)
-                except Exception as exc:  # noqa: BLE001 — unknown provider, no credential
-                    raise ToolError(f"Error: cannot start an agent on {model!r}: {exc} "
-                                    "Call list_models for the ones available.") from None
-            try:
-                job_id = await self._spawn(prompt, model)
-            except Exception as exc:  # noqa: BLE001 — a session or a tab that would not open
-                raise ToolError(f"Error: could not start an agent: {exc}") from None
-            return (f"Started agent {job_id}; it is running now. Its answer is delivered "
-                    "to you when it finishes, so carry on or end your turn.")
-
-        if name == "list_models":
-            return self._list_models()
-
-        if name == "run_background":
-            command = str(args.get("command") or "").strip()
-            if not command:
-                raise ToolError("Error: command is required.")
-            if self.open_job is None:
-                raise ToolError("Error: background commands only work in the interactive UI; "
-                                "use shell instead.")
-            self._check_room("command")
-            try:
-                job_id = await self._start_command(
-                    command, str(args.get("description") or "").strip())
-            except Exception as exc:  # noqa: BLE001 — a command or a tab that would not start
-                raise ToolError(f"Error: could not start the command: {exc}") from None
-            return (f"Started background command {job_id}; it keeps running after this "
-                    "turn and you are told when it exits. Read its output with read_job "
-                    "and stop it with stop_job.")
-
-        job_id = str(args.get("job_id") or "").strip()
-        job = self.jobs.get(job_id)
-        if job is None:
-            raise ToolError(f"Error: no agent or background command {job_id}. Agents leave "
-                            "when they finish, and ids from an earlier run are gone.")
-
-        if name == "read_job":
-            command = job.command
-            if command is None:
-                raise ToolError(f"Error: {job_id} is an agent; its answer is delivered to "
-                                "you when it finishes.")
-            start = 0 if args.get("mode") == "all" else job.cursor
-            data, job.cursor, dropped = command.output.since(start)
-            if command.killed:
-                state = "stopped"
-            elif command.running:
-                state = "running"
-            else:
-                state = f"exited, code {command.exit_code}"
-            text = tail_text(data, dropped)
-            if not text.strip():
-                return f"{job_id} [{state}]: no output{' since your last read' if start else ''}."
-            return f"{job_id} [{state}]:\n{text}"
-
-        if name == "stop_job":
-            if not self.stop_job(job_id):
-                raise ToolError(f"Error: nothing to stop under {job_id}; it has already ended.")
-            if job.kind == "agent":
-                return f"Stopped agent {job_id}. It reports nothing back."
-            return f"Stopped {job_id}. What it printed is still readable with read_job."
-
-        raise ToolError(f"Error: unknown tool {name!r}")
 
     def available_models(self) -> list[str]:
         """The models this agent can be put on, as qualified names.
@@ -1138,43 +738,9 @@ class Agent:
                 + "\n".join(lines)
                 + "\nOther models of the same providers work too, when named exactly.")
 
-    def _check_room(self, kind: str) -> None:
-        """Fail a job tool call whose job would exceed a cap."""
-        live = [job for job in self.jobs.values() if job.running]
-        agents = sum(1 for job in live if job.kind == "agent")
-        if kind == "agent" and agents >= MAX_AGENTS:
-            raise ToolError(f"Error: {agents} agents are already running (limit {MAX_AGENTS}); "
-                            "wait for one to finish or stop one before starting another.")
-        if len(live) >= MAX_JOBS:
-            raise ToolError(f"Error: {len(live)} agents and commands are already running "
-                            f"(limit {MAX_JOBS}); stop one before starting another.")
-
-    def _new_job_id(self) -> str:
-        """An id no job of this agent is using.
-
-        One space for agents and commands both: they are quoted back to the
-        model side by side, and an id that named one of each would be read as
-        whichever the model happened to expect.
-        """
-        while True:
-            job_id = uuid4().hex[:4]
-            if job_id not in self.jobs:
-                return job_id
-
-    def _notify(self, notice: str | None = None) -> None:
-        """Queue ``notice`` for the model, and tell the UI the jobs moved."""
-        if self._closed:
-            return
-        if notice:
-            self.notices.append(notice)
-        for waiter in self._job_waiters:
-            waiter.set()
-        if self.on_jobs_changed is not None:
-            self.on_jobs_changed()
-
-    async def _spawn(self, prompt: str, model: str | None) -> str:
-        """Start a child agent on ``prompt`` as a task of its own; returns its id."""
-        job_id = self._new_job_id()
+    def _open_child(self, model: str | None) -> "Agent":
+        """A subagent of this one, for the job manager to run: its own session,
+        marked as this one's child, on ``model`` or else this agent's model."""
 
         async def confirm(name: str, args: dict) -> bool:
             # For a child nothing put on screen; a UI that shows it asks there
@@ -1184,7 +750,7 @@ class Agent:
             # be for the parent.
             return await self.confirm(name, args) if self.confirm else False
 
-        child = Agent.open(
+        return Agent.open(
             cwd=self.cwd, mode=self.mode, config=self.config, confirm=confirm,
             # Narrowed from this agent's own set, so a parent that was given
             # less never hands more to what it starts.
@@ -1193,103 +759,10 @@ class Agent:
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
             parent_session_id=self.session.id)
-        job = Job("agent", label=prompt, agent=child)
-        # On screen before its first step, so nothing it does goes unseen.
-        if self.open_job is not None:
-            try:
-                await self.open_job(job_id, job)
-            except BaseException:
-                child.close()
-                raise
-        job.task = asyncio.ensure_future(self._run_child(job, prompt))
-        self.jobs[job_id] = job
-        # A callback rather than a finally in the task: one cancelled before
-        # its first step never enters the coroutine, and its session lock
-        # would be held for the life of the process.
-        job.task.add_done_callback(lambda _: self._child_done(job_id, job))
-        self._notify()
-        return job_id
-
-    async def _run_child(self, job: Job, prompt: str) -> str:
-        """Drive a child through its one turn; returns what it answered."""
-        child = job.agent
-
-        async def emit(event: AgentEvent) -> None:
-            # Shown where somebody is showing the child, dropped otherwise:
-            # the answer is all the parent gets either way.
-            if job.sink is not None:
-                await job.sink(event)
-
-        # The prompt is an event like any other, as in a turn the user starts.
-        await emit(UserInput(prompt))
-        # Closed on the way out even when stopped mid-event, so the child's
-        # turn records how it ended before _child_done closes its session.
-        async with contextlib.aclosing(child.run(prompt, max_tool_calls=self._max_tool_calls)) as events:
-            async for event in events:
-                await emit(event)
-        return _answer(child.history, child.session.id)
-
-    def _child_done(self, job_id: str, job: Job) -> None:
-        """A child's task is over, however it ended: release it and report."""
-        job.agent.close()
-        if job.on_done is not None:
-            job.on_done()
-        if self.jobs.get(job_id) is job:
-            del self.jobs[job_id]
-        notice = None
-        # Cancelled is how a child is stopped, and whoever stopped it has
-        # already said what there is to say.
-        if not job.task.cancelled():
-            exc = job.task.exception()
-            if exc is None:
-                notice = f"agent {job_id} finished:\n{job.task.result()}"
-            else:
-                notice = f"agent {job_id} failed: {type(exc).__name__}: {exc}"
-        self._notify(notice)
-
-    async def _start_command(self, command: str, description: str) -> str:
-        """Start a background command and put it on screen; returns its id."""
-        job_id = self._new_job_id()
-        running = await start_background(command, self.cwd)
-        job = Job("command", label=description or command, command=running)
-        try:
-            await self.open_job(job_id, job)
-        except BaseException:
-            # Nothing would ever kill it: no tab holds it and no job names it,
-            # and it is in its own process group, so it would outlive the app.
-            running.kill()
-            raise
-        job.task = asyncio.ensure_future(self._watch_command(job_id, running))
-        self.jobs[job_id] = job
-        self._notify()
-        return job_id
-
-    async def _watch_command(self, job_id: str, command: BackgroundCommand) -> None:
-        """Tell the model when a command ends by itself, or its tab was closed."""
-        code = await command.wait()
-        self._notify(f"command {job_id} was stopped" if command.killed
-                     else f"command {job_id} exited (code {code})")
-
-    def stop_job(self, job_id: str, *, by_user: bool = False) -> bool:
-        """End one job. False when the id names nothing still running.
-
-        The model is not told about a stop it ordered itself, since the tool
-        result already says so; one the user ordered is news to it.
-        """
-        job = self.jobs.get(job_id)
-        if job is None or not job.running:
-            return False
-        if by_user:
-            self.notices.append(f"{job.kind} {job_id} was stopped by the user")
-        job.task.cancel()
-        if job.command is not None:
-            job.command.kill()
-            self._notify()
-        return True
 
     def _take_notices(self) -> list[JobNotice]:
         """Move the waiting notices into the history, one message each."""
-        notices, self.notices = self.notices, []
+        notices = self.jobs.take_notices()
         for text in notices:
             self._append_message(job_message(text))
         return [JobNotice(text) for text in notices]
@@ -1394,7 +867,7 @@ class Agent:
                 return
             for notice in notices:
                 yield notice
-            self._max_tool_calls = max_tool_calls
+            self.jobs.tool_budget = max_tool_calls
             if user_input is not None:
                 prompt = self.expand_input(user_input) if expand else user_input
                 self._append_message(ModelRequest(parts=[UserPromptPart(content=prompt)]))
@@ -1416,8 +889,12 @@ class Agent:
                                          partial_text=partial_text)
 
             try:
-                async for event in self._run(record_outcome, max_tool_calls):
-                    yield event
+                # Closed with this one rather than left to the garbage
+                # collector, so an abandoned turn's model stream is shut before
+                # its turn_end is recorded and the agent is freed.
+                async with contextlib.aclosing(self._run(record_outcome, max_tool_calls)) as events:
+                    async for event in events:
+                        yield event
             except asyncio.CancelledError:
                 record_outcome("interrupted")
                 raise
@@ -1449,15 +926,13 @@ class Agent:
         is still the call for a caller that drives the conversation itself,
         such as a UI that wakes the agent when its jobs move.
         """
-        moved = asyncio.Event()
-        self._job_waiters.add(moved)
-        try:
+        with self.jobs.watch() as moved:
             prompt, first = user_input, True
             while True:
                 if not first:
                     moved.clear()
-                    if not self.notices:
-                        if not any(job.kind == "agent" for job in self.jobs.values()):
+                    if not self.jobs.notices:
+                        if not self.jobs.agents_running:
                             return
                         await moved.wait()
                         continue
@@ -1471,8 +946,6 @@ class Agent:
                         if isinstance(event, ToolBudgetExhausted):
                             return
                 prompt, first = None, False
-        finally:
-            self._job_waiters.discard(moved)
 
     async def _run(self, record_outcome: Callable[..., None],
                    max_tool_calls: int | None) -> AsyncIterator[AgentEvent]:
@@ -1672,7 +1145,7 @@ class Agent:
                 self._replace_message(record_id, tool_request)
 
             for slot, call in zip(returns, calls):
-                args = _parse_args(call.args)
+                args = parse_args(call.args)
                 name = call.tool_name
 
                 # A call refused before it runs is still answered, with a

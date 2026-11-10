@@ -12,9 +12,7 @@ from pydantic_ai.messages import (
 )
 
 from paimon import lockfile, prompt
-from paimon.agent import (
-    Agent,
-)
+from paimon.agent import Agent
 from paimon.config import Config
 from paimon.llm import build_model
 from paimon.session import (

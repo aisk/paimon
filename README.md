@@ -62,7 +62,8 @@ The agent loop is importable, so a Python program can drive it without going thr
 ```python
 import asyncio
 
-from paimon.agent import Agent, TextDelta
+from paimon.agent import Agent
+from paimon.events import TextDelta
 
 async def main():
     agent = Agent.open(mode="auto")
@@ -156,6 +157,7 @@ flowchart TD
         Compaction["compaction.py"]
         Retry["retry.py"]
         Mentions["mentions.py<br/>@path expansion"]
+        JobMgr["jobs.py<br/>subagents, background commands"]
         Jobs["turns.py<br/>turn driver"]
     end
 
@@ -198,9 +200,10 @@ flowchart TD
     AgentLoop --> Compaction
     AgentLoop --> Retry
     AgentLoop --> Mentions
-    AgentLoop -. "spawn_agent" .-> AgentLoop
-    AgentLoop -. "spawn_agent" .-> AgentPane
-    AgentLoop -. "run_background" .-> CommandPane
+    AgentLoop --> JobMgr
+    JobMgr -. "spawn_agent" .-> AgentLoop
+    JobMgr -. "spawn_agent" .-> AgentPane
+    JobMgr -. "run_background" .-> CommandPane
 
     PromptMod --> Skills
 

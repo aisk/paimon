@@ -14,7 +14,9 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from paimon import agent as agent_module
 from paimon import headless, lockfile
-from paimon.agent import Agent, AgentBusyError, JobNotice, TextDelta, ToolEnd, UserInput
+from paimon import jobs as jobs_module
+from paimon.agent import Agent, AgentBusyError
+from paimon.events import JobNotice, TextDelta, ToolEnd, UserInput
 from paimon.config import Config
 from paimon.session import Session, job_text, synthetic_kind
 from paimon.tools.result import ToolError
@@ -63,19 +65,19 @@ class SpawnAgentTest(JobsTestCase):
             (job_id,) = agent.jobs
             self.assertIn(f"Started agent {job_id}", end.result)
             self.assertTrue(agent.jobs[job_id].running, "the turn ended with the child still going")
-            self.assertEqual(agent.notices, [])
+            self.assertEqual(agent.jobs.notices, [])
 
             gate.set()
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
 
-        self.assertEqual(agent.notices, [f"agent {job_id} finished:\nthe parser is fine"])
+        self.assertEqual(agent.jobs.notices, [f"agent {job_id} finished:\nthe parser is fine"])
         self.assertEqual(agent.jobs, {}, "a finished agent leaves the table")
 
     async def test_the_notice_reaches_the_model_as_a_message_of_its_own(self) -> None:
         agent = self.agent()
         with patch("paimon.agent.build_model", return_value=spawning_model(["check the parser"])):
             await self.turn(agent)
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
             events = await self.turn(agent, None)
 
         notices = [event for event in events if isinstance(event, JobNotice)]
@@ -83,7 +85,7 @@ class SpawnAgentTest(JobsTestCase):
         self.assertTrue(notices[0].text.endswith("finished:\ndone"))
         delivered = [message for message in agent.history if synthetic_kind(message) == "job"]
         self.assertEqual([job_text(message) for message in delivered], [notices[0].text])
-        self.assertEqual(agent.notices, [], "a notice is delivered once")
+        self.assertEqual(agent.jobs.notices, [], "a notice is delivered once")
 
     async def test_a_notice_that_arrives_mid_turn_is_picked_up_between_steps(self) -> None:
         agent = self.agent()
@@ -93,7 +95,7 @@ class SpawnAgentTest(JobsTestCase):
             async for event in run:
                 events.append(event)
                 if isinstance(event, ToolEnd):
-                    agent.notices.append("agent a1f2 finished:\nfound it")
+                    agent.jobs.notices.append("agent a1f2 finished:\nfound it")
         notices = [event for event in events if isinstance(event, JobNotice)]
         self.assertEqual([notice.text for notice in notices], ["agent a1f2 finished:\nfound it"])
         self.assertGreater(events.index(notices[0]),
@@ -125,19 +127,19 @@ class SpawnAgentTest(JobsTestCase):
             self.assertTrue(lockfile.held(child.session.path))
 
             gate.set()
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
         self.assertFalse(lockfile.held(child.session.path))
 
     async def test_a_long_answer_is_clipped(self) -> None:
         agent = self.agent()
-        answer = "x" * (agent_module.ANSWER_LIMIT + 500)
+        answer = "x" * (jobs_module.ANSWER_LIMIT + 500)
         with patch("paimon.agent.build_model",
                    return_value=spawning_model(["check the parser"], answer=answer)):
             await self.turn(agent)
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
 
-        (notice,) = agent.notices
-        self.assertLess(len(notice), agent_module.ANSWER_LIMIT + 300)
+        (notice,) = agent.jobs.notices
+        self.assertLess(len(notice), jobs_module.ANSWER_LIMIT + 300)
         self.assertIn("clipped, 500 more chars", notice)
         self.assertIn("paimon log", notice, "and it says where the rest is")
 
@@ -147,9 +149,9 @@ class SpawnAgentTest(JobsTestCase):
                    return_value=spawning_model(["check the parser"], fail="the model said no")), \
                 patch("paimon.agent.retry.is_transient", return_value=False):
             await self.turn(agent)
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
 
-        (notice,) = agent.notices
+        (notice,) = agent.jobs.notices
         self.assertIn("failed", notice)
         self.assertIn("the model said no", notice)
         self.assertEqual(agent.jobs, {})
@@ -163,17 +165,17 @@ class SpawnAgentTest(JobsTestCase):
             self.assertEqual(len(agent.jobs), 3)
             self.assertTrue(all(job.running for job in agent.jobs.values()))
             gate.set()
-            await self.until(lambda: len(agent.notices) == 3)
+            await self.until(lambda: len(agent.jobs.notices) == 3)
 
     async def test_the_cap_refuses_one_more(self) -> None:
         agent = self.agent()
         gate = asyncio.Event()
-        prompts = [f"task {index}" for index in range(agent_module.MAX_AGENTS + 1)]
+        prompts = [f"task {index}" for index in range(jobs_module.MAX_AGENTS + 1)]
         with patch("paimon.agent.build_model", return_value=spawning_model(prompts, gate=gate)):
             events = await self.turn(agent)
             results = [event.result for event in events if isinstance(event, ToolEnd)]
-            self.assertEqual(len(agent.jobs), agent_module.MAX_AGENTS)
-            self.assertIn(f"limit {agent_module.MAX_AGENTS}", results[-1])
+            self.assertEqual(len(agent.jobs), jobs_module.MAX_AGENTS)
+            self.assertIn(f"limit {jobs_module.MAX_AGENTS}", results[-1])
             self.assertIn("stop one before starting another", results[-1])
             gate.set()
 
@@ -192,9 +194,9 @@ class SpawnAgentTest(JobsTestCase):
             job.sink = sink
             job.on_done = lambda: ended.append(job_id)
 
-        agent.open_job = open_job
+        agent.jobs.open_job = open_job
         await self.turn(agent, model=spawning_model(["check the parser"], answer="fine"))
-        await self.until(lambda: bool(agent.notices))
+        await self.until(lambda: bool(agent.jobs.notices))
 
         (job_id, kind, label, running), = shown
         self.assertEqual((kind, label), ("agent", "check the parser"))
@@ -205,16 +207,16 @@ class SpawnAgentTest(JobsTestCase):
                          "fine")
         self.assertEqual(ended, [job_id])
 
-    async def test_a_child_that_cannot_be_shown_is_not_started(self) -> None:
+    async def test_a_child_whose_tab_fails_to_open_is_not_started(self) -> None:
         agent = self.agent()
         before = {session.path for session in Session.list(self.cwd, include_children=True)}
 
         async def open_job(job_id: str, job) -> None:
-            raise RuntimeError("all 8 panes are in use")
+            raise RuntimeError("the tab would not mount")
 
-        agent.open_job = open_job
-        with self.assertRaisesRegex(ToolError, "could not start an agent: all 8 panes are in use"):
-            await agent._job_tool("spawn_agent", {"prompt": "check the parser"})
+        agent.jobs.open_job = open_job
+        with self.assertRaisesRegex(ToolError, "could not start an agent: the tab would not mount"):
+            await agent.jobs.call("spawn_agent", {"prompt": "check the parser"})
 
         self.assertEqual(agent.jobs, {})
         for session in Session.list(self.cwd, include_children=True):
@@ -244,7 +246,7 @@ class SpawnAgentTest(JobsTestCase):
         with patch("paimon.agent.build_model", return_value=spawning_model(["check"])), \
                 patch.object(agent_module.Agent, "run", spy):
             [event async for event in agent.run("go", max_tool_calls=7)]
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
         self.assertIn(("check", 7), seen)
 
 
@@ -255,7 +257,7 @@ class ListModelsTest(JobsTestCase):
         agent = self.agent()
         agent.config.providers = {"zai": {"api_key": "k"}}
         with patch("paimon.llm.known_models", return_value=self.CATALOG):
-            listing = await agent._job_tool("list_models", {})
+            listing = agent._list_models()
         self.assertIn("running on test:stub", listing)
         self.assertEqual(listing.splitlines()[1:3], ["test:stub", "zai:glm-5.3"])
         self.assertNotIn("openai:", listing, "no credential, not offered")
@@ -263,19 +265,19 @@ class ListModelsTest(JobsTestCase):
     async def test_a_provider_signed_in_to_later_shows_up_on_the_next_call(self) -> None:
         agent = self.agent()
         with patch("paimon.llm.known_models", return_value=self.CATALOG):
-            self.assertNotIn("zai:glm-5.3", await agent._job_tool("list_models", {}))
+            self.assertNotIn("zai:glm-5.3", agent._list_models())
             agent.config.providers = {"zai": {"api_key": "k"}}
-            self.assertIn("zai:glm-5.3", await agent._job_tool("list_models", {}))
+            self.assertIn("zai:glm-5.3", agent._list_models())
             with patch("paimon.chatgpt.signed_in", return_value=True):
-                self.assertIn("chatgpt:gpt-6.1-sol", await agent._job_tool("list_models", {}))
+                self.assertIn("chatgpt:gpt-6.1-sol", agent._list_models())
             with patch("paimon.antigravity.signed_in", return_value=True):
-                self.assertIn("antigravity:claude-sonnet-4-6", await agent._job_tool("list_models", {}))
+                self.assertIn("antigravity:claude-sonnet-4-6", agent._list_models())
 
     async def test_an_agent_is_started_on_the_model_asked_for(self) -> None:
         agent = self.agent()
         gate = asyncio.Event()
         with patch("paimon.agent.build_model", return_value=spawning_model([], gate=gate)):
-            await agent._job_tool("spawn_agent", {"prompt": "go", "model": "zai:glm-5.3"})
+            await agent.jobs.call("spawn_agent", {"prompt": "go", "model": "zai:glm-5.3"})
             (job,) = agent.jobs.values()
             self.assertEqual(job.agent.model_name, "zai:glm-5.3")
             job.task.cancel()
@@ -285,7 +287,7 @@ class ListModelsTest(JobsTestCase):
         agent = self.agent()
         with (patch("paimon.agent.build_model", side_effect=ValueError("Unknown provider: nope.")),
               self.assertRaises(ToolError) as caught):
-            await agent._job_tool("spawn_agent", {"prompt": "go", "model": "nope:x"})
+            await agent.jobs.call("spawn_agent", {"prompt": "go", "model": "nope:x"})
         answer = caught.exception.text
         self.assertIn("cannot start an agent on 'nope:x': Unknown provider: nope.", answer)
         self.assertIn("list_models", answer)
@@ -306,36 +308,36 @@ class StopTest(JobsTestCase):
                    return_value=spawning_model(["one", "two"], gate=gate)):
             await self.turn(agent)
             first, second = agent.jobs
-            self.assertEqual(await agent._job_tool("stop_job", {"job_id": first}),
+            self.assertEqual(await agent.jobs.call("stop_job", {"job_id": first}),
                              f"Stopped agent {first}. It reports nothing back.")
             await settle()
             self.assertEqual(list(agent.jobs), [second])
-            self.assertEqual(agent.notices, [], "the model stopped it, so it is not told again")
+            self.assertEqual(agent.jobs.notices, [], "the model stopped it, so it is not told again")
 
             gate.set()
-            await self.until(lambda: bool(agent.notices))
-        self.assertTrue(agent.notices[0].startswith(f"agent {second} finished"))
+            await self.until(lambda: bool(agent.jobs.notices))
+        self.assertTrue(agent.jobs.notices[0].startswith(f"agent {second} finished"))
 
     async def test_a_stop_the_user_ordered_is_news_to_the_model(self) -> None:
         agent = self.agent()
         changes: list = []
-        agent.on_jobs_changed = lambda: changes.append(list(agent.notices))
+        agent.jobs.on_changed = lambda: changes.append(list(agent.jobs.notices))
         with patch("paimon.agent.build_model", return_value=None):
             job_id, _ = await self._running(agent)
-            self.assertTrue(agent.stop_job(job_id, by_user=True))
+            self.assertTrue(agent.jobs.stop(job_id, by_user=True))
             await settle()
 
-        self.assertEqual(agent.notices, [f"agent {job_id} was stopped by the user"])
-        self.assertEqual(changes[-1], agent.notices, "and the UI hears about it")
-        self.assertFalse(agent.stop_job(job_id), "nothing is left under that id")
+        self.assertEqual(agent.jobs.notices, [f"agent {job_id} was stopped by the user"])
+        self.assertEqual(changes[-1], agent.jobs.notices, "and the UI hears about it")
+        self.assertFalse(agent.jobs.stop(job_id), "nothing is left under that id")
 
     async def test_a_child_stopped_before_its_first_step_is_still_released(self) -> None:
         agent = self.agent()
-        job_id = await agent._spawn("check the parser", None)
+        job_id = await agent.jobs._spawn("check the parser", None)
         child = agent.jobs[job_id].agent
         self.assertTrue(lockfile.held(child.session.path))
 
-        self.assertTrue(agent.stop_job(job_id))
+        self.assertTrue(agent.jobs.stop(job_id))
         await settle()
 
         self.assertEqual(agent.jobs, {}, "a task that never ran still leaves the table")
@@ -356,7 +358,7 @@ class StopTest(JobsTestCase):
 
         self.assertTrue(task.cancelled())
         self.assertFalse(lockfile.held(child_path), "a stopped child releases its session")
-        self.assertEqual(agent.notices, [], "nobody is left to tell")
+        self.assertEqual(agent.jobs.notices, [], "nobody is left to tell")
 
 
 class ChildConfirmTest(JobsTestCase):
@@ -396,7 +398,7 @@ class ChildConfirmTest(JobsTestCase):
         with patch("paimon.agent.build_model",
                    return_value=FunctionModel(stream_function=stream)):
             await self.turn(agent)
-            await self.until(lambda: bool(agent.notices))
+            await self.until(lambda: bool(agent.jobs.notices))
 
     async def test_a_ui_showing_the_child_is_the_one_asked(self) -> None:
         asked: list = []
@@ -414,7 +416,7 @@ class ChildConfirmTest(JobsTestCase):
 
             job.agent.confirm = confirm
 
-        agent.open_job = open_job
+        agent.jobs.open_job = open_job
         await self._child_writes(agent)
 
         self.assertEqual(asked, [("write_file", "../out.txt")])
@@ -433,11 +435,37 @@ class ChildConfirmTest(JobsTestCase):
         self.assertEqual(asked, ["write_file"])
         self.assertFalse(self.out.exists())
 
+    async def test_a_child_with_no_free_tab_runs_unseen_and_asks_through_its_parent(self) -> None:
+        # A full screen limits what can be shown, not what the agent can do:
+        # the child runs as it would with no tabs at all.
+        asked: list = []
+        opened: list = []
+
+        async def confirm(name: str, args: dict) -> bool:
+            asked.append(name)
+            return True
+
+        agent = self.agent(mode="auto", confirm=confirm)
+
+        async def open_job(job_id: str, job) -> None:
+            opened.append(job_id)
+            raise jobs_module.PaneLimitError("all 8 panes are in use; close one first")
+
+        agent.jobs.open_job = open_job
+        await self._child_writes(agent)
+
+        self.assertEqual(len(opened), 1, "a tab was asked for")
+        self.assertEqual(asked, ["write_file"], "the parent answered for the unseen child")
+        self.assertEqual(self.out.read_text(), "hi")
+        (notice,) = agent.jobs.notices
+        self.assertEqual(notice, f"agent {opened[0]} finished:\nwritten")
+        self.assertEqual(agent.jobs, {})
+
     async def test_with_nobody_to_ask_it_is_denied(self) -> None:
         agent = self.agent(mode="auto")
         await self._child_writes(agent)
         self.assertFalse(self.out.exists())
-        self.assertIn("finished", agent.notices[0], "the child carries on and reports")
+        self.assertIn("finished", agent.jobs.notices[0], "the child carries on and reports")
 
 
 class BackgroundCommandTest(JobsTestCase):
@@ -448,9 +476,9 @@ class BackgroundCommandTest(JobsTestCase):
         async def open_job(job_id: str, job) -> None:
             shown.append((job_id, job.command, job.label))
 
-        agent.open_job = open_job
-        with patch("paimon.agent.start_background", return_value=command):
-            answer = await agent._job_tool(
+        agent.jobs.open_job = open_job
+        with patch("paimon.jobs.start_background", return_value=command):
+            answer = await agent.jobs.call(
                 "run_background", {"command": "npm run dev", "description": "dev server"})
         ((job_id, _, _),) = shown
         self.assertIn(f"Started background command {job_id}", answer)
@@ -463,13 +491,13 @@ class BackgroundCommandTest(JobsTestCase):
         job_id, command = await self._start(agent)
         command.output.append(b"listening on 3000\n")
 
-        first = await agent._job_tool("read_job", {"job_id": job_id})
+        first = await agent.jobs.call("read_job", {"job_id": job_id})
         self.assertIn("[running]", first)
         self.assertIn("listening on 3000", first)
         self.assertIn("no output since your last read",
-                      await agent._job_tool("read_job", {"job_id": job_id}))
+                      await agent.jobs.call("read_job", {"job_id": job_id}))
         self.assertIn("listening on 3000",
-                      await agent._job_tool("read_job", {"job_id": job_id, "mode": "all"}))
+                      await agent.jobs.call("read_job", {"job_id": job_id, "mode": "all"}))
 
     async def test_an_exit_is_delivered_and_the_output_stays_readable(self) -> None:
         agent = self.agent()
@@ -478,39 +506,41 @@ class BackgroundCommandTest(JobsTestCase):
         command.exit(2)
         await settle()
 
-        self.assertEqual(agent.notices, [f"command {job_id} exited (code 2)"])
-        self.assertIn("[exited, code 2]", await agent._job_tool("read_job", {"job_id": job_id}))
+        self.assertEqual(agent.jobs.notices, [f"command {job_id} exited (code 2)"])
+        self.assertIn("[exited, code 2]", await agent.jobs.call("read_job", {"job_id": job_id}))
 
     async def test_a_stop_the_model_ordered_is_not_reported_back(self) -> None:
         agent = self.agent()
         job_id, command = await self._start(agent)
-        self.assertIn("Stopped", await agent._job_tool("stop_job", {"job_id": job_id}))
+        self.assertIn("Stopped", await agent.jobs.call("stop_job", {"job_id": job_id}))
         await settle()
 
         self.assertTrue(command.killed)
-        self.assertEqual(agent.notices, [])
+        self.assertEqual(agent.jobs.notices, [])
         with self.assertRaisesRegex(ToolError, "already ended"):
-            await agent._job_tool("stop_job", {"job_id": job_id})
+            await agent.jobs.call("stop_job", {"job_id": job_id})
 
     async def test_a_tab_the_user_closed_is_reported(self) -> None:
         agent = self.agent()
         job_id, command = await self._start(agent)
         command.kill()  # what closing the tab does
         await settle()
-        self.assertEqual(agent.notices, [f"command {job_id} was stopped"])
+        self.assertEqual(agent.jobs.notices, [f"command {job_id} was stopped"])
 
     async def test_a_command_that_cannot_be_shown_is_killed(self) -> None:
+        # Unlike an agent, never run unseen: a process nobody can see or close
+        # must not start.
         agent = self.agent()
         command = FakeCommand()
 
         async def open_job(job_id: str, job) -> None:
-            raise RuntimeError("all 8 panes are in use")
+            raise jobs_module.PaneLimitError("all 8 panes are in use")
 
-        agent.open_job = open_job
-        with (patch("paimon.agent.start_background", return_value=command),
+        agent.jobs.open_job = open_job
+        with (patch("paimon.jobs.start_background", return_value=command),
               self.assertRaisesRegex(ToolError,
                                      "could not start the command: all 8 panes are in use")):
-            await agent._job_tool("run_background", {"command": "npm run dev", "description": "dev"})
+            await agent.jobs.call("run_background", {"command": "npm run dev", "description": "dev"})
 
         self.assertTrue(command.killed, "or it would outlive the app in its own group")
         self.assertEqual(agent.jobs, {})
@@ -518,9 +548,9 @@ class BackgroundCommandTest(JobsTestCase):
     async def test_agents_at_their_cap_leave_room_for_a_command(self) -> None:
         agent = self.agent()
         gate = asyncio.Event()
-        prompts = [f"task {index}" for index in range(agent_module.MAX_AGENTS)]
+        prompts = [f"task {index}" for index in range(jobs_module.MAX_AGENTS)]
         await self.turn(agent, model=spawning_model(prompts, gate=gate))
-        self.assertEqual(len(agent.jobs), agent_module.MAX_AGENTS)
+        self.assertEqual(len(agent.jobs), jobs_module.MAX_AGENTS)
 
         job_id, _ = await self._start(agent)
         self.assertEqual(agent.jobs[job_id].kind, "command")
@@ -532,7 +562,7 @@ class BackgroundCommandTest(JobsTestCase):
         await self.turn(agent, model=spawning_model(["check"], gate=gate))
         (job_id,) = agent.jobs
         with self.assertRaisesRegex(ToolError, "is an agent"):
-            await agent._job_tool("read_job", {"job_id": job_id})
+            await agent.jobs.call("read_job", {"job_id": job_id})
 
 
 class RunUntilIdleTest(JobsTestCase):
@@ -572,7 +602,7 @@ class RunUntilIdleTest(JobsTestCase):
                         "the model was asked again with the answer in front of it")
         self.assertIsInstance(agent.history[-1], ModelResponse)
         self.assertEqual(agent.history[-1].parts, [TextPart(content="ok")])
-        self.assertEqual((agent.jobs, agent.notices), ({}, []), "and it returned once idle")
+        self.assertEqual((agent.jobs, agent.jobs.notices), ({}, []), "and it returned once idle")
 
     async def test_a_turn_that_started_nothing_is_one_turn(self) -> None:
         agent = self.agent()
@@ -633,6 +663,23 @@ class OneWriterTest(JobsTestCase):
             await run.__anext__()
             await run.aclose()
             await self.turn(agent, "two")
+
+    async def test_closing_an_abandoned_turn_closes_its_model_stream_at_once(self) -> None:
+        agent = self.agent()
+        closed: list[str] = []
+
+        async def stream(messages, info):
+            try:
+                yield "partial"
+                await asyncio.Event().wait()
+            finally:
+                closed.append("stream")
+
+        with patch("paimon.agent.build_model", return_value=FunctionModel(stream_function=stream)):
+            run = agent.run("one")
+            await run.__anext__()
+            await run.aclose()
+            self.assertEqual(closed, ["stream"], "not left for the garbage collector to close")
 
 
 class HeadlessTest(JobsTestCase):

@@ -19,7 +19,8 @@ from pydantic_ai.models import override_allow_model_requests
 from pydantic_ai.models.zai import ZaiModel
 from pydantic_ai.providers.zai import ZaiProvider
 
-from paimon.agent import Agent, ReasoningDelta, _strip_foreign_thinking
+from paimon.agent import Agent, _strip_foreign_thinking
+from paimon.events import ReasoningDelta
 from paimon.config import Config
 from tests.support.agent import make_session
 

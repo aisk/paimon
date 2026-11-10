@@ -18,7 +18,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
 
 from . import herdr, llm, progstatus
-from .agent import Agent, Job
+from .agent import Agent
 from .agentpane import AgentPane
 from .errors import PaimonError
 from .login import LoginScreen, PickerScreen
@@ -26,6 +26,7 @@ from .pane import Pane, SessionPane
 from .session import SessionError
 from .tabs import PaneTabs
 from .commandpane import CommandPane
+from .jobs import Job, PaneLimitError
 from .turns import Outcome, TurnDriver
 from .ui import BlockingPanel, PromptInput
 
@@ -34,10 +35,6 @@ from .ui import BlockingPanel, PromptInput
 # strip. A soft cap keeps a runaway loop of "one more session" from taking the
 # app down with it.
 MAX_PANES = 8
-
-
-class PaneLimitError(PaimonError):
-    """Every pane is taken, so nothing more can be put on screen."""
 
 
 class PaneScreen(Screen):

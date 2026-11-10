@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 
@@ -26,9 +27,8 @@ class FakeAgent:
         self.fail: str | None = None
         self.running: asyncio.Event | None = None
         # The hooks a TurnDriver takes, and what it reads back.
-        self.notices: list[str] = []
+        self.jobs = SimpleNamespace(notices=[], on_changed=None)
         self.pending = None
-        self.on_jobs_changed = None
         self.shell_runs: list[tuple[str, str]] = []
         self.compactions = 0
 
@@ -36,7 +36,7 @@ class FakeAgent:
         self.prompts.append(prompt)
         # Taken as the turn starts, as Agent.run takes them. The fake has no
         # later steps, so one that lands mid-turn waits for the next turn.
-        self.notices.clear()
+        self.jobs.notices.clear()
         self.running = asyncio.Event()
         for event in self.events:
             yield event
@@ -58,10 +58,10 @@ class FakeAgent:
         self.shell_runs.append((command, output))
 
     def report(self, notice: str) -> None:
-        """A job of this agent's reported, the way Agent._notify tells it."""
-        self.notices.append(notice)
-        if self.on_jobs_changed is not None:
-            self.on_jobs_changed()
+        """A job of this agent's reported, the way Jobs._notify tells it."""
+        self.jobs.notices.append(notice)
+        if self.jobs.on_changed is not None:
+            self.jobs.on_changed()
 
     def finish(self) -> None:
         assert self.running is not None, "no turn is running"

@@ -51,8 +51,8 @@ from pathlib import Path
 from typing import Sequence
 
 from . import logtext
-from .agent import (
-    Agent,
+from .agent import Agent
+from .events import (
     JobNotice,
     ContextCompacted,
     ContextCompactionFailed,

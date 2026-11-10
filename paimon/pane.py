@@ -20,9 +20,8 @@ from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
 
 from . import lockfile
-from .agent import (
-    Agent,
-    Job,
+from .agent import Agent
+from .events import (
     JobNotice,
     CompactionNotice,
     ContextCompactionFailed,
@@ -37,6 +36,7 @@ from .agent import (
     UserInput,
     replay_events,
 )
+from .jobs import Job
 from .tools.permissions import MODES
 from .turns import CompactionOver, CompactionStarted, Outcome, Result, TurnDriver, TurnOver
 from .login import PickerScreen
@@ -358,7 +358,7 @@ class SessionPane(Pane):
         self.agent = agent
         agent.confirm = self._confirm
         agent.ask = self._ask
-        agent.open_job = self._open_job
+        agent.jobs.open_job = self._open_job
         # One renderer per conversation rather than one per turn: a turn now
         # opens with a UserInput event, which is what resets it. A new one per
         # agent, so a swapped-out session cannot leave a live markdown stream
@@ -470,8 +470,11 @@ class SessionPane(Pane):
         self._sync_statusbar()
         self._notify_state()
 
-    # The picker gets its own group: run_turn is an exclusive worker on this
-    # same node, and the default group would let a turn cancel the open picker.
+    # The picker gets its own group so that no exclusive worker can cancel it
+    # while it is open. Turns run in the TurnDriver now, not as workers here,
+    # and the exclusive workers left on this node (the recap) have groups of
+    # their own, so this is a guard against one ever being started in the
+    # default group rather than a fix for one that is.
     @work(group="picker")
     async def resume_session(self) -> None:
         if self.is_busy:

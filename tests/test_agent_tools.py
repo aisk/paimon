@@ -10,8 +10,8 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-from paimon.agent import (
-    Agent,
+from paimon.agent import Agent
+from paimon.events import (
     TextDelta,
     TodosUpdate,
     ToolBudgetExhausted,

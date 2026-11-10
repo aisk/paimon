@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from .agent import UserInput
+from .events import UserInput
 from .compaction import CompactionResult
 from .session import shell_message
 
@@ -130,7 +130,7 @@ class TurnDriver:
         # when the item ends is recorded before anything else runs.
         self._held: list[tuple[str, str]] = []
         agent.pending = self._take_pending
-        agent.on_jobs_changed = self._jobs_changed
+        agent.jobs.on_changed = self._jobs_changed
 
     # ---- lifecycle ----------------------------------------------------------
 
@@ -189,7 +189,7 @@ class TurnDriver:
             wakes = over.result.outcome is not Outcome.INTERRUPTED
         else:
             wakes = over.result.finished
-        if wakes and self.agent.notices:
+        if wakes and self.agent.jobs.notices:
             self.wake()
         self._notify()
 
@@ -325,7 +325,7 @@ class TurnDriver:
         it; one that arrives mid-turn is picked up between steps, and one
         that arrives during a compaction once it is over. wake() refuses both.
         """
-        if self.agent.notices:
+        if self.agent.jobs.notices:
             self.wake()
         if self.on_jobs_changed is not None:
             self.on_jobs_changed()
