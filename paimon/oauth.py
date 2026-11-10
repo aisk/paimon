@@ -140,10 +140,16 @@ class Login:
         if parts.path != urlsplit(redirect_uri).path:
             raise self.error(f"the callback URL must start with {redirect_uri}")
         query = {key: values[0] for key, values in parse_qs(parts.query).items()}
-        if query.get("error"):
-            raise self.error(f"{self.label} authorization failed: {query['error']}")
+        # State first: a refusal is this login's only when it carries this
+        # login's state, and one from a stale tab of an earlier attempt must
+        # not end this one (the provider sends the state back with an error
+        # as it does with a code).
         if query.get("state") != state:
             raise self.error("the callback belongs to a different login attempt")
+        if query.get("error"):
+            refusal = self.error(f"{self.label} authorization failed: {query['error']}")
+            refusal.ends_login = True  # see redirected()
+            raise refusal
         return query
 
 
@@ -196,8 +202,10 @@ async def redirected(host: str, port: int, path: str, parse: Callable[[str], T],
                     result = parse(target)
                 except PaimonError as exc:
                     status, body = "400 Bad Request", str(exc)
-                    # A stale tab from an earlier attempt must not end this one.
-                    if "error=" in target and not callback.done():
+                    # Only this attempt's own refusal ends it: a stale tab from
+                    # an earlier attempt, or any other request that does not
+                    # parse, is answered and otherwise ignored.
+                    if getattr(exc, "ends_login", False) and not callback.done():
                         callback.set_exception(exc)
                 else:
                     status, body = "200 OK", done

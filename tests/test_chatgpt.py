@@ -258,11 +258,26 @@ class LoginTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_denied_authorization_fails_the_login(self) -> None:
         async def respond(query: dict) -> None:
-            await self._browser("error=access_denied")
+            await self._browser(f"error=access_denied&state={query['state'][0]}")
 
         with self.assertRaisesRegex(chatgpt.ChatGPTAuthError, "access_denied"):
             await self._login(respond)
         self.assertEqual(_stored(), {})
+
+    async def test_a_stale_tabs_refusal_does_not_end_this_login(self) -> None:
+        """An error redirect from an earlier attempt carries that attempt's
+        state, or none; only this attempt's own refusal ends it."""
+        async def respond(query: dict) -> None:
+            for stale in ("error=access_denied&state=other", "error=access_denied"):
+                answer = await self._browser(stale)
+                self.assertIn(b"400", answer)
+                self.assertIn(b"different login attempt", answer)
+            self.assertIn(b"200 OK", await self._browser(
+                f"code=c0de&client_id=issued-1&state={query['state'][0]}"))
+
+        with patch("paimon.chatgpt.httpx.post", return_value=_token_response("at-1", "rt-1")):
+            await self._login(respond)
+        self.assertEqual(_stored()["access"], "at-1")
 
     async def test_a_plan_that_cannot_be_shared_is_refused(self) -> None:
         async def respond(query: dict) -> None:
