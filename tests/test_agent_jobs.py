@@ -446,7 +446,7 @@ class BackgroundCommandTest(JobsTestCase):
             shown.append((job_id, job.command, job.label))
 
         agent.open_job = open_job
-        with patch("paimon.tools.start_background", return_value=command):
+        with patch("paimon.agent.start_background", return_value=command):
             answer = await agent._job_tool(
                 "run_background", {"command": "npm run dev", "description": "dev server"})
         ((job_id, _, _),) = shown
@@ -503,7 +503,7 @@ class BackgroundCommandTest(JobsTestCase):
             raise RuntimeError("all 8 panes are in use")
 
         agent.open_job = open_job
-        with patch("paimon.tools.start_background", return_value=command):
+        with patch("paimon.agent.start_background", return_value=command):
             answer = await agent._job_tool(
                 "run_background", {"command": "npm run dev", "description": "dev"})
 

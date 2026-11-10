@@ -6,20 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
 
-from paimon.tools import (
-    MAX_OUTPUT,
-    MODES,
-    READ_DENIAL,
-    REGISTRY,
-    USER_DENIAL,
-    ToolContext,
-    _read_history,
-    _search_history,
-    _shell,
-    gate,
-    run_tool,
-    validate_args,
-)
+from paimon.tools.base import MAX_OUTPUT, ToolContext
+from paimon.tools.permissions import MODES, READ_DENIAL, USER_DENIAL, gate, run_tool
+from paimon.tools.registry import REGISTRY, _read_history, _search_history, validate_args
+from paimon.tools.shell import _shell
 from tests.support.agent import make_session
 from tests.support.shell import sleeper
 
@@ -102,9 +92,9 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_shell_timeout_terminates_and_reaps_process_tree(self) -> None:
         with (
-            patch("paimon.tools._COMMAND_TIMEOUT", 0.05),
-            patch("paimon.tools._KILL_GRACE", 0.05),
-            patch("paimon.tools._KILL_TIMEOUT", 0.5),
+            patch("paimon.tools.shell._COMMAND_TIMEOUT", 0.05),
+            patch("paimon.tools.shell._KILL_GRACE", 0.05),
+            patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
         ):
             result = await _shell({"command": sleeper(ignore_term=True)}, self.cwd)
 
@@ -122,7 +112,7 @@ class LineEndingPreservationTest(unittest.TestCase):
         self.path = self.cwd / "f.txt"
 
     def _edit(self, old: str, new: str) -> str:
-        from paimon.tools import _edit_file
+        from paimon.tools.files import _edit_file
         return _edit_file({"path": "f.txt", "old_string": old, "new_string": new}, self.cwd)
 
     def test_crlf_file_stays_crlf(self) -> None:
@@ -153,13 +143,13 @@ class LineEndingPreservationTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), b"a\r\nB\r\nC\r\n")
 
     def test_write_file_keeps_an_existing_files_conventions(self) -> None:
-        from paimon.tools import _write_file
+        from paimon.tools.files import _write_file
         self.path.write_bytes(b"\xef\xbb\xbfold\r\n")
         _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
         self.assertEqual(self.path.read_bytes(), b"\xef\xbb\xbfp\r\nq\r\n")
 
     def test_write_file_creates_new_files_as_plain_lf_utf8(self) -> None:
-        from paimon.tools import _write_file
+        from paimon.tools.files import _write_file
         _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
         self.assertEqual(self.path.read_bytes(), b"p\nq\n")
 
@@ -175,20 +165,20 @@ class LineEndingPreservationTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), original)
 
     def test_write_file_replaces_a_file_that_is_not_utf8(self) -> None:
-        from paimon.tools import _write_file
+        from paimon.tools.files import _write_file
         self.path.write_bytes("café\r\n".encode("latin-1"))
         _write_file({"path": "f.txt", "content": "p\nq\n"}, self.cwd)
         self.assertEqual(self.path.read_bytes(), b"p\r\nq\r\n")
 
     def test_read_file_shows_a_file_that_is_not_utf8(self) -> None:
-        from paimon.tools import _read_file
+        from paimon.tools.files import _read_file
         self.path.write_bytes("café\nb\n".encode("latin-1"))
         result = _read_file({"path": "f.txt"}, self.cwd)
         self.assertIn("caf�", result)
         self.assertIn("b", result)
 
     def test_read_file_shows_crlf_files_without_stray_carriage_returns(self) -> None:
-        from paimon.tools import _read_file
+        from paimon.tools.files import _read_file
         self.path.write_bytes(b"a\r\nb\r\n")
         result = _read_file({"path": "f.txt"}, self.cwd)
         self.assertNotIn("\r", result)

@@ -5,8 +5,8 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
-from paimon import tools
 from paimon.textual_debug import TextualDebugBridge
+from paimon.tools.registry import execute_tool
 
 
 class DebugApp(App):
@@ -26,20 +26,20 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(40, 10)) as pilot:
                 bridge.attach(app)
 
-                inspected = await tools.execute_tool(
+                inspected = await execute_tool(
                     "textual_inspect", {"selector": "#target", "include_styles": True},
                     cwd, registry=registry,
                 )
                 self.assertIn("Static#target.sample", inspected)
                 self.assertIn("width: 10", inspected)
 
-                evaluated = await tools.execute_tool(
+                evaluated = await execute_tool(
                     "textual_eval", {"expression": "query_one('#target').region.width"},
                     cwd, registry=registry,
                 )
                 self.assertEqual(evaluated, "10")
 
-                executed = await tools.execute_tool(
+                executed = await execute_tool(
                     "textual_exec",
                     {"code": "widget = query_one('#target')\nwidget.styles.width = 17\nresult = widget.id"},
                     cwd, registry=registry,
@@ -48,7 +48,7 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(executed, "'target'")
                 self.assertEqual(app.query_one("#target").region.width, 17)
 
-                applied = await tools.execute_tool(
+                applied = await execute_tool(
                     "textual_apply_css", {"css": "#target { height: 3; }"},
                     cwd, registry=registry,
                 )
@@ -56,7 +56,7 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("applied", applied)
                 self.assertEqual(app.query_one("#target").region.height, 3)
 
-                result = await tools.execute_tool(
+                result = await execute_tool(
                     "textual_screenshot", {"path": "shots/ui.svg", "simplify": True},
                     cwd, registry=registry,
                 )
@@ -70,11 +70,11 @@ class TextualDebugBridgeTest(unittest.IsolatedAsyncioTestCase):
         app = DebugApp()
         async with app.run_test():
             bridge.attach(app)
-            await tools.execute_tool(
+            await execute_tool(
                 "textual_exec", {"code": "import asyncio\nvalue = 40\nawait asyncio.sleep(0)"},
                 Path.cwd(), registry=registry,
             )
-            result = await tools.execute_tool(
+            result = await execute_tool(
                 "textual_eval", {"expression": "value + 2"}, Path.cwd(), registry=registry,
             )
             self.assertEqual(result, "42")

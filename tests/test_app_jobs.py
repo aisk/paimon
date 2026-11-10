@@ -460,7 +460,7 @@ class BackgroundTaskTest(AppTestCase):
         app = self.make_app(mode="yolo")
         running = FakeCommand("build")
         with patch("paimon.agent.build_model", return_value=stub_model()), \
-                patch("paimon.tools.start_background",
+                patch("paimon.agent.start_background",
                       new=AsyncMock(return_value=running)):
             async with app.run_test() as pilot:
                 parent = app.pane
@@ -490,7 +490,7 @@ class BackgroundTaskTest(AppTestCase):
         # the test's to time.
         running = FakeCommand("npm run dev")
         with patch("paimon.agent.build_model", return_value=stub_model()), \
-                patch("paimon.tools.start_background",
+                patch("paimon.agent.start_background",
                       new=AsyncMock(return_value=running)):
             async with app.run_test() as pilot:
                 first = app.pane
@@ -531,7 +531,7 @@ class BackgroundTaskTest(AppTestCase):
         app = self.make_app(mode="yolo")
         running = FakeCommand("build")
         with patch("paimon.agent.build_model", return_value=stub_model()), \
-                patch("paimon.tools.start_background",
+                patch("paimon.agent.start_background",
                       new=AsyncMock(return_value=running)):
             async with app.run_test() as pilot:
                 await app.pane.agent._job_tool(

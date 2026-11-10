@@ -4,16 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon.tools import (
-    MODES,
-    ToolContext,
-    _glob,
-    _inside,
-    _shell,
-    gate,
-    safe_command,
-    shell_output_dir,
-)
+from paimon.tools.base import ToolContext
+from paimon.tools.files import _glob, _inside
+from paimon.tools.permissions import MODES, gate, safe_command
+from paimon.tools.shell import _shell, shell_output_dir
 from tests.support.shell import filler, overflow_path
 
 
@@ -102,7 +96,7 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate("read_file", {}, "read", self.cwd), "allow")
 
     def test_safe_shell_commands_auto_allowed(self) -> None:
-        with patch("paimon.tools.shell_executable", return_value="/bin/sh"):
+        with patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh"):
             for mode in ("read", "auto"):
                 self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
                 self.assertEqual(gate("shell", {"command": "git status"}, mode, self.cwd), "allow")
@@ -123,7 +117,7 @@ class SafeCommandTest(unittest.TestCase):
         self.cwd = Path(tmp.name).resolve()
         # The list models sh, so it is tested as if sh ran the command on
         # every platform; under cmd.exe nothing is recognized at all.
-        shell = patch("paimon.tools.shell_executable", return_value="/bin/sh")
+        shell = patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh")
         shell.start()
         self.addCleanup(shell.stop)
 
@@ -189,7 +183,7 @@ class SafeCommandTest(unittest.TestCase):
         # cmd.exe parses differently from the sh this list models: "'" is not
         # a quote there, %VAR% expands, "^" escapes, and a command is looked
         # up in the current directory before PATH.
-        with patch("paimon.tools.shell_executable", return_value=None):
+        with patch("paimon.tools.permissions.shell_executable", return_value=None):
             for cmd in ("ls", "git status", "echo %USERNAME%", "cat .^./x",
                         "echo ' && del important.txt && echo '"):
                 self.assertFalse(safe_command(cmd, self.cwd), cmd)
@@ -353,7 +347,7 @@ class BackgroundGateTest(unittest.TestCase):
 
     def test_a_safe_looking_command_is_still_held(self) -> None:
         args = {"command": "ls -la", "description": "listing"}
-        with patch("paimon.tools.shell_executable", return_value="/bin/sh"):
+        with patch("paimon.tools.permissions.shell_executable", return_value="/bin/sh"):
             self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
         self.assertEqual(gate("run_background", args, "read", self.cwd), "deny",
                          "nothing that keeps running is waved through")

@@ -10,7 +10,6 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-from paimon import tools
 from paimon.agent import (
     Agent,
     TextDelta,
@@ -23,6 +22,8 @@ from paimon.agent import (
 )
 from paimon.config import Config
 from paimon.review import MAX_BLOCKS, Verdict
+from paimon.tools.permissions import READ_DENIAL, USER_DENIAL
+from paimon.tools.registry import REGISTRY, SUBAGENT_DENIED, without
 from tests.support.agent import make_session, open_agent, stub_model
 
 
@@ -82,7 +83,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
 
         end = await self._run_tool_turn(agent, "write_file", '{"path": "a.txt", "content": "hi"}')
         self.assertTrue(end.denied)
-        self.assertEqual(end.result, tools.READ_DENIAL)
+        self.assertEqual(end.result, READ_DENIAL)
         self.assertFalse((cwd / "a.txt").exists())
 
         agent.mode = "yolo"
@@ -167,7 +168,7 @@ class PermissionModeTest(unittest.IsolatedAsyncioTestCase):
 
         confirm.assert_awaited_once()
         self.assertTrue(end.denied)
-        self.assertEqual(end.result, tools.USER_DENIAL)
+        self.assertEqual(end.result, USER_DENIAL)
 
     async def test_an_unavailable_reviewer_with_nobody_to_ask_is_a_denial(self) -> None:
         cwd = self._cwd()
@@ -329,7 +330,7 @@ class AgentToolsetTest(unittest.IsolatedAsyncioTestCase):
             session = make_session(cwd)
             session.append_system_prompt("snapshot")
             agent = Agent.open(cwd=cwd, session=session, config=Config(model="test:stub"), mode="yolo",
-                               toolset={"read_file": tools.REGISTRY["read_file"]})
+                               toolset={"read_file": REGISTRY["read_file"]})
 
             offered: list[list[str]] = []
             requests = 0
@@ -433,7 +434,7 @@ class JobToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_narrowed_toolset_disables_them_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            toolset = tools.without(tools.REGISTRY, tools.SUBAGENT_DENIED)
+            toolset = without(REGISTRY, SUBAGENT_DENIED)
             with open_agent(Path(directory), toolset=toolset) as agent:
                 end = await self._call(agent, "spawn_agent", '{"prompt": "go"}')
                 names = [schema["function"]["name"] for schema in agent.tool_schemas]

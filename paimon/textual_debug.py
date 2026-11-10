@@ -17,7 +17,7 @@ import textual
 from pydantic import ConfigDict, with_config
 from typing_extensions import NotRequired, TypedDict
 
-from . import tools
+from .tools.base import Tool, ToolContext
 
 
 _spec = with_config(ConfigDict(use_attribute_docstrings=True))
@@ -98,7 +98,7 @@ class TextualDebugBridge:
             output = f"{output}\n{rendered}" if output else rendered
         return output or "(no output)"
 
-    async def evaluate(self, args: dict, cwd: Path, mode: str, ctx: tools.ToolContext) -> str:
+    async def evaluate(self, args: dict, cwd: Path, mode: str, ctx: ToolContext) -> str:
         scope = self._scope()
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
@@ -107,7 +107,7 @@ class TextualDebugBridge:
                 value = await value
         return self._captured(stream, value, show_none=True)
 
-    async def execute(self, args: dict, cwd: Path, mode: str, ctx: tools.ToolContext) -> str:
+    async def execute(self, args: dict, cwd: Path, mode: str, ctx: ToolContext) -> str:
         scope = self._scope()
         scope.pop("result", None)
         stream = io.StringIO()
@@ -118,7 +118,7 @@ class TextualDebugBridge:
                 await pending
         return self._captured(stream, scope.get("result"))
 
-    def inspect(self, args: dict, cwd: Path, mode: str, ctx: tools.ToolContext) -> str:
+    def inspect(self, args: dict, cwd: Path, mode: str, ctx: ToolContext) -> str:
         scope = self._scope()
         screen = scope["screen"]
         selector = args.get("selector")
@@ -161,14 +161,14 @@ class TextualDebugBridge:
             lines.append(f"... ({len(nodes) - limit} more nodes; raise limit to show them)")
         return "\n".join(lines)
 
-    def apply_css(self, args: dict, cwd: Path, mode: str, ctx: tools.ToolContext) -> str:
+    def apply_css(self, args: dict, cwd: Path, mode: str, ctx: ToolContext) -> str:
         app = self._scope()["app"]
         app.stylesheet.add_source(args["css"])
         app.stylesheet.reparse()
         app.refresh_css(animate=False)
         return "CSS override applied. It remains active until this app exits."
 
-    def screenshot(self, args: dict, cwd: Path, mode: str, ctx: tools.ToolContext) -> str:
+    def screenshot(self, args: dict, cwd: Path, mode: str, ctx: ToolContext) -> str:
         app = self._scope()["app"]
         path = Path(args.get("path", ".paimon/textual-debug.svg"))
         if not path.is_absolute():
@@ -178,10 +178,10 @@ class TextualDebugBridge:
         path.write_text(svg, encoding="utf-8")
         return f"Saved Textual screenshot to {path} ({len(svg)} chars)."
 
-    def toolset(self) -> dict[str, tools.Tool]:
+    def toolset(self) -> dict[str, Tool]:
         """A fresh mapping suitable for merging into an Agent toolset."""
         return {
-            "textual_inspect": tools.Tool(
+            "textual_inspect": Tool(
                 description=(
                     "Inspect the live Textual DOM by CSS selector, including geometry, pseudo-classes, "
                     "focus/visibility and optionally every computed CSS rule. With no selector, returns "
@@ -190,7 +190,7 @@ class TextualDebugBridge:
                 params=InspectArgs,
                 run=self.inspect,
             ),
-            "textual_eval": tools.Tool(
+            "textual_eval": Tool(
                 description=(
                     "Evaluate an arbitrary Python expression inside this running Textual UI and return "
                     "its repr. The persistent namespace contains app, screen, pane, focused, query, "
@@ -200,7 +200,7 @@ class TextualDebugBridge:
                 params=EvalArgs,
                 run=self.evaluate,
             ),
-            "textual_exec": tools.Tool(
+            "textual_exec": Tool(
                 description=(
                     "Execute arbitrary Python inside this running Textual UI. Imports, assignments and "
                     "top-level await work; names persist across calls. stdout/stderr are returned, as is "
@@ -210,7 +210,7 @@ class TextualDebugBridge:
                 params=ExecArgs,
                 run=self.execute,
             ),
-            "textual_apply_css": tools.Tool(
+            "textual_apply_css": Tool(
                 description=(
                     "Parse and apply a live Textual CSS override to the running app. Overrides accumulate "
                     "and relayout immediately; restart the app to clear them. Available only under "
@@ -219,7 +219,7 @@ class TextualDebugBridge:
                 params=CssArgs,
                 run=self.apply_css,
             ),
-            "textual_screenshot": tools.Tool(
+            "textual_screenshot": Tool(
                 description=(
                     "Export the currently rendered Textual screen as SVG to a file. Use after DOM/style "
                     "changes to capture the actual render. Available only under --textual-debug."

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 
-from paimon.tools import _TaskOutput
+from paimon.tools.background import _TaskOutput
 
 
 async def settle(times: int = 8) -> None:

@@ -20,7 +20,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
 
-from . import lockfile, tools
+from . import lockfile
 from .agent import (
     Agent,
     Job,
@@ -38,6 +38,7 @@ from .agent import (
     UserInput,
     replay_events,
 )
+from .tools.permissions import MODES
 from .turns import TurnDriver, Outcome, Result, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError, shell_message
@@ -546,7 +547,7 @@ class SessionPane(Pane):
     # ---- permission mode ----------------------------------------------------
 
     def cycle_mode(self) -> None:
-        self.mode = tools.MODES[(tools.MODES.index(self.mode) + 1) % len(tools.MODES)]
+        self.mode = MODES[(MODES.index(self.mode) + 1) % len(MODES)]
         self.agent.mode = self.mode
         self._refresh_mode()
         self._sync_statusbar()

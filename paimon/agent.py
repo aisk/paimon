@@ -31,7 +31,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model, ModelRequestParameters
 
-from . import codemode, compaction, logtext, retry, review, tools
+from . import codemode, compaction, logtext, retry, review
 from .config import Config
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string)
@@ -49,6 +49,23 @@ from .session import (
     shell_message,
     shell_text,
 )
+from .tools.background import BackgroundCommand, start_background, tail_text
+from .tools.base import Tool, ToolContext
+from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, run_tool
+from .tools.registry import (
+    REGISTRY,
+    SUBAGENT_DENIED,
+    AskFn,
+    definitions,
+    execute_tool,
+    failure,
+    normalize_todos,
+    render_todos,
+    schemas,
+    validate_args,
+    without,
+)
+from .tools.shell import user_shell
 
 # Transient compaction failures tolerated in one turn before it is left off.
 _MAX_COMPACTION_FAILURES = 3
@@ -238,14 +255,14 @@ def _nested_calls(part: ToolReturnPart) -> list[dict]:
     return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
 
 
-def _held(toolset: dict[str, tools.Tool] | None, config: Config) -> dict[str, tools.Tool]:
+def _held(toolset: dict[str, Tool] | None, config: Config) -> dict[str, Tool]:
     """The tools an agent opened with ``toolset`` under ``config`` really holds.
 
     The config's switches are applied here rather than by each caller, so
     --no-web-search and code mode reach every agent opened with it: new
     sessions, forks, subagents.
     """
-    held = dict(tools.REGISTRY if toolset is None else toolset)
+    held = dict(REGISTRY if toolset is None else toolset)
     if not config.web_search:
         held.pop("web_search", None)
     if not config.code_mode:
@@ -306,7 +323,7 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
                     if result is not None:
                         consumed.add(part.tool_call_id)
                     if part.tool_name == "write_todos":
-                        todos = tools.normalize_todos(args.get("todos"))
+                        todos = normalize_todos(args.get("todos"))
                         # Live, a write_todos that actually ran yields only a
                         # TodosUpdate; one that was rejected or never executed
                         # yields a normal failed call.
@@ -355,10 +372,6 @@ def _strip_foreign_thinking(history: list[ModelMessage], model: Model) -> list[M
     return sanitized
 
 
-# Re-exported so UI code can keep importing it from here.
-ConfirmFn = tools.ConfirmFn
-AskFn = tools.AskFn
-
 @dataclass
 class Job:
     """An agent or a background command another agent started."""
@@ -366,7 +379,7 @@ class Job:
     kind: str  # "agent" or "command"
     label: str = ""
     agent: "Agent | None" = None
-    command: tools.BackgroundCommand | None = None
+    command: BackgroundCommand | None = None
     # What ends with the job: the child's one turn, or the wait for the
     # command to exit. Cancelling it is how a job is stopped without a notice.
     # None only until the job has been put on screen, which comes first.
@@ -435,7 +448,7 @@ class Agent:
     def __init__(self, session: Session, system_prompt: str, *, cwd: Path | None = None,
                  confirm: ConfirmFn | None = None, ask: AskFn | None = None,
                  mode: str = "yolo", config: Config | None = None,
-                 toolset: dict[str, tools.Tool] | None = None,
+                 toolset: dict[str, Tool] | None = None,
                  model_override: str | None = None,
                  skills: Sequence[Skill] = (),
                  skill_diagnostics: Sequence[SkillDiagnostic] = ()):
@@ -479,15 +492,15 @@ class Agent:
         # Per-agent tool state, kept off the tool functions so one agent's
         # shell overflow files stay invisible to the next one. The session
         # rides along for the history tools.
-        self.tool_context = tools.ToolContext(session=session)
+        self.tool_context = ToolContext(session=session)
         self.todos: list[dict] = []
         self.session = session
         self.system_prompt = system_prompt
         self.history: list[ModelMessage] = session.messages()
-        # This agent's tool set; None means everything in tools.REGISTRY.
+        # This agent's tool set; None means everything in REGISTRY.
         self.toolset = _held(toolset, self.config)
-        self.tool_schemas = tools.schemas(self.toolset)
-        self._tool_definitions = tools.definitions(self.toolset)
+        self.tool_schemas = schemas(self.toolset)
+        self._tool_definitions = definitions(self.toolset)
         self._cached_model: tuple[tuple, Model] | None = None
         self._cached_review_model: tuple[tuple, Model] | None = None
         # Refusals in a row from the auto-mode reviewer; see _review.
@@ -504,7 +517,7 @@ class Agent:
              confirm: ConfirmFn | None = None, ask: AskFn | None = None,
              mode: str = "yolo", config: Config | None = None,
              append_system_prompt: str | None = None,
-             toolset: dict[str, tools.Tool] | None = None,
+             toolset: dict[str, Tool] | None = None,
              model_override: str | None = None,
              parent_session_id: str | None = None) -> "Agent":
         """Start a new session, or resume ``session``, and take its lock.
@@ -770,7 +783,7 @@ class Agent:
         the one asking. Nothing is recorded — the caller decides whether the
         run reaches the model now or at the running turn's next step.
         """
-        return await tools.user_shell(command, self.cwd, self.tool_context)
+        return await user_shell(command, self.cwd, self.tool_context)
 
     def record_shell(self, command: str, output: str) -> None:
         """Persist a "!" run so the model sees what the user just did.
@@ -783,7 +796,7 @@ class Agent:
 
     # ---- Tools the agent loop runs itself ----------------------------------
     # These mutate agent-held state, so they cannot go through
-    # the stateless tools.run_tool. Each handler fills ``slot`` with the tool
+    # the stateless run_tool. Each handler fills ``slot`` with the tool
     # result, calls ``persist()`` after every slot update, and yields the
     # events to forward.
 
@@ -793,7 +806,7 @@ class Agent:
         # also the shape replay_events produces for it, so no renderer has to
         # special-case the name. A malformed argument is the exception: it
         # renders as a normal failed tool call, live and on replay alike.
-        todos = tools.normalize_todos(args.get("todos"))
+        todos = normalize_todos(args.get("todos"))
         if todos is None:
             yield ToolStart(call.tool_call_id, call.tool_name, args)
             slot.content = ("Error: 'todos' must be an array of "
@@ -803,7 +816,7 @@ class Agent:
             yield ToolEnd(call.tool_call_id, call.tool_name, slot.content)
             return
         self.todos = todos
-        slot.content = tools.render_todos(self.todos)
+        slot.content = render_todos(self.todos)
         slot.outcome = "success"
         persist()
         yield TodosUpdate(list(self.todos))
@@ -841,10 +854,10 @@ class Agent:
     async def _refusal(self, name: str, args: dict) -> str | None:
         """Authorize a tool the loop runs itself, the way run_tool does the rest:
         None when it may run, else what the model is told."""
-        return await tools.authorize(name, args, self.mode, self.cwd, self.confirm,
-                                     self._review, self.toolset,
-                                     safe_commands=self.config.safe_commands,
-                                     ctx=self.tool_context)
+        return await authorize(name, args, self.mode, self.cwd, self.confirm,
+                               self._review, self.toolset,
+                               safe_commands=self.config.safe_commands,
+                               ctx=self.tool_context)
 
     async def _review(self, name: str, args: dict) -> str | None:
         """Put a call auto mode holds to the reviewer model.
@@ -873,7 +886,7 @@ class Agent:
         if self.confirm is None:
             return refusal
         if not await self.confirm(name, args):
-            return tools.USER_DENIAL
+            return USER_DENIAL
         self._review_blocks = 0
         return None
 
@@ -962,7 +975,7 @@ class Agent:
                 state = "running"
             else:
                 state = f"exited, code {command.exit_code}"
-            text = tools.tail_text(data, dropped)
+            text = tail_text(data, dropped)
             if not text.strip():
                 return f"{job_id} [{state}]: no output{' since your last read' if start else ''}."
             return f"{job_id} [{state}]:\n{text}"
@@ -1055,7 +1068,7 @@ class Agent:
             cwd=self.cwd, mode=self.mode, config=self.config, confirm=confirm,
             # Narrowed from this agent's own set, so a parent that was given
             # less never hands more to what it starts.
-            toolset=tools.without(self.toolset, tools.SUBAGENT_DENIED),
+            toolset=without(self.toolset, SUBAGENT_DENIED),
             model_override=model or self.model_override,
             # Marked as this session's child so it stays out of the session
             # lists and out of `paimon -c`.
@@ -1114,7 +1127,7 @@ class Agent:
     async def _start_command(self, command: str, description: str) -> str:
         """Start a background command and put it on screen; returns its id."""
         job_id = self._new_job_id()
-        running = await tools.start_background(command, self.cwd)
+        running = await start_background(command, self.cwd)
         job = Job("command", label=description or command, command=running)
         try:
             await self.open_job(job_id, job)
@@ -1128,7 +1141,7 @@ class Agent:
         self._notify()
         return job_id
 
-    async def _watch_command(self, job_id: str, command: tools.BackgroundCommand) -> None:
+    async def _watch_command(self, job_id: str, command: BackgroundCommand) -> None:
         """Tell the model when a command ends by itself, or its tab was closed."""
         code = await command.wait()
         self._notify(f"command {job_id} was stopped" if command.killed
@@ -1182,7 +1195,7 @@ class Agent:
             try:
                 problem = spend()
                 if problem is None:
-                    invalid = tools.validate_args(name, args, self.toolset)
+                    invalid = validate_args(name, args, self.toolset)
                     problem = invalid and f"invalid arguments for {name}: {invalid}"
                 if problem is not None:
                     record["status"] = "error"
@@ -1192,9 +1205,9 @@ class Agent:
                 if refusal is not None:
                     record["status"] = "denied"
                     raise codemode.ToolCallError(refusal)
-                result = await tools.execute_tool(name, args, self.cwd, mode=self.mode,
-                                                  registry=self.toolset, ctx=self.tool_context)
-                record["status"] = "ok" if tools.failure(result) is None else "error"
+                result = await execute_tool(name, args, self.cwd, mode=self.mode,
+                                            registry=self.toolset, ctx=self.tool_context)
+                record["status"] = "ok" if failure(result) is None else "error"
                 return result
             finally:
                 record["seconds"] = round(time.perf_counter() - started, 3)
@@ -1514,7 +1527,7 @@ class Agent:
                 # before the agent-handled dispatch below — so a malformed
                 # argument is a tool error the model can react to, never an
                 # exception ending the turn (TOOLS-1).
-                invalid = tools.validate_args(name, args, self.toolset)
+                invalid = validate_args(name, args, self.toolset)
                 if invalid is not None:
                     yield ToolStart(call.tool_call_id, name, args)
                     slot.content = f"Error: invalid arguments for {name}: {invalid}"
@@ -1545,11 +1558,11 @@ class Agent:
                     continue
 
                 yield ToolStart(call.tool_call_id, name, args)
-                result, denied = await tools.run_tool(name, args, self.cwd, self.mode,
-                                                      self.confirm, self.toolset,
-                                                      safe_commands=self.config.safe_commands,
-                                                      ctx=self.tool_context,
-                                                      review=self._review)
+                result, denied = await run_tool(name, args, self.cwd, self.mode,
+                                                self.confirm, self.toolset,
+                                                safe_commands=self.config.safe_commands,
+                                                ctx=self.tool_context,
+                                                review=self._review)
 
                 slot.content = result
                 slot.outcome = "denied" if denied else "success"

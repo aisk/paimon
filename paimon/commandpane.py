@@ -19,7 +19,7 @@ from textual.widgets import RichLog, Static
 
 from .agent import Job
 from .pane import Pane
-from .tools import decode_output
+from .tools.shell import decode_output
 
 # How often the pane takes what has arrived. Polling rather than a callback
 # from the reader: bursts coalesce into one repaint, and nothing in the output

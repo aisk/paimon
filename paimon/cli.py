@@ -10,13 +10,14 @@ from . import headless as headless_mode
 from . import herdr, progstatus
 from . import telemetry
 from . import textual_debug
-from . import tools
 from .agent import Agent
 from .app import PaimonApp
 from .config import Config
 from .errors import PaimonError
 from .llm import split_model_string
 from .session import SessionError, resume_hint
+from .tools.permissions import MODES
+from .tools.registry import REGISTRY
 
 
 def _resume_flags(args: argparse.Namespace) -> tuple[str, ...]:
@@ -80,7 +81,7 @@ def main() -> None:
                         help="with --print: add TEXT (e.g. a role definition) to the end of "
                              "the new session's system prompt; persisted with the session, "
                              "so not combinable with --continue/--resume")
-    parser.add_argument("--mode", choices=tools.MODES, default="yolo",
+    parser.add_argument("--mode", choices=MODES, default="yolo",
                         help="permission mode: read (only reads in cwd and clearly read-only "
                              "commands), auto (edits in cwd too; a reviewer model decides "
                              "everything else), yolo (no checks; the default)")
@@ -221,7 +222,7 @@ def main() -> None:
     if not args.tui:
         telemetry.record_launch("tui", model=config.model)
     debug_bridge = textual_debug.TextualDebugBridge() if args.textual_debug else None
-    toolset = {**tools.REGISTRY, **debug_bridge.toolset()} if debug_bridge is not None else None
+    toolset = {**REGISTRY, **debug_bridge.toolset()} if debug_bridge is not None else None
     try:
         agent = Agent.open(cwd=Path.cwd(), session=resume_session, mode=args.mode, config=config,
                            toolset=toolset)

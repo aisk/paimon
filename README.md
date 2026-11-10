@@ -149,7 +149,7 @@ flowchart TD
         AgentLoop["agent.py<br/>Agent.run()"]
         LLM["llm.py<br/>build_model()"]
         PromptMod["prompt.py<br/>system prompt"]
-        ToolsMod["tools.py<br/>tool REGISTRY"]
+        ToolsMod["tools/<br/>tool REGISTRY"]
         SessionMod["session.py<br/>JSONL persistence"]
         Compaction["compaction.py"]
         Retry["retry.py"]

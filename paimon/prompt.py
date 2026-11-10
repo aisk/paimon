@@ -89,7 +89,7 @@ def _shell_description() -> str:
     # The shell the shell tool actually uses — never $SHELL, which names the
     # user's login shell and used to make the prompt promise bash while the
     # tool ran /bin/sh.
-    from .tools import shell_executable
+    from .tools.shell import shell_executable
 
     shell = shell_executable()
     if shell is not None:

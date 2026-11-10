@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from pydantic_ai.messages import ModelRequest
 
-from paimon import headless, tools
+from paimon import headless
 from paimon.agent import (
     Agent,
     ContextCompacted,
@@ -22,6 +22,7 @@ from paimon.agent import (
 )
 from paimon.config import Config
 from paimon.skills import Skill
+from paimon.tools.registry import BACKGROUND_TOOLS
 from tests.support.agent import SILENT_EVENTS, agent_events, make_session, stub_model
 
 
@@ -418,7 +419,7 @@ class HeadlessToolsetTest(unittest.TestCase):
             agent = drive.call_args[0][0]
             self.addCleanup(agent.session.unlock)
 
-            for name in tools.BACKGROUND_TOOLS:
+            for name in BACKGROUND_TOOLS:
                 self.assertNotIn(name, agent.toolset)
             self.assertNotIn("ask_user", agent.toolset, "nobody is there to answer")
             self.assertNotIn("ask_user", agent.system_prompt)

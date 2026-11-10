@@ -7,9 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon import logtext, tools, websearch
+from paimon import logtext, websearch
 from paimon.agent import Agent
 from paimon.config import Config
+from paimon.tools.permissions import MODES, gate
+from paimon.tools.registry import BACKGROUND_TOOLS, INTERACTIVE_TOOLS, SUBAGENT_DENIED, execute_tool
 from paimon.websearch import Result, WebSearchError
 
 
@@ -152,12 +154,12 @@ class DdgsBackendTest(unittest.TestCase):
 
 class ToolTest(unittest.TestCase):
     def test_the_tool_is_never_gated(self) -> None:
-        for mode in tools.MODES:
-            self.assertEqual(tools.gate("web_search", {"query": "q"}, mode, Path.cwd()), "allow")
+        for mode in MODES:
+            self.assertEqual(gate("web_search", {"query": "q"}, mode, Path.cwd()), "allow")
 
     def test_the_registry_entry_runs_the_search(self) -> None:
         with patch.object(websearch, "_ddgs", lambda query, n: _results(1)):
-            result = asyncio.run(tools.execute_tool("web_search", {"query": "q"}, Path.cwd()))
+            result = asyncio.run(execute_tool("web_search", {"query": "q"}, Path.cwd()))
         self.assertEqual(result, "1. Title 1\n   https://example.com/1\n   snippet 1")
 
     def test_the_query_is_the_call_summary(self) -> None:
@@ -165,8 +167,8 @@ class ToolTest(unittest.TestCase):
                          "textual 8 release notes")
 
     def test_subagents_and_headless_keep_it(self) -> None:
-        self.assertNotIn("web_search", tools.SUBAGENT_DENIED)
-        self.assertNotIn("web_search", (*tools.BACKGROUND_TOOLS, *tools.INTERACTIVE_TOOLS))
+        self.assertNotIn("web_search", SUBAGENT_DENIED)
+        self.assertNotIn("web_search", (*BACKGROUND_TOOLS, *INTERACTIVE_TOOLS))
 
 
 class DisabledTest(unittest.TestCase):

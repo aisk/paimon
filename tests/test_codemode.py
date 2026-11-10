@@ -10,10 +10,13 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from textual.widgets import Static
 from typing_extensions import TypedDict
 
-from paimon import codemode, headless, tools
+from paimon import codemode, headless
 from paimon.agent import Agent, ToolBudgetExhausted, ToolEnd, ToolStart, replay_events
 from paimon.config import Config
 from paimon.session import Session
+from paimon.tools.base import MAX_OUTPUT, Tool
+from paimon.tools.permissions import USER_DENIAL
+from paimon.tools.registry import REGISTRY, failure, without
 from paimon.transcript import EventRenderer
 from tests.support.agent import make_session, session_records
 from tests.support.app import AppTestCase
@@ -51,7 +54,7 @@ class CodeModeTestCase(unittest.IsolatedAsyncioTestCase):
     def _agent(self, *, code_mode: bool = True, extra: dict | None = None, **kwargs) -> Agent:
         session = make_session(self.cwd)
         session.append_system_prompt("snapshot")
-        toolset = {**tools.REGISTRY, **extra} if extra else None
+        toolset = {**REGISTRY, **extra} if extra else None
         agent = Agent.open(cwd=self.cwd, session=session, toolset=toolset,
                            config=Config(model="test:stub", code_mode=code_mode), **kwargs)
         self.addCleanup(agent.close)
@@ -96,12 +99,12 @@ class ScriptTest(CodeModeTestCase):
         # other they would never finish.
         started = {"left": asyncio.Event(), "right": asyncio.Event()}
 
-        def waiting(mine: str, other: str) -> tools.Tool:
+        def waiting(mine: str, other: str) -> Tool:
             async def run(args, cwd, mode, ctx):
                 started[mine].set()
                 await started[other].wait()
                 return mine
-            return tools.Tool(description="Wait for the other.", params=_NoArgs, run=run)
+            return Tool(description="Wait for the other.", params=_NoArgs, run=run)
 
         agent = self._agent(extra={"left": waiting("left", "right"),
                                    "right": waiting("right", "left")})
@@ -140,7 +143,7 @@ class ScriptTest(CodeModeTestCase):
 
         end = await self._run(agent, "print('x' * 50000)\nraise ValueError('the reason')\n")
 
-        self.assertLess(len(end.result), tools.MAX_OUTPUT + 100)
+        self.assertLess(len(end.result), MAX_OUTPUT + 100)
         self.assertIn("more chars)", end.result)
         self.assertTrue(end.result.endswith("ValueError: the reason"))
 
@@ -173,7 +176,7 @@ class GatingTest(CodeModeTestCase):
                 "except Exception as exc:\n"
                 "    print('refused:', exc)\n"))
 
-        self.assertIn(f"refused: {tools.USER_DENIAL}", end.result)
+        self.assertIn(f"refused: {USER_DENIAL}", end.result)
         self.assertEqual(asked, [("write_file", "../out.txt")])
         self.assertTrue((self.cwd / "in.txt").exists())
         self.assertFalse((self.cwd.parent / "out.txt").exists())
@@ -254,14 +257,14 @@ class BudgetTest(CodeModeTestCase):
 
 
 class CancellationTest(CodeModeTestCase):
-    def _hanging(self, state: dict) -> tools.Tool:
+    def _hanging(self, state: dict) -> Tool:
         async def run(args, cwd, mode, ctx):
             state["started"].set()
             try:
                 await asyncio.Event().wait()
             finally:
                 state["cancelled"] = True
-        return tools.Tool(description="Never return.", params=_NoArgs, run=run)
+        return Tool(description="Never return.", params=_NoArgs, run=run)
 
     async def test_interrupt_cancels_running_calls_and_keeps_the_placeholder(self) -> None:
         state = {"started": asyncio.Event(), "cancelled": False}
@@ -281,11 +284,11 @@ class CancellationTest(CodeModeTestCase):
     async def test_a_call_the_script_never_awaited_ends_with_it(self) -> None:
         state = {"started": asyncio.Event(), "cancelled": False}
 
-        def wait_for_start() -> tools.Tool:
+        def wait_for_start() -> Tool:
             async def run(args, cwd, mode, ctx):
                 await state["started"].wait()
                 return "started"
-            return tools.Tool(description="Wait.", params=_NoArgs, run=run)
+            return Tool(description="Wait.", params=_NoArgs, run=run)
 
         agent = self._agent(extra={"hang": self._hanging(state), "wait_for_start": wait_for_start()})
 
@@ -310,7 +313,7 @@ class ReviewFixesTest(CodeModeTestCase):
 
         self.assertTrue(end.result.startswith("Script completed"))
         self.assertIn("... (truncated)", end.result)
-        self.assertLessEqual(len(end.result), tools.MAX_OUTPUT + 100)
+        self.assertLessEqual(len(end.result), MAX_OUTPUT + 100)
         self.assertLess(peak, 20 * 1024 * 1024)
 
     def test_rendering_matches_json_until_it_is_cut(self) -> None:
@@ -327,11 +330,11 @@ class ReviewFixesTest(CodeModeTestCase):
         self.assertEqual([(call["name"], call["status"]) for call in end.calls], [("shell", "error")])
 
     def test_failure_reads_the_status_a_command_ends_with(self) -> None:
-        self.assertIsNone(tools.failure("out\n(exit code 0)"))
-        self.assertEqual(tools.failure("out\n(exit code 1)"), "exit 1")
-        self.assertEqual(tools.failure("out\n(timed out after 120s)"), "timed out")
-        self.assertEqual(tools.failure("Error: unknown tool 'x'"), "failed")
-        self.assertIsNone(tools.failure("1:Error handling\n"))
+        self.assertIsNone(failure("out\n(exit code 0)"))
+        self.assertEqual(failure("out\n(exit code 1)"), "exit 1")
+        self.assertEqual(failure("out\n(timed out after 120s)"), "timed out")
+        self.assertEqual(failure("Error: unknown tool 'x'"), "failed")
+        self.assertIsNone(failure("1:Error handling\n"))
 
     async def test_headless_counts_a_call_denied_inside_a_script(self) -> None:
         from paimon.headless import ResultRenderer
@@ -357,7 +360,7 @@ class ReviewFixesTest(CodeModeTestCase):
             a: Optional[str]
             b: "int | None"
 
-        entry = tools.Tool(description="x", params=Args, run=lambda *a: "")
+        entry = Tool(description="x", params=Args, run=lambda *a: "")
         self.assertEqual(codemode._signature("f", entry),
                          "async def f(*, a: str | None, b: int | None) -> str: ...")
 
@@ -402,7 +405,7 @@ class ToggleTest(CodeModeTestCase):
                               if schema["function"]["name"] == "run_code"))
 
         narrowed = Agent(agent.session, "prompt", cwd=self.cwd, config=agent.config,
-                         toolset=tools.without(agent.toolset, ("shell", "write_file")))
+                         toolset=without(agent.toolset, ("shell", "write_file")))
         self.assertNotIn("shell", narrowed.toolset["run_code"].description.rsplit("Callable: ", 1)[1])
         self.assertIn("shell", named)
         self.assertEqual(set(codemode.callable_tools(narrowed.toolset)),

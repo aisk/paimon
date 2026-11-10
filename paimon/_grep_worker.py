@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from .tools import _grep
+from .tools.grep import _grep
 
 
 def main() -> None:

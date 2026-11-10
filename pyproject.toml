@@ -27,7 +27,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools_scm]
 
 [tool.setuptools]
-packages = ["paimon"]
+packages = ["paimon", "paimon.tools"]
 
 [tool.setuptools.package-data]
 # The TUI stylesheet is loaded at runtime via PaimonApp.CSS_PATH, and the

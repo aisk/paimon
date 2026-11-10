@@ -9,18 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon.tools import (
-    MAX_OUTPUT,
-    BackgroundCommand,
-    _kill_tree,
-    _shell,
-    _signal_group,
-    _TaskOutput,
-    shell_executable,
-    shell_output_dir,
-    start_background,
-    tail_text,
-)
+from paimon.tools.background import BackgroundCommand, _TaskOutput, start_background, tail_text
+from paimon.tools.base import MAX_OUTPUT
+from paimon.tools.shell import _kill_tree, _shell, _signal_group, shell_executable, shell_output_dir
 from tests.support.shell import (
     alive,
     filler,
@@ -94,9 +85,9 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_keeps_what_the_command_already_printed(self) -> None:
         command = printer("partial-output", then_sleep=True, ignore_term=True)
         with (
-            patch("paimon.tools._COMMAND_TIMEOUT", 0.3),
-            patch("paimon.tools._KILL_GRACE", 0.05),
-            patch("paimon.tools._KILL_TIMEOUT", 0.5),
+            patch("paimon.tools.shell._COMMAND_TIMEOUT", 0.3),
+            patch("paimon.tools.shell._KILL_GRACE", 0.05),
+            patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
         ):
             result = await _shell({"command": command}, self.cwd)
 
@@ -105,7 +96,7 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_backgrounded_descendant_does_not_hold_the_turn(self) -> None:
         """The command is finished even though something it started holds the pipe."""
-        with patch("paimon.tools._COMMAND_TIMEOUT", 10.0):
+        with patch("paimon.tools.shell._COMMAND_TIMEOUT", 10.0):
             started = time.monotonic()
             result = await _shell({"command": spawner(then_sleep=False)}, self.cwd)
             elapsed = time.monotonic() - started
@@ -119,9 +110,9 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
         with (
             # Long enough for the command to start its child and say so: an
             # interpreter takes far longer to come up than a shell builtin.
-            patch("paimon.tools._COMMAND_TIMEOUT", 3.0),
-            patch("paimon.tools._KILL_GRACE", 0.05),
-            patch("paimon.tools._KILL_TIMEOUT", 0.5),
+            patch("paimon.tools.shell._COMMAND_TIMEOUT", 3.0),
+            patch("paimon.tools.shell._KILL_GRACE", 0.05),
+            patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
         ):
             result = await _shell({"command": command}, self.cwd)
         pid = pid_from(result)
@@ -192,7 +183,7 @@ class BackgroundCommandTest(unittest.IsolatedAsyncioTestCase):
         pid = pid_from(running.output.since(0)[0].decode())
         self.addCleanup(reap, pid)
 
-        with patch("paimon.tools._KILL_GRACE", 0.05), patch("paimon.tools._KILL_TIMEOUT", 0.5):
+        with patch("paimon.tools.shell._KILL_GRACE", 0.05), patch("paimon.tools.shell._KILL_TIMEOUT", 0.5):
             running.kill()
             await self._wait(lambda: not running.running, "the command survived being killed")
             await self._wait(lambda: not alive(pid),
@@ -229,8 +220,8 @@ class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):
             sys.executable, "-c", "import time; time.sleep(30)",
             stdout=asyncio.subprocess.DEVNULL)
         try:
-            with patch("paimon.tools.os.name", "nt"), \
-                    patch("paimon.tools.os.killpg", create=True,
+            with patch("paimon.tools.shell.os.name", "nt"), \
+                    patch("paimon.tools.shell.os.killpg", create=True,
                           side_effect=AssertionError("killpg called on the nt path")):
                 await _kill_tree(proc, proc.pid)
             self.assertIsNotNone(proc.returncode)
@@ -243,8 +234,8 @@ class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         calls = []
         fake = SimpleNamespace(kill=lambda: calls.append("kill"))
-        with patch("paimon.tools.os.name", "nt"), \
-                patch("paimon.tools.os.killpg", create=True,
+        with patch("paimon.tools.shell.os.name", "nt"), \
+                patch("paimon.tools.shell.os.killpg", create=True,
                       side_effect=AssertionError("killpg called on the nt path")):
             _signal_group(1234, signal.SIGTERM, fake)
         self.assertEqual(calls, ["kill"])
@@ -265,9 +256,9 @@ class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):
         running = self._exiting_command(calls)
         # Windows' signal module has no SIGKILL at all, so the stand-in has
         # none either: reaching for it is the failure this guards against.
-        with patch("paimon.tools.os.name", "nt"), \
-                patch("paimon.tools.signal", SimpleNamespace(SIGTERM=signal.SIGTERM)), \
-                patch("paimon.tools.subprocess.Popen",
+        with patch("paimon.tools.background.os.name", "nt"), \
+                patch("paimon.tools.background.signal", SimpleNamespace(SIGTERM=signal.SIGTERM)), \
+                patch("paimon.tools.background.subprocess.Popen",
                       side_effect=lambda argv, **_: calls.append(argv)):
             running.terminate_now()
 
@@ -279,9 +270,9 @@ class WindowsCleanupPathTest(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         calls: list = []
         running = self._exiting_command(calls)
-        with patch("paimon.tools.os.name", "nt"), \
-                patch("paimon.tools.signal", SimpleNamespace(SIGTERM=signal.SIGTERM)), \
-                patch("paimon.tools.subprocess.Popen", side_effect=OSError("no taskkill")):
+        with patch("paimon.tools.background.os.name", "nt"), \
+                patch("paimon.tools.background.signal", SimpleNamespace(SIGTERM=signal.SIGTERM)), \
+                patch("paimon.tools.background.subprocess.Popen", side_effect=OSError("no taskkill")):
             running.terminate_now()
 
         self.assertEqual(calls, ["kill"])

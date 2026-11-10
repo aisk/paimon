@@ -1,15 +1,14 @@
 import asyncio
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from paimon.tools import (
-    _grep,
-    _grep_async,
-    run_tool,
-)
+from paimon.tools.grep import _grep, _grep_async
+from paimon.tools.permissions import run_tool
 
 
 class GrepTest(unittest.TestCase):
@@ -134,7 +133,7 @@ class GrepTest(unittest.TestCase):
 
     def test_large_files_are_reported(self) -> None:
         self.write("a.txt", "needle\n" * 10)
-        with patch("paimon.tools._GREP_MAX_FILE_BYTES", 20):
+        with patch("paimon.tools.grep._GREP_MAX_FILE_BYTES", 20):
             self.assertEqual(_grep({"pattern": "needle"}, self.cwd), "(no matches) (1 large files skipped)")
 
     def test_directory_symlink_cycles_are_not_followed(self) -> None:
@@ -144,6 +143,23 @@ class GrepTest(unittest.TestCase):
 
 
 class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
+    def test_worker_imports_neither_pydantic_nor_pydantic_ai(self) -> None:
+        """Every grep call starts a worker, so its imports are paid per search."""
+        script = (
+            "import io, json, sys\n"
+            "from paimon import _grep_worker\n"
+            "sys.stdin = io.StringIO(json.dumps([{'pattern': 'needle'}, '.', False]))\n"
+            "_grep_worker.main()\n"
+            "heavy = sorted(m for m in sys.modules if m.split('.')[0] in ('pydantic', 'pydantic_ai'))\n"
+            "assert not heavy, heavy\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "a.txt").write_text("needle\n")
+            proc = subprocess.run([sys.executable, "-c", script], cwd=directory,
+                                  capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("a.txt:1:needle", proc.stdout, "the worker ran a real search")
+
     async def test_registered_tool_searches_in_requested_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
@@ -165,8 +181,8 @@ class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
                 processes.append(proc)
                 return proc
 
-            with patch("paimon.tools._GREP_TIMEOUT", 1.0), patch(
-                "paimon.tools.asyncio.create_subprocess_exec", side_effect=track,
+            with patch("paimon.tools.grep._GREP_TIMEOUT", 1.0), patch(
+                "paimon.tools.grep.asyncio.create_subprocess_exec", side_effect=track,
             ):
                 task = asyncio.create_task(_grep_async({"pattern": "(a+)+$"}, cwd))
                 await asyncio.sleep(0.1)
@@ -189,7 +205,7 @@ class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
                 started.set()
                 return proc
 
-            with patch("paimon.tools.asyncio.create_subprocess_exec", side_effect=track):
+            with patch("paimon.tools.grep.asyncio.create_subprocess_exec", side_effect=track):
                 task = asyncio.create_task(_grep_async({"pattern": "(a+)+$"}, cwd))
                 await asyncio.wait_for(started.wait(), 5)
                 task.cancel()

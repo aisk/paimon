@@ -47,7 +47,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from . import logtext, tools
+from . import logtext
 from .agent import (
     Agent,
     JobNotice,
@@ -65,6 +65,7 @@ from .config import Config
 from .mentions import expand_mentions
 from .skills import Skill, expand_skill_command
 from .session import Session, SessionError, resume_hint
+from .tools.registry import BACKGROUND_TOOLS, INTERACTIVE_TOOLS, REGISTRY, render_todos, without
 
 # Piped stdin beyond this is truncated rather than pushed into the context
 # window (a stray `cat huge.log |` should not blow up the request).
@@ -202,7 +203,7 @@ class TextRenderer:
             self._denied += denied
 
         elif isinstance(ev, TodosUpdate):
-            self._note(tools.render_todos(ev.todos))
+            self._note(render_todos(ev.todos))
 
         elif isinstance(ev, JobNotice):
             # What follows answers the notice, so whatever was being said
@@ -510,8 +511,7 @@ def run(*, prompt: str, piped: str, cwd: Path, mode: str, session: Session | Non
         # fine: the run waits for them.
         agent = Agent.open(cwd=cwd, session=session, confirm=None, mode=mode, config=config,
                            append_system_prompt=append_system_prompt,
-                           toolset=tools.without(tools.REGISTRY, (*tools.BACKGROUND_TOOLS,
-                                                                  *tools.INTERACTIVE_TOOLS)))
+                           toolset=without(REGISTRY, (*BACKGROUND_TOOLS, *INTERACTIVE_TOOLS)))
         text = build_prompt(prompt, piped, cwd, agent.skills)
     except SessionError as exc:  # busy in another process, or no persisted system prompt
         renderer.begin(session.id if session else None)

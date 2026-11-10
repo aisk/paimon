@@ -19,7 +19,7 @@ from typing import Annotated, Awaitable, Callable, Literal, Union, get_args, get
 
 from typing_extensions import NotRequired, Required, is_typeddict
 
-from . import tools
+from .tools.base import MAX_OUTPUT, Tool
 
 NAME = "run_code"
 
@@ -59,7 +59,7 @@ class ToolCallError(Exception):
     """A nested tool call that was not run: denied, invalid, or over budget."""
 
 
-def callable_tools(toolset: dict[str, tools.Tool]) -> dict[str, tools.Tool]:
+def callable_tools(toolset: dict[str, Tool]) -> dict[str, Tool]:
     """What a script may call: every tool with an executor of its own.
 
     The ones the agent loop runs itself (the todo list, the question, the job
@@ -84,7 +84,7 @@ def _annotation(tp: object) -> str:
     return f"{name}[{', '.join(_annotation(arg) for arg in get_args(tp))}]" if name else "Any"
 
 
-def _signature(name: str, tool: tools.Tool) -> str:
+def _signature(name: str, tool: Tool) -> str:
     """One stub line for a tool, generated from the TypedDict of its arguments."""
     optional = tool.params.__optional_keys__
     params = [f"{key}: {_annotation(tp)}{' = ...' if key in optional else ''}"
@@ -92,13 +92,13 @@ def _signature(name: str, tool: tools.Tool) -> str:
     return f"async def {name}({'*, ' + ', '.join(params) if params else ''}) -> str: ..."
 
 
-def stubs(toolset: dict[str, tools.Tool]) -> str:
+def stubs(toolset: dict[str, Tool]) -> str:
     """The signatures a script is type-checked against."""
     lines = [_signature(name, tool) for name, tool in callable_tools(toolset).items()]
     return "\n".join(["from typing import Any, Literal", *lines]) + "\n"
 
 
-def tool(toolset: dict[str, tools.Tool]) -> tools.Tool:
+def tool(toolset: dict[str, Tool]) -> Tool:
     """run_code as an agent holding ``toolset`` is shown it.
 
     Built per agent, like the schemas: the description names exactly the
@@ -113,7 +113,7 @@ class _Full(Exception):
     """The rendering has all the characters it may have."""
 
 
-def _render(value: object, limit: int = tools.MAX_OUTPUT) -> tuple[str, bool]:
+def _render(value: object, limit: int = MAX_OUTPUT) -> tuple[str, bool]:
     """A script's last value as text, and whether it was cut short.
 
     A str is returned as it is, anything else as JSON.
@@ -176,7 +176,7 @@ def _describe(exc: Exception) -> str:
     return text if len(text) <= _MAX_ERROR else text[:_MAX_ERROR] + "\n... (error truncated)"
 
 
-async def run(code: str, toolset: dict[str, tools.Tool], call: CallFn) -> tuple[str, bool]:
+async def run(code: str, toolset: dict[str, Tool], call: CallFn) -> tuple[str, bool]:
     """Run one script. Returns ``(result for the model, completed)``.
 
     Nested calls run as tasks of their own, concurrently when the script
@@ -235,7 +235,7 @@ async def run(code: str, toolset: dict[str, tools.Tool], call: CallFn) -> tuple[
     header = f"Script failed after {elapsed:.2f}s" if error else f"Script completed in {elapsed:.2f}s"
     # The output gives way to the error, never the other way round: the
     # traceback is what the model needs to fix the script.
-    room = max(0, tools.MAX_OUTPUT - len(header) - len(error or "") - 2)
+    room = max(0, MAX_OUTPUT - len(header) - len(error or "") - 2)
     if len(output) > room:
         # How much more there was is unknown for a value abandoned midway.
         more = "" if clipped else f", {len(output) - room} more chars"

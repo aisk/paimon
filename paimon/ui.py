@@ -19,7 +19,8 @@ from textual.widgets import Input, Markdown, Static, TextArea
 from . import progstatus
 from .diff import locate_line, render_diff
 from .logtext import summarize_call
-from .tools import failure, resolve_path
+from .tools.files import resolve_path
+from .tools.registry import failure
 
 
 def abbreviate(text: str, limit: int) -> str:
