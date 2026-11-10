@@ -548,9 +548,29 @@ def gate(name: str, args: dict, mode: str, cwd: Path,
         # output — a different project's, or last week's — unchecked.
         own_output = ctx is not None and _real(resolved) in ctx.shell_outputs
         return "allow" if inside or own_output else held
-    if tool.access == "write" and mode == "auto" and inside:
+    if tool.access == "write" and mode == "auto" and inside and not _in_git_dir(resolved, cwd):
         return "allow"
     return held
+
+
+def _in_git_dir(path: Path, cwd: Path) -> bool:
+    """Whether ``path`` (inside cwd) lies in a .git directory, or is one.
+
+    Writing there is running code: a hook, or a config key such as
+    core.fsmonitor, executes on the next git command — and git status and
+    git log are let through as read-only. So these writes go to review like
+    any other way of running something unreviewed.
+    """
+    real, base = _real(path), _real(cwd)
+    if real is None or base is None:
+        return True
+    try:
+        parts = real.relative_to(base).parts
+    except ValueError:
+        return False
+    # Case-insensitive, and with the trailing dots and spaces Windows strips
+    # from a name: ".GIT" and ".git." are the same directory there.
+    return any(part.rstrip(". ").lower() == ".git" for part in parts)
 
 
 async def authorize(name: str, args: dict, mode: str, cwd: Path,

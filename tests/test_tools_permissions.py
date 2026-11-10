@@ -80,6 +80,22 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate("edit_file", {"path": "../a.py"}, "auto", self.cwd), "review")
         self.assertEqual(gate("shell", {"command": "rm -rf x"}, "auto", self.cwd), "review")
 
+    def test_auto_mode_holds_writes_into_a_git_directory(self) -> None:
+        """A hook or core.fsmonitor written there runs on the next git status,
+        which is let through on its own."""
+        (self.cwd / ".git" / "hooks").mkdir(parents=True)
+        for path in (".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".GIT/config",
+                     ".git", str(self.cwd / ".git" / "config")):
+            self.assertEqual(gate("write_file", {"path": path, "content": "x"}, "auto", self.cwd),
+                             "review", path)
+            self.assertEqual(gate("edit_file", {"path": path}, "auto", self.cwd), "review", path)
+        self.assertEqual(gate("write_file", {"path": ".github/x.yml", "content": "x"}, "auto",
+                              self.cwd), "allow")
+        self.assertEqual(gate("write_file", {"path": ".gitignore", "content": "x"}, "auto",
+                              self.cwd), "allow")
+        self.assertEqual(gate("read_file", {"path": ".git/config"}, "auto", self.cwd), "allow")
+        self.assertEqual(gate("read_file", {"path": ".git/config"}, "read", self.cwd), "allow")
+
     def test_write_todos_and_missing_path_are_allowed(self) -> None:
         for mode in MODES:
             self.assertEqual(gate("write_todos", {"todos": []}, mode, self.cwd), "allow")
