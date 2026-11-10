@@ -457,6 +457,30 @@ class HeadlessToolsetTest(unittest.TestCase):
             self.assertIn("shell", names, "the ordinary tools are all still there")
 
 
+class SecondInterruptTest(unittest.TestCase):
+    def test_a_second_ctrl_c_after_the_result_adds_no_other_result_line(self) -> None:
+        """The first Ctrl-C ends the turn and its result line is written; the
+        second lands while asyncio.run is still tearing down."""
+        async def drive(agent, renderer, text, **kwargs) -> int:
+            renderer.finish(subtype="interrupted")
+            raise KeyboardInterrupt
+
+        for output_format in ("json", "result"):
+            with tempfile.TemporaryDirectory() as directory:
+                out = io.StringIO()
+                renderer = headless._make_renderer(output_format, _config())
+                renderer._out = out
+                with patch.object(headless, "_drive", drive), \
+                        patch.object(headless, "_make_renderer", return_value=renderer):
+                    code = headless.run(prompt="hi", piped="", cwd=Path(directory), mode="read",
+                                        session=None, config=_config())
+            results = [line for line in out.getvalue().splitlines()
+                       if json.loads(line)["type"] == "result"]
+            self.assertEqual(code, 130)
+            self.assertEqual(len(results), 1, output_format)
+            self.assertEqual(json.loads(results[0])["subtype"], "interrupted")
+
+
 class SkillPromptTest(unittest.TestCase):
     def test_skill_command_expands_before_mentions_and_piped_input_stays(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

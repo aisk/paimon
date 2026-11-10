@@ -154,6 +154,7 @@ class TextRenderer:
         self._denied = 0
         self._session_id: str | None = None
         self._mode: str | None = None
+        self._finished = False
 
     def _note(self, text: str) -> None:
         self._end_call()
@@ -236,6 +237,9 @@ class TextRenderer:
             self._out_open = False
 
     def finish(self, subtype: str = "success", error: str | None = None) -> None:
+        if self._finished:  # see JsonRenderer.finish
+            return
+        self._finished = True
         if error:
             self._note(f"paimon: {error}")
         if subtype == "interrupted":
@@ -266,6 +270,7 @@ class JsonRenderer:
         self._denied = 0
         self._session_id: str | None = None
         self._log_path: Path | None = None
+        self._finished = False
 
     def _emit(self, payload: dict) -> None:
         # default=str keeps malformed tool arguments from aborting the run.
@@ -333,6 +338,14 @@ class JsonRenderer:
             return None
 
     def finish(self, subtype: str = "success", error: str | None = None) -> None:
+        """Emit the result line, once: a second Ctrl-C can land after it was
+        written, while asyncio.run is still tearing down, and must not add
+        another to a stream that promises exactly one. Marked before the
+        write, so an interrupt in the middle of it does not start a second.
+        """
+        if self._finished:
+            return
+        self._finished = True
         self._flush_block()
         self._emit({"type": "result", "subtype": subtype, "is_error": subtype != "success",
                     "session_id": self._session_id, "text": "\n\n".join(self._blocks),
