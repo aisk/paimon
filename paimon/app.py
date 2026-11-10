@@ -8,6 +8,7 @@ command in ``CommandPane``.
 """
 
 from functools import partial
+from pathlib import Path
 
 from textual import events, work
 from textual.app import App, ComposeResult, SystemCommand
@@ -23,7 +24,7 @@ from .agentpane import AgentPane
 from .errors import PaimonError
 from .login import LoginScreen, PickerScreen
 from .pane import Pane, SessionPane
-from .session import SessionError
+from .session import Session, SessionError
 from .tabs import PaneTabs
 from .commandpane import CommandPane
 from .jobs import Job, PaneLimitError
@@ -42,14 +43,20 @@ class PaneScreen(Screen):
 
     _blocked_before_suspend = False
     _had_focus_before_suspend = True
+    _pane_before_suspend = None
 
     def on_screen_suspend(self) -> None:
         self._blocked_before_suspend = self.app.pane.needs_confirm
         self._had_focus_before_suspend = self.focused is not None
+        self._pane_before_suspend = self.app.pane
 
     def on_screen_resume(self) -> None:
+        # A pane that came on screen under the modal (the one before it went)
+        # never had the keyboard handed to it; whatever Textual focused on the
+        # way back is not a choice of the user's to keep.
+        moved = self.app.pane is not self._pane_before_suspend
         self.call_later(self.app.resume_pane_focus, not self._blocked_before_suspend,
-                        not self._had_focus_before_suspend)
+                        not self._had_focus_before_suspend or moved)
 
 
 class PaimonApp(App):
@@ -141,9 +148,11 @@ class PaimonApp(App):
         super().__init__()
         self.config = agent.config
         # What a conversation opened here starts with besides the config: the
-        # run options, and the model the run was launched on (--model) until
-        # one is picked in the app.
+        # run options, the toolset (--textual-debug adds to it), and the model
+        # the run was launched on (--model) until one is picked in the app.
+        # All taken from the first agent; see open_agent.
         self._run_options = agent.run_options
+        self._toolset = agent.toolset
         self._model_override = agent.model_override
         # Set only when running in a Herdr pane. ``resume_flags`` are the
         # launch options a resumed session needs to behave like this one.
@@ -162,6 +171,8 @@ class PaimonApp(App):
         self._panes = [pane]
         self._current = pane
         self._next_pane = 2
+        # Panes on their way out, which a second call to drop must leave be.
+        self._dropping: set[Pane] = set()
         self._switcher = ContentSwitcher(pane, initial=pane.id, id="panes")
         self._tabs = PaneTabs()
         self._pick_session = pick_session
@@ -188,36 +199,51 @@ class PaimonApp(App):
     def _session(self) -> SessionPane | None:
         """The conversation a global action applies to.
 
-        The current pane when it is one, and otherwise the first conversation
-        there is: the palette and the key bindings stay usable while a command's
-        output is on screen, rather than silently doing nothing. None only in
-        the moment between the last conversation closing and its replacement
-        being mounted.
+        The pane on screen when it is one, and otherwise the conversation that
+        started the agent or command on screen: that is whose work the user is
+        looking at, so the palette and the key bindings act on it rather than
+        on some other conversation out of sight. None only in the moment
+        between a conversation closing and the tabs it opened going with it.
         """
-        if isinstance(self._current, SessionPane):
-            return self._current
-        sessions = self.sessions
-        return sessions[0] if sessions else None
+        owner = self._current.owner
+        return owner if owner in self._panes else None
+
+    def _on_owner(self) -> SessionPane | None:
+        """The conversation to act on, brought on screen first if it is not.
+
+        For the actions that change a conversation for good (a new, forked or
+        resumed session, a compaction): with a tab of one of its jobs on
+        screen, doing it out of sight would leave the user to find out later
+        what happened to a conversation they were not looking at. None when
+        it cannot be shown, and then nothing is done.
+        """
+        pane = self._session()
+        if pane is not None:
+            self._switch_to(pane)
+        return pane if pane is self.pane else None
 
     def _sync_panes(self) -> None:
         """Redraw everything that shows more than one pane at a time."""
         self._tabs.sync(self._panes, self._current)
         # A visible strip opens with a rule, which is all the separation the
         # status bar needs; the bar drops its own bottom margin so the tabs
-        # cost two rows rather than three.
+        # cost two rows rather than three. On the panes' own screen, which is
+        # not the active one while a modal is up.
         if self.is_mounted:
-            self.screen.set_class(self._tabs.display, "-tabs-bottom")
+            self._switcher.screen.set_class(self._tabs.display, "-tabs-bottom")
         self.refresh_statusbar()
         self._report_herdr()
         self._report_program_status()
 
     def _is_working(self) -> bool:
-        """Whether any conversation has work under way.
+        """Whether any agent has a turn under way, seen or unseen.
 
-        An agent still running in the background counts: its caller is woken
-        when it ends, so "idle" now would announce the work done twice. A
-        background command does not, or a dev server left running would never
-        let the pane go idle.
+        A conversation's own turn or compaction, and an agent one of them
+        started, whether or not it has a tab: its caller is woken when it
+        ends, so "idle" now would announce the work done twice, and it reads
+        the config at every step just as its caller does. A background command
+        does not count, or a dev server left running would never let the pane
+        go idle, nor let the user log in or change models.
         """
         return any(pane.is_busy or any(job.agent is not None and job.running
                                        for job in pane.agent.jobs.values()) for pane in self.sessions)
@@ -309,18 +335,36 @@ class PaimonApp(App):
         self.screen.set_focus(widget, scroll_visible=False)
 
     def _switch_to(self, pane: Pane) -> None:
+        """Show ``pane`` and hand it the keyboard, as the user asked to.
+
+        Not while a modal is up: the user is answering it, and a pane moving
+        underneath would be a switch nobody asked for.
+        """
         if self.screen is not self._switcher.screen:
             return
         if pane is self.pane:
             return
-        focused = self.focused
-        if focused is not None and self.pane in focused.ancestors:
-            self.pane._last_focus = focused
+        self._show(pane)
+        self._focus_shown(pane)
+
+    def _show(self, pane: Pane) -> None:
+        """Put ``pane`` on screen. Everything but the keyboard, which is the caller's.
+
+        Works with a modal up too, for a pane that has to leave from under it:
+        the switcher must never be left on a pane that is gone, and the focus
+        follows when the modal is dismissed (see resume_pane_focus).
+        """
+        screen = self._switcher.screen
+        focused = screen.focused
+        if focused is not None and self._current in focused.ancestors:
+            self._current._last_focus = focused
         # Never leave keyboard ownership in a pane we are about to hide.
-        self.screen.set_focus(None)
+        screen.set_focus(None)
         self._current = pane
         self._switcher.current = pane.id
         self._sync_panes()
+
+    def _focus_shown(self, pane: Pane) -> None:
         # Preserve deliberate reading focus; a pending panel takes precedence.
         previous = pane._last_focus
         if pane.needs_confirm or previous is None or not previous.is_mounted:
@@ -391,7 +435,7 @@ class PaimonApp(App):
                 "[$text-warning]Already at $max panes[/]", max=str(MAX_PANES)))
             return
         try:
-            agent = self._open_agent(source)
+            agent = self.open_agent(source.cwd, source.mode)
         except SessionError as exc:
             self.pane.notice(Content.from_markup(
                 "[$text-error b]Cannot open a pane:[/] $body", body=str(exc)))
@@ -419,43 +463,65 @@ class PaimonApp(App):
         await self._drop_pane(self._current)
 
     async def _drop_pane(self, pane: Pane) -> None:
-        """Close a pane and take it off the screen. The one path out."""
-        if pane not in self._panes:
+        """Close a pane and take it off the screen. The one path out.
+
+        Also the one place a pane leaves the list, which is what keeps the
+        pane on screen always one of them: the screen moves off the pane in
+        the same step that takes it off the list, with nothing awaited in
+        between, modal or not.
+        """
+        if pane not in self._panes or pane in self._dropping:
             return
-        index = self._panes.index(pane)
-        pane.close()
-        self._panes.remove(pane)
-        if not self._panes:
-            # The app always has one conversation in it.
-            await self._replace_last_pane(pane)
-            if not self._panes:
-                return  # no replacement could be opened: the app is exiting
-        current = self._panes[min(index, len(self._panes) - 1)]
-        # Switched away from before the removal is awaited: the pane is off
-        # the list already, and nothing that runs meanwhile should find the
-        # screen still on a pane that is no longer one.
-        if self._current is pane:
-            self._switch_to(current)
-        await pane.remove()
+        self._dropping.add(pane)
+        try:
+            pane.close()
+            if len(self._panes) == 1:
+                # The app always has one conversation in it. Mounted before
+                # the last one leaves, so there is one to show in its place.
+                if not await self._replace_last_pane(pane):
+                    return  # no replacement could be opened: the app is exiting
+            index = self._panes.index(pane)
+            self._panes.remove(pane)
+            if self._current is pane:
+                current = self._panes[min(index, len(self._panes) - 1)]
+                on_screen = self.screen is self._switcher.screen
+                self._show(current)
+                # Under a modal the keyboard is the modal's; the pane gets it
+                # when that is dismissed (PaneScreen.on_screen_resume).
+                if on_screen:
+                    self._focus_shown(current)
+            await pane.remove()
+        finally:
+            self._dropping.discard(pane)
         self._sync_panes()
 
-    def _open_agent(self, beside: Pane) -> Agent:
-        """A new conversation for a pane of its own, where ``beside`` works."""
-        return Agent.open(cwd=beside.cwd, mode=beside.mode, config=self.config,
-                          run_options=self._run_options, model_override=self._model_override)
+    def open_agent(self, cwd: Path, mode: str, session: Session | None = None) -> Agent:
+        """A conversation as this app opens one, on ``session`` or a new one.
+
+        The one place that decides what a conversation starts with, for a new
+        pane, the replacement of the last one and a session swapped into a
+        pane alike: the config, the run options and the toolset of the first
+        one, and the model the run was launched on until one is picked in the
+        app. Only where it works and its mode are the caller's.
+        """
+        return Agent.open(cwd=cwd, session=session, mode=mode, config=self.config,
+                          run_options=self._run_options, toolset=self._toolset,
+                          model_override=self._model_override)
 
     @property
     def _model(self) -> str | None:
         """The model a conversation opened now starts on."""
         return self._model_override or self.config.model
 
-    async def _replace_last_pane(self, closed: Pane) -> None:
+    async def _replace_last_pane(self, closed: Pane) -> bool:
+        """Open a conversation to take the place of the last pane. Whether one could be."""
         try:
-            agent = self._open_agent(closed)
+            agent = self.open_agent(closed.cwd, closed.mode)
         except SessionError:
             self.exit()  # nothing left to show, and no session to show it in
-            return
+            return False
         await self._switcher.add_content(self._make_pane(agent))
+        return True
 
     # ---- background jobs ----------------------------------------------------
 
@@ -469,9 +535,9 @@ class PaimonApp(App):
             raise PaneLimitError(f"all {MAX_PANES} panes are in use; close one first")
         pane_id = f"pane-{self._next_pane}"
         if job.kind == "agent":
-            pane = AgentPane(owner.agent, job_id, job, id=pane_id)
+            pane = AgentPane(owner, job_id, job, id=pane_id)
         else:
-            pane = CommandPane(job_id, job, cwd=owner.cwd, mode=owner.mode, id=pane_id)
+            pane = CommandPane(owner, job_id, job, id=pane_id)
         self._next_pane += 1
         self._panes.append(pane)
         try:
@@ -576,30 +642,39 @@ class PaimonApp(App):
     # ---- pane actions -------------------------------------------------------
 
     # The palette and the key bindings live on the app, but every one of these
-    # acts on a single conversation, so they only route to the current pane.
-
-    # A pane showing an agent or a command is nobody's to steer, so each of
-    # these is routed to a conversation rather than to whatever is on screen.
+    # acts on a single conversation: the one on screen, or the one that
+    # started the agent or command on screen (see _session). A tab like that
+    # has no conversation of its own to steer.
 
     def action_new_session(self) -> None:
-        if (pane := self._session()) is not None:
+        if (pane := self._on_owner()) is not None:
             pane.new_session()
 
     def action_fork_session(self) -> None:
-        if (pane := self._session()) is not None:
+        if (pane := self._on_owner()) is not None:
             pane.fork_session()
 
     def action_resume_session(self) -> None:
-        if (pane := self._session()) is not None:
+        if (pane := self._on_owner()) is not None:
             pane.resume_session()
 
     def action_compact(self) -> None:
-        if (pane := self._session()) is not None:
+        if (pane := self._on_owner()) is not None:
             pane.compact()
 
     def action_cycle_mode(self) -> None:
-        if (pane := self._session()) is not None:
-            pane.cycle_mode()
+        """Change the permission mode where the user is looking.
+
+        In place, even from a tab of an agent or a command: the mode is the
+        conversation's, and the agents it started follow it, so on an agent's
+        tab this is that agent's mode changing as well, which its status bar
+        shows. A command's tab shows no mode, so it is said in a toast.
+        """
+        if (pane := self._session()) is None:
+            return
+        pane.cycle_mode()
+        if isinstance(self.pane, CommandPane):
+            self.notify(f"{pane.mode} mode", title=pane.tab_title)
 
     def action_interrupt(self) -> None:
         if isinstance(self.pane, SessionPane):
@@ -630,10 +705,11 @@ class PaimonApp(App):
 
         Config is process-wide, and a turn re-reads the model at the top of
         every step (Agent._model), so a login landing mid-turn silently
-        swaps providers between two tool calls. It is refused while any pane
-        is running a turn.
+        swaps providers between two tool calls. It is refused while any agent
+        is in a turn, which is what _is_working asks; a background command
+        reads no config, so one left running does not hold the user up.
         """
-        return any(pane.is_busy for pane in self.panes)
+        return self._is_working()
 
     def action_login(self) -> None:
         if self._config_is_busy():
@@ -790,7 +866,10 @@ class PaimonApp(App):
         pane = self.pane
         if not isinstance(pane, SessionPane):
             return
-        tokens = await pane.agent.count_context_tokens()
-        # The pane may have been swapped out while the count ran on a thread.
-        if pane is self.pane:
+        agent = pane.agent
+        tokens = await agent.count_context_tokens()
+        # While the count ran on a thread, another pane may have come on
+        # screen, or another session into this one: it is a measurement of
+        # this agent's context and of nobody else's.
+        if pane is self.pane and pane.agent is agent:
             self.refresh_statusbar(tokens)

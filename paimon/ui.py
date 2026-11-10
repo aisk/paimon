@@ -3,6 +3,7 @@
 import asyncio
 import difflib
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -36,6 +37,30 @@ def abbreviate(text: str, limit: int) -> str:
     tail = text[-(limit - len(head)):]
     omitted = len(text) - len(head) - len(tail)
     return f"{head}\n[… {omitted:,} of {len(text):,} characters not shown …]\n{tail}"
+
+
+def read_abbreviated(path: Path, limit: int) -> str:
+    """A file as abbreviate(text, limit) would show it, read only as far as that needs.
+
+    For a preview drawn on the UI thread: reading a huge file whole, only to
+    keep its two ends, would freeze the screen for as long as that takes. A
+    character is at most four bytes of UTF-8, so the ends read are always
+    enough to fill their halves; past that the elision counts bytes, as the
+    characters in between were never decoded.
+    """
+    budget = limit * 4
+    with path.open("rb") as file:
+        size = os.fstat(file.fileno()).st_size
+        if size <= budget:
+            return abbreviate(file.read(budget).decode("utf-8", errors="replace"), limit)
+        head = file.read(budget // 2)
+        file.seek(-(budget // 2), os.SEEK_END)
+        tail = file.read()
+    head_text = head.decode("utf-8", errors="replace")[: limit // 2]
+    tail_text = tail.decode("utf-8", errors="replace")[-(limit - len(head_text)):]
+    shown = len(head_text.encode("utf-8")) + len(tail_text.encode("utf-8"))
+    return (f"{head_text}\n[… {max(size - shown, 0):,} of {size:,} bytes not shown …]\n"
+            f"{tail_text}")
 
 
 class UserMessage(Static):
@@ -721,12 +746,12 @@ class ConfirmPanel(BlockingPanel):
             path = str(args.get("path") or "")
             content = self._clip(str(args.get("content") or ""))
             try:
-                existing = self._preview_path(path).read_text(encoding="utf-8", errors="replace") if path else ""
+                existing = read_abbreviated(self._preview_path(path), self._CLIP) if path else ""
             except OSError:
                 existing = ""
             if existing:
                 diff = render_diff(
-                    self._clip(existing), content, path=path, start_line=1,
+                    existing, content, path=path, start_line=1,
                     theme=self.app.theme or "",
                     dark=self.app.current_theme.dark,
                 )

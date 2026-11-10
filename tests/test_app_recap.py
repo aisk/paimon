@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -174,6 +174,23 @@ class RecapTest(AppTestCase):
                 self.assertIsNot(app.pane, first)
                 self.assertIsNone(first._recap_timer)
                 await self._stays_away(pilot, lambda: bool(app.query(RecapMessage)))
+
+    async def test_a_pane_left_before_the_wait_runs_out_asks_for_nothing(self) -> None:
+        # Not just shown nowhere: a recap nobody will see is not paid for.
+        app = self.make_app(config=self._config(idle=0.5))
+        with patch("paimon.agent.build_model", return_value=self._model()):
+            async with app.run_test() as pilot:
+                first = app.pane
+                await self._finish_a_turn(app, pilot)
+                await self._armed(app, pilot)
+                recap = AsyncMock(return_value=self.RECAP)
+                first.agent.recap = recap
+
+                await app.action_new_pane()
+                self.assertIsNot(app.pane, first)
+                await self._wait_for(pilot, lambda: first._recap_timer is None)
+                await self._stays_away(pilot, lambda: recap.await_count > 0)
+                self.assertFalse(app.query(RecapMessage))
 
     async def test_it_can_be_turned_off(self) -> None:
         app = self.make_app(config=self._config(enabled=False))

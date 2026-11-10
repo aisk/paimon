@@ -10,6 +10,8 @@ from paimon import lockfile
 from paimon.agentpane import AgentPane
 from paimon.app import MAX_PANES, PaimonApp
 from paimon.commandpane import CommandPane
+from paimon.login import PickerScreen
+from paimon.pane import SessionPane
 from paimon.session import Session, synthetic_kind
 from paimon.tools.result import ToolError
 from paimon.ui import (
@@ -660,3 +662,168 @@ class BackgroundTaskTest(AppTestCase):
                     in self._log_text(parent))
                 await self._wait_for(pilot, lambda: not parent.is_busy)
                 self.assertTrue(any(synthetic_kind(m) == "job" for m in parent.agent.history))
+
+
+class JobTabTest(AppTestCase):
+    """A tab of an agent's or a command's, against the rest of the app."""
+
+    @staticmethod
+    def _bar(app: PaimonApp) -> str:
+        return str(app.query_one("#statusbar", Static).render())
+
+    async def _modal(self, app: PaimonApp, pilot) -> None:
+        # Any modal will do: the command palette and every picker are one.
+        app.push_screen(PickerScreen("Pick one", ["a"]))
+        await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+
+    async def test_an_agent_ending_under_a_modal_takes_its_tab_off_the_screen(self) -> None:
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                parent.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+                await self._wait_for(pilot, lambda: not parent.is_busy)
+                child = app.panes[1]
+                app._switch_to(child)
+                await self._wait_for(pilot, lambda: app.pane is child)
+                await self._modal(app, pilot)
+
+                gate.set()
+                await self._wait_for(pilot, lambda: child not in app.panes)
+                self.assertIs(app.pane, parent, "the screen left the tab with the list")
+                self.assertEqual(app._switcher.current, parent.id)
+                self.assertTrue(parent.display)
+                app.action_next_pane()  # raised ValueError: the pane was in no list
+                app.action_goto_attention()
+
+                app.pop_screen()
+                prompt = parent.query_one(PromptInput)
+                await self._wait_for(pilot, lambda: app.focused is prompt)
+                await pilot.press("h", "i")
+                await self._wait_for(pilot, lambda: prompt.text == "hi")
+
+    async def test_the_last_pane_going_under_a_modal_is_replaced_on_screen(self) -> None:
+        app = self.make_app(mode="yolo")
+        running = FakeCommand("npm run dev")
+        with patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.jobs.start_background", new=AsyncMock(return_value=running)):
+            async with app.run_test() as pilot:
+                parent = app.pane
+                await parent.agent.jobs.call(
+                    "run_background", {"command": "npm run dev", "description": "dev"})
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+                task = app.panes[1]
+                await self._modal(app, pilot)
+
+                # The conversation goes, its command with it, and with that
+                # the last pane there was.
+                await app._drop_pane(parent)
+                self.assertIn(app.pane, app.panes)
+                await self._wait_for(pilot, lambda: task not in app.panes)
+                (fresh,) = app.panes
+                self.assertIsInstance(fresh, SessionPane)
+                self.assertIs(app.pane, fresh)
+                self.assertEqual(app._switcher.current, fresh.id)
+
+                app.pop_screen()
+                await self._wait_for(pilot, lambda: app.focused is fresh.query_one(PromptInput))
+
+    async def test_a_background_command_does_not_hold_up_switching_models(self) -> None:
+        app = self.make_app(mode="yolo")
+        running = FakeCommand("npm run dev")
+        with patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.jobs.start_background", new=AsyncMock(return_value=running)):
+            async with app.run_test() as pilot:
+                await app.pane.agent.jobs.call(
+                    "run_background", {"command": "npm run dev", "description": "dev"})
+                await self._wait_for(pilot, lambda: len(app.panes) == 2)
+
+                app.action_switch_model()
+                await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+                self.assertNotIn("Busy", self._log_text(app.pane))
+
+    async def test_an_agent_running_unseen_holds_up_switching_models(self) -> None:
+        # It reads the config at every step just as one with a tab does.
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                for _ in range(MAX_PANES - 1):
+                    await app.action_new_pane()
+                parent = app.panes[0]
+                app._switch_to(parent)
+                parent.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: bool(parent.agent.jobs))
+                await self._wait_for(pilot, lambda: not parent.is_busy)
+                self.assertEqual(len(app.panes), MAX_PANES, "it has no tab")
+
+                app.action_switch_model()
+                await self._wait_for(
+                    pilot, lambda: "Busy — switch model" in self._log_text(parent))
+                self.assertNotIsInstance(app.screen, PickerScreen)
+                gate.set()
+                await self._wait_for(pilot, lambda: not parent.agent.jobs)
+
+    async def test_actions_on_an_agents_tab_act_on_the_conversation_that_started_it(self) -> None:
+        app = self.make_app(mode="yolo")
+        gate = asyncio.Event()
+        with patch("paimon.agent.build_model",
+                   return_value=spawning_model(["check the parser"], gate=gate)):
+            async with app.run_test() as pilot:
+                first = app.pane
+                await app.action_new_pane()
+                second = app.pane
+                second.handle_submit(PromptInput.Submitted("go"))
+                await self._wait_for(pilot, lambda: len(app.panes) == 3)
+                await self._wait_for(pilot, lambda: not second.is_busy)
+                child = app.panes[2]
+                self.assertIs(child.owner, second)
+                app._switch_to(child)
+                await self._wait_for(pilot, lambda: app.pane is child)
+
+                # The mode changes in place, for the conversation behind the
+                # tab and so for the agent in it, whose status bar says so.
+                await pilot.press("shift+tab")
+                await self._wait_for(pilot, lambda: second.mode != "yolo")
+                self.assertEqual(first.mode, "yolo", "the other conversation is left alone")
+                self.assertEqual(child.job.agent.mode, second.mode)
+                self.assertEqual(child.mode, second.mode)
+                self.assertIs(app.pane, child)
+                await self._wait_for(pilot, lambda: f"{second.mode} mode" in self._bar(app))
+
+                # A new session is brought on screen where it happens, and it
+                # happens to the conversation behind the tab.
+                before = first.agent.session.id, second.agent.session.id
+                app.action_new_session()
+                self.assertIs(app.pane, second)
+                self.assertEqual(first.agent.session.id, before[0])
+                self.assertNotEqual(second.agent.session.id, before[1])
+                await self._wait_for(pilot, lambda: child not in app.panes)
+                self.assertIn("Stopped 1 job", self._log_text(second))
+
+    async def test_compacting_from_a_commands_tab_shows_the_conversation_it_compacts(self) -> None:
+        app = self.make_app(mode="yolo")
+        running = FakeCommand("npm run dev")
+        with patch("paimon.agent.build_model", return_value=stub_model()), \
+                patch("paimon.jobs.start_background", new=AsyncMock(return_value=running)):
+            async with app.run_test() as pilot:
+                first = app.pane
+                await app.action_new_pane()
+                second = app.pane
+                await second.agent.jobs.call(
+                    "run_background", {"command": "npm run dev", "description": "dev"})
+                await self._wait_for(pilot, lambda: len(app.panes) == 3)
+                task = app.panes[2]
+                self.assertIs(task.owner, second)
+                app._switch_to(task)
+                await self._wait_for(pilot, lambda: app.pane is task)
+
+                app.action_compact()
+                self.assertIs(app.pane, second)
+                await self._wait_for(
+                    pilot, lambda: "Nothing to compact yet" in self._log_text(second))
+                self.assertNotIn("compact", self._log_text(first))

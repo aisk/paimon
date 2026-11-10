@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -19,6 +20,8 @@ from paimon.config import Config, RunOptions, config_path
 from paimon.login import BrowserLoginScreen, LoginScreen, PickerScreen, PromptScreen
 from paimon.pane import _session_label
 from paimon.session import SessionError
+from paimon.textual_debug import TextualDebugBridge
+from paimon.tools.registry import REGISTRY
 from paimon.ui import (
     AssistantMessage,
     ToolResult,
@@ -57,6 +60,19 @@ class ResumeSessionTest(AppTestCase):
             app.action_resume_session()
             await pilot.pause()
             self.assertNotIsInstance(app.screen, PickerScreen)
+            self.assertIs(app.pane.agent, before)
+
+    async def test_a_choice_made_while_a_turn_started_meanwhile_is_refused_out_loud(self) -> None:
+        old = self._old_session()
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            before = app.pane.agent
+            app.action_resume_session()
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            # A job reporting wakes the agent while the picker is up.
+            hold_turn(app.pane)
+            app.screen.dismiss(_session_label(old))
+            await self._wait_for(pilot, lambda: "Busy — resume" in self._log_text(app))
             self.assertIs(app.pane.agent, before)
 
     async def test_no_sessions_shows_notice(self) -> None:
@@ -388,6 +404,42 @@ class LaunchOptionsTest(AppTestCase):
             self._assert_launched(app.pane.agent, "test:picked")
             app.action_new_session()
             self._assert_launched(app.pane.agent, "test:picked")
+
+    async def test_the_toolset_it_was_launched_with_reaches_every_conversation(self) -> None:
+        # --textual-debug's tools are handed to the first agent alone.
+        toolset = {**REGISTRY, **TextualDebugBridge().toolset()}
+        agent = Agent.open(mode="read", config=Config(model="test-model"), toolset=toolset)
+        app = PaimonApp(agent)
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await self._wait_for(pilot, lambda: len(app.sessions) == 2)
+            self.assertIn("textual_eval", app.pane.agent.toolset, "a new pane")
+            app.action_new_session()
+            self.assertIn("textual_eval", app.pane.agent.toolset, "a new session")
+
+
+class ContextCountTest(AppTestCase):
+    async def test_a_count_for_a_session_swapped_out_meanwhile_is_dropped(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            pane = app.pane
+            counting, release = asyncio.Event(), asyncio.Event()
+
+            async def count() -> int:
+                counting.set()
+                await release.wait()
+                return 12_345
+
+            pane.agent.count_context_tokens = count
+            app.update_statusbar_tokens()
+            await self._wait_for(pilot, counting.is_set)
+            pane.new_session()
+            release.set()
+            await self._wait_for(pilot, lambda: not any(
+                worker.group == "statusbar" and not worker.is_finished for worker in app.workers))
+
+            self.assertIsNone(pane._tokens, "the old session's size is not the new one's")
+            self.assertNotIn("12.3k", str(app.query_one("#statusbar", Static).render()))
 
 
 class PaneSessionLockTest(AppTestCase):

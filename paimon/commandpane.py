@@ -18,7 +18,7 @@ from textual.content import Content
 from textual.widgets import RichLog, Static
 
 from .jobs import Job
-from .pane import Pane
+from .pane import Pane, SessionPane
 from .tools.shell import decode_output
 
 # How often the pane takes what has arrived. Polling rather than a callback
@@ -34,18 +34,20 @@ _MAX_LINES = 5_000
 class CommandPane(Pane):
     """A running command, streamed into a tab of its own."""
 
-    def __init__(self, job_id: str, job: Job, *, cwd, mode: str,
+    def __init__(self, owner: SessionPane, job_id: str, job: Job, *,
                  id: str | None = None) -> None:
         super().__init__(id=id)
         # The id the agent that started it calls it by.
         self.job_id = job_id
         self.job = job
         self.command = job.command
-        # Where the command runs and the mode it was started under. Neither
-        # means anything to the pane itself; they are what the app inherits
-        # from if this is the last pane left when it closes.
-        self.cwd = cwd
-        self.mode = mode
+        # The conversation that started it, which the app's global actions
+        # act on while this tab is on screen.
+        self.owner = owner
+        # Where the command runs. Like the mode, it means nothing to the pane
+        # itself; it is what the app inherits from if this is the last pane
+        # left when it closes.
+        self.cwd = owner.cwd
         self._cursor = 0
         # Bytes of a line the pipe has not finished handing over. Held back
         # rather than written: a chunk boundary lands wherever it lands, and
@@ -58,6 +60,11 @@ class CommandPane(Pane):
         # command is killed, and the second call would read a log that is no
         # longer mounted.
         self._pane_closing = False
+
+    @property
+    def mode(self) -> str:
+        """The mode of the conversation that started it, read live."""
+        return self.owner.mode
 
     @property
     def is_running(self) -> bool:

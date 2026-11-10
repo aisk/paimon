@@ -11,10 +11,9 @@ import asyncio
 
 from textual.app import ComposeResult
 
-from .agent import Agent
 from .events import TurnEnd
 from .jobs import Job
-from .pane import Pane
+from .pane import Pane, SessionPane
 from .tools.permissions import confirm_origin
 from .transcript import EventRenderer, Transcript
 from .ui import BlockingPanel, ConfirmPanel
@@ -23,16 +22,19 @@ from .ui import BlockingPanel, ConfirmPanel
 class AgentPane(Pane):
     """A running subagent, drawn into a tab of its own."""
 
-    def __init__(self, owner: Agent, job_id: str, job: Job, *, id: str | None = None) -> None:
+    def __init__(self, owner: SessionPane, job_id: str, job: Job, *, id: str | None = None) -> None:
         super().__init__(id=id)
         # The id the agent that started it calls it by.
         self.job_id = job_id
         self.job = job
-        # The agent that started it, and the one to tell when the user stops it.
-        self._owner = owner
+        # The conversation that started it, which the app's global actions
+        # act on while this tab is on screen, and its agent, the one to tell
+        # when the user stops this one. Taken now: by the time the tab closes
+        # the conversation may be on another agent, which never knew this job.
+        self.owner = owner
+        self._starter = owner.agent
         child = job.agent
         self.cwd = child.cwd
-        self.mode = child.mode
         self.transcript = Transcript(id="log")
         self._renderer = EventRenderer(self.transcript, child)
         # One confirmation on screen at a time: a second panel mounting over
@@ -47,6 +49,11 @@ class AgentPane(Pane):
         # Asked here rather than in the parent's pane: this is where what the
         # agent wants to do can be read in the context of what it has done.
         child.confirm = self._confirm
+
+    @property
+    def mode(self) -> str:
+        """The agent's mode, read live: it follows its parent's (see Jobs.set_mode)."""
+        return self.job.agent.mode
 
     @property
     def is_running(self) -> bool:
@@ -89,7 +96,7 @@ class AgentPane(Pane):
         self._pane_closing = True
         self.job.sink = None
         if self.job.running:
-            self._owner.jobs.stop(self.job_id, by_user=True)
+            self._starter.jobs.stop(self.job_id, by_user=True)
 
     def shutdown(self) -> None:
         # The parent's pane closes its agent, and the children go with it.

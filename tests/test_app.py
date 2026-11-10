@@ -138,7 +138,9 @@ class MultiPaneTest(AppTestCase):
                   patch.object(app, "exit") as exit_app):
                 await app._drop_pane(app.pane)  # raised IndexError before
             exit_app.assert_called_once()
-            self.assertEqual(app.panes, [])
+            # Left where it was for the moment the app has left: the pane on
+            # screen is one of the panes, always.
+            self.assertEqual(app.panes, [app.pane])
 
     async def test_pane_count_is_capped(self) -> None:
         app = self.make_app()

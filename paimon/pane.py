@@ -1,7 +1,7 @@
 """One conversation pane: an agent, its rendered log, and the prompt driving it.
 
-A pane owns everything that belongs to a single session — the agent, the turn
-worker, the queued prompts, the permission mode and the confirmation panel.
+A pane owns everything that belongs to a single session — the agent, the
+driver that runs its turns, the queued prompts and the confirmation panel.
 ``PaimonApp`` owns what is global: the config, the theme, the command palette
 and the status bar.
 """
@@ -18,6 +18,7 @@ from textual.content import Content
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import LoadingIndicator, Static, TextArea
+from textual.worker import get_current_worker
 
 from . import lockfile
 from .agent import Agent
@@ -105,8 +106,9 @@ class Pane(Vertical):
     class StateChanged(Message):
         """This pane started or finished something the strip or the bar shows.
 
-        Worker.StateChanged does not bubble and the turn worker lives on the
-        pane, so anything app-wide that tracks panes only hears about them
+        A conversation's turns run in its TurnDriver and a subagent's in its
+        job, neither of which is a widget or posts anything the app would
+        hear, so anything app-wide that tracks panes only hears about them
         through this.
         """
 
@@ -118,6 +120,10 @@ class Pane(Vertical):
     # what is true of it. Subclasses carry two attributes besides: ``cwd`` and
     # ``mode``, which is what a pane opened in place of this one inherits.
     needs_confirm = False
+    # The conversation whose work this pane shows: itself for a conversation,
+    # the one that started it for an agent or a command. What the app's
+    # global actions act on while this pane is on screen.
+    owner: "SessionPane | None" = None
     # The panel that is waiting, while ``needs_confirm`` is true.
     asking: BlockingPanel | None = None
     is_busy = False
@@ -179,7 +185,6 @@ class SessionPane(Pane):
         # answered needs no recap: the answer is right there on the screen.
         self._used_tools = False
         self._adopt(agent)
-        self.mode = agent.mode
         self._resumed = resumed
         # Tab label, kept here rather than read back from the session file on
         # every repaint of the strip.
@@ -192,7 +197,7 @@ class SessionPane(Pane):
         # MessagePump already owns that attribute, and setting it strands the
         # widget's message loop on teardown.
         self._pane_closing = False
-        # The spinner, which used to be closures inside the turn worker.
+        # The spinner: what the turn is doing, and since when.
         self._status_state: str | None = None
         self._phrase = ""
         self._turn_started = 0.0
@@ -208,6 +213,16 @@ class SessionPane(Pane):
         self._cache_reads = 0
         self._cache_inputs = 0
         self._cache_reported = False
+
+    @property
+    def owner(self) -> "SessionPane":
+        return self
+
+    @property
+    def mode(self) -> str:
+        """The permission mode. The agent's, which is what its tools are
+        checked against and what the agents it started follow."""
+        return self.agent.mode
 
     @property
     def config(self):
@@ -428,13 +443,11 @@ class SessionPane(Pane):
     def _open_agent(self, session: Session | None = None) -> Agent:
         """An agent to put in place of this pane's, on ``session`` or a new one.
 
-        Everything but the conversation travels with the pane: the run
-        options, the model it is on, the toolset.
+        Opened the way the app opens every conversation (see
+        PaimonApp.open_agent), where this one works and in its mode. The
+        hooks are _adopt's to set.
         """
-        agent = self.agent
-        return Agent.open(cwd=agent.cwd, session=session, confirm=self._confirm, mode=self.mode,
-                          config=agent.config, run_options=agent.run_options,
-                          toolset=agent.toolset, model_override=agent.model_override)
+        return self.app.open_agent(self.cwd, self.mode, session)
 
     def new_session(self) -> None:
         if self.is_busy:
@@ -497,6 +510,11 @@ class SessionPane(Pane):
             self.transcript.add(Content.from_markup("[$text-muted]No sessions to resume in this directory[/]"))
             return
         choice = await self.app.push_screen_wait(PickerScreen("Resume session", list(labels)))
+        if choice in labels and self.is_busy:
+            # A wake-up (a job reporting) or a compaction started while the
+            # picker was up; swapping the session now would cut it off.
+            self.transcript.add(Content.from_markup(
+                "[$text-muted]Busy — resume a session after this turn[/]"))
         if choice not in labels or self.is_busy:
             self._focus_input()
             return
@@ -531,8 +549,7 @@ class SessionPane(Pane):
     # ---- permission mode ----------------------------------------------------
 
     def cycle_mode(self) -> None:
-        self.mode = MODES[(MODES.index(self.mode) + 1) % len(MODES)]
-        self.agent.mode = self.mode
+        self.agent.mode = MODES[(MODES.index(self.mode) + 1) % len(MODES)]
         self._refresh_mode()
         self._sync_statusbar()
         self._notify_state()
@@ -650,7 +667,10 @@ class SessionPane(Pane):
         result lands is the driver's call (see TurnDriver.record_shell), since
         it owns everything that writes the history.
         """
-        step = await self.transcript.add_shell_call(command)
+        # Logged without a pause before the try: Esc can come at any await,
+        # the first one included, and has to be answered in the log.
+        step = self.transcript.add_shell_call(command)
+        worker = get_current_worker()
         try:
             output = await self.agent.run_shell(command)
         except asyncio.CancelledError:
@@ -661,7 +681,11 @@ class SessionPane(Pane):
                 self.transcript.add_tool_result("(interrupted)", label=command, container=step)
             raise
         finally:
-            self._shell_worker = None
+            # Only if it is still this run's: whoever cancelled it let go of
+            # it already, and a run started since, while this one's process
+            # tree was being killed, is the one the reference now belongs to.
+            if self._shell_worker is worker:
+                self._shell_worker = None
         if self._pane_closing:
             return
         self.transcript.add_tool_result(output, label=command, container=step)
@@ -736,7 +760,15 @@ class SessionPane(Pane):
         if not (self.config.recap_enabled and self._used_tools
                 and self.is_current and not self.is_busy):
             return
-        self._recap_timer = self.set_timer(self.config.recap_idle_seconds, self._recap)
+        self._recap_timer = self.set_timer(self.config.recap_idle_seconds, self._recap_due)
+
+    def _recap_due(self) -> None:
+        # The timer's own callback, so the reference it clears is the timer
+        # that fired: cleared from inside the worker it starts, it would be
+        # whichever timer had been armed by the time the worker ran, which
+        # nothing could then cancel.
+        self._recap_timer = None
+        self._recap()
 
     def _cancel_recap(self) -> None:
         """Drop a pending recap, and any request already out for one."""
@@ -755,9 +787,10 @@ class SessionPane(Pane):
         Read-only (see Agent.recap): the recap is never part of the
         conversation, so a resumed session does not replay it.
         """
-        self._recap_timer = None
-        # The history is only a complete request between turns.
-        if self.is_busy:
+        # The history is only a complete request between turns. And only for
+        # the pane on screen, asked before the request rather than after it:
+        # a recap nobody will see is a request nobody should pay for.
+        if self.is_busy or not self.is_current:
             return
         try:
             text = await self.agent.recap()
