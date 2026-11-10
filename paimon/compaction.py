@@ -215,13 +215,15 @@ async def compact(
 
     ``window`` bounds the summary request's own input (see ``_bounded``); when
     None a conservative default applies.
-    """
-    cut = find_cut_index(messages, keep_recent_tokens)
-    if cut <= 0:
-        return None
 
-    old_messages = messages[:cut]
-    kept_messages = messages[cut:]
+    Finding the cut and serializing the prefix walk the whole history, so they
+    run off the event loop, as Agent.count_context_tokens does, on a snapshot
+    the loop can keep appending to meanwhile.
+    """
+    prepared = await asyncio.to_thread(_prepare, list(messages), keep_recent_tokens, window)
+    if prepared is None:
+        return None
+    kept_messages, conversation = prepared
     prompt = f"""Summarize this coding-agent conversation as a checkpoint for another model.
 Do not continue the conversation or answer its questions. Be concise, but preserve exact
 file paths, commands, errors, user requirements, completed work, and the next steps.
@@ -235,7 +237,7 @@ Use these sections:
 ## Critical Context
 
 <conversation>
-{_bounded(_serialize_messages(old_messages), window)}
+{conversation}
 </conversation>"""
 
     async with _slot():
@@ -250,5 +252,16 @@ Use these sections:
     if not summary.strip():
         raise CompactionError("Context compaction returned an empty summary")
     result = CompactionResult(summary.strip(), kept_messages, tokens_before, tokens_after=0)
-    result.tokens_after = count_tokens(result.messages, tool_schemas, system_prompt)
+    result.tokens_after = await asyncio.to_thread(
+        count_tokens, result.messages, tool_schemas, system_prompt)
     return result
+
+
+def _prepare(messages: list[ModelMessage], keep_recent_tokens: int,
+             window: int | None) -> tuple[list[ModelMessage], str] | None:
+    """(the kept suffix, the bounded serialized prefix), or None when there
+    is nothing old enough to summarize."""
+    cut = find_cut_index(messages, keep_recent_tokens)
+    if cut <= 0:
+        return None
+    return messages[cut:], _bounded(_serialize_messages(messages[:cut]), window)

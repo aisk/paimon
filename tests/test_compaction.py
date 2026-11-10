@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -105,6 +106,34 @@ class CompactTest(unittest.IsolatedAsyncioTestCase):
         assert result is not None
         self.assertEqual(result.summary, "## Goal\nKeep going")
         self.assertEqual(result.kept_messages, messages[1:])
+
+    async def test_the_history_is_walked_in_a_worker_thread(self) -> None:
+        """It is the whole history every time, and every agent shares the loop."""
+        response = ModelResponse(parts=[TextPart(content="## Goal\nKeep going")])
+        messages = [_user("old request"), _assistant("old answer"), _user("recent request")]
+        threads: dict[str, threading.Thread] = {}
+
+        def recording(name, real):
+            def wrapper(*args, **kwargs):
+                threads[name] = threading.current_thread()
+                return real(*args, **kwargs)
+            return wrapper
+
+        with (
+            patch("paimon.compaction.count_tokens", return_value=10),
+            patch("paimon.compaction.find_cut_index",
+                  side_effect=recording("cut", compaction.find_cut_index)),
+            patch("paimon.compaction._serialize_messages",
+                  side_effect=recording("serialize", compaction._serialize_messages)),
+            patch("paimon.llm.model_request", new=AsyncMock(return_value=response)),
+        ):
+            result = await compaction.compact(messages, model=object(),
+                                              keep_recent_tokens=15, tokens_before=100)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(set(threads), {"cut", "serialize"})
+        for thread in threads.values():
+            self.assertIsNot(thread, threading.main_thread())
 
 
 class BoundedSummaryInputTest(unittest.TestCase):
