@@ -106,6 +106,13 @@ class GrepTest(unittest.TestCase):
         self.assertEqual(result, f"{path}:1:head\u2028needle\n{path}:2:next\vneedle\n{path}:3:last needle")
         self.assertEqual(_grep({"pattern": "^head"}, self.cwd), f"{path}:1:head\u2028needle")
 
+    def test_a_file_named_like_an_ignored_directory_is_searched(self) -> None:
+        build = self.write("build", "needle\n")
+        target = self.write("sub/target", "needle\n")
+        self.write("dist/a.txt", "needle\n")
+        result = _grep({"pattern": "needle"}, self.cwd)
+        self.assertEqual(result.splitlines(), [f"{build}:1:needle", f"{target}:1:needle"])
+
     def test_ignored_directories_are_not_entered(self) -> None:
         self.write("node_modules/nested/a.txt", "needle\n")
         self.write("sub/.git/a.txt", "needle\n")

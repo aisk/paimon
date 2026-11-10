@@ -87,9 +87,16 @@ def _read_file(args: dict, cwd: Path) -> str:
         raise ToolError(f"Error: file not found: {path}")
     text, _, _ =_decode_preserving(path.read_bytes(), errors="replace")
     lines = text.splitlines()
-    offset = max(1, int(args.get("offset", 1)))
+    # Refused rather than clamped or ignored: a limit of 0 read as "no limit"
+    # hands back the whole file, and an offset of 0 is a model counting from
+    # zero, which deserves to hear that lines count from 1.
+    offset = int(args.get("offset", 1))
+    if offset < 1:
+        raise ToolError("Error: offset is a 1-indexed line number; it must be at least 1.")
     limit = args.get("limit")
-    end = offset - 1 + int(limit) if limit else len(lines)
+    if limit is not None and int(limit) < 1:
+        raise ToolError("Error: limit must be at least 1; leave it out to read to the end.")
+    end = offset - 1 + int(limit) if limit is not None else len(lines)
     selected = lines[offset - 1 : end]
     if not selected:
         return "(file is empty or offset past end of file)"
@@ -158,11 +165,21 @@ def _glob(args: dict, cwd: Path, sandboxed: bool = False) -> str:
         p
         for p in base.glob(args["pattern"])
         if p.is_file()
-        and not skip.intersection(p.relative_to(base).parts)
+        # The ignore list names directories: a file called "build" is matched.
+        and not skip.intersection(p.relative_to(base).parts[:-1])
         # sandboxed keeps symlinks under base from listing files outside it
         and (not sandboxed or _inside(p, base))
     ]
-    if not matches:
+    # Timed in one pass, and a file gone since it was listed is left out:
+    # it is no longer there to match, and one stat failing must not fail
+    # the whole call.
+    dated = []
+    for p in matches:
+        try:
+            dated.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    if not dated:
         return "(no files matched)"
-    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return "\n".join(str(p) for p in matches)
+    dated.sort(key=lambda item: item[0], reverse=True)
+    return "\n".join(str(p) for _, p in dated)

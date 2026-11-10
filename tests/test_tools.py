@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -190,6 +191,74 @@ class LineEndingPreservationTest(unittest.TestCase):
         result = _read_file({"path": "f.txt"}, self.cwd)
         self.assertNotIn("\r", result)
         self.assertIn("a", result)
+
+
+class ReadFileTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        (self.cwd / "f.txt").write_text("a\nb\nc\n")
+
+    def _read(self, **args) -> str:
+        from paimon.tools.files import _read_file
+        return _read_file({"path": "f.txt", **args}, self.cwd)
+
+    def test_offset_and_limit_select_a_window(self) -> None:
+        self.assertEqual(self._read(offset=2, limit=1), "2  b")
+
+    def test_a_limit_of_zero_is_an_error_not_the_whole_file(self) -> None:
+        for limit in (0, -1):
+            with self.assertRaisesRegex(ToolError, "limit must be at least 1"):
+                self._read(limit=limit)
+
+    def test_an_offset_below_one_is_an_error_not_clamped(self) -> None:
+        for offset in (0, -3):
+            with self.assertRaisesRegex(ToolError, "1-indexed"):
+                self._read(offset=offset)
+
+
+class GlobTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    def write(self, relative: str) -> Path:
+        path = self.cwd / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n")
+        return path
+
+    def _glob(self, pattern: str) -> list[str]:
+        from paimon.tools.files import _glob
+        return _glob({"pattern": pattern}, self.cwd).splitlines()
+
+    def test_ignored_directories_are_skipped_but_files_of_those_names_are_not(self) -> None:
+        self.write("build/a.txt")
+        self.write("src/node_modules/b.txt")
+        build = self.write("scripts/build")
+        out = self.write("out")
+        self.assertEqual(sorted(self._glob("**/*")), sorted([str(build), str(out)]))
+
+    def test_newest_first(self) -> None:
+        old, new = self.write("old.txt"), self.write("new.txt")
+        os.utime(old, (1_000_000, 1_000_000))
+        os.utime(new, (2_000_000, 2_000_000))
+        self.assertEqual(self._glob("*.txt"), [str(new), str(old)])
+
+    def test_a_file_deleted_while_listing_is_left_out(self) -> None:
+        kept, gone = self.write("kept.txt"), self.write("gone.txt")
+        stat = Path.stat
+
+        def vanishing(path, *args, **kwargs):
+            # Still there when the listing checks it, gone when it is timed.
+            if path == gone and sys._getframe(1).f_code.co_name == "_glob":
+                raise FileNotFoundError(path)
+            return stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", vanishing):
+            self.assertEqual(self._glob("*.txt"), [str(kept)])
 
 
 class ValidateArgsTest(unittest.TestCase):

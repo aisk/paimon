@@ -31,9 +31,10 @@ def _grep_files(base: Path, name_filter: str | None, sandboxed: bool):
     # Prune before descent; sort only one directory at a time. Directory
     # symlinks are not followed, including cycles.
     for root, dirs, names in os.walk(base, followlinks=False):
+        # The ignore list names directories: a file called "build" is searched.
         dirs[:] = sorted(name for name in dirs if name not in _GLOB_IGNORE)
         for name in sorted(names):
-            if name in _GLOB_IGNORE or (name_filter and not fnmatch.fnmatch(name, name_filter)):
+            if name_filter and not fnmatch.fnmatch(name, name_filter):
                 continue
             path = Path(root) / name
             if sandboxed and not _inside(path, base):
