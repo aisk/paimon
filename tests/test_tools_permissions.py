@@ -6,9 +6,18 @@ from unittest.mock import patch
 
 from paimon.tools.base import ToolContext
 from paimon.tools.files import _glob, _inside
-from paimon.tools.permissions import MODES, gate, safe_command
+from paimon.tools.permissions import _GIT_LOCATION_ENV, MODES, gate, safe_command
 from paimon.tools.shell import _shell, shell_output_dir
 from tests.support.shell import MODELLED_SHELL, filler, modelled_shell, overflow_path
+
+
+def _scrub_git_location(test: unittest.TestCase) -> None:
+    """Unset, for the test, every variable that stops git being recognized."""
+    env = patch.dict(os.environ)
+    env.start()
+    test.addCleanup(env.stop)
+    for name in _GIT_LOCATION_ENV:
+        os.environ.pop(name, None)
 
 
 class GateTest(unittest.IsolatedAsyncioTestCase):
@@ -97,6 +106,8 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
 
     @modelled_shell
     def test_safe_shell_commands_auto_allowed(self) -> None:
+        (self.cwd / ".git").mkdir()  # git is only recognized in a repository's root
+        _scrub_git_location(self)
         with patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL):
             for mode in ("read", "auto"):
                 self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
@@ -124,13 +135,20 @@ class SafeCommandTest(unittest.TestCase):
         shell = patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL)
         shell.start()
         self.addCleanup(shell.stop)
+        # The root of a repository, the one place git is recognized at all,
+        # with nothing pointing git elsewhere (a git hook running the tests
+        # sets GIT_INDEX_FILE, for one).
+        (self.cwd / ".git").mkdir()
+        _scrub_git_location(self)
 
     def test_recognized_read_only_commands(self) -> None:
         for cmd in (
             "ls", "ls -la", "pwd", "cat sub/a.txt", "head -n 20 a.py",
-            "tail -n 5 a.log", "wc -l *.py", "stat a.py", "file a.py",
+            "tail -n 5 a.log", "wc -l src/*.py", "wc -l ./*.py", "wc -l -- *.py",
+            "stat a.py", "file a.py",
             "which python3", "df", "du -sh .", "grep TODO src", "grep -rn foo .",
-            "rg TODO", "rg -n foo src", "find . -name *.py -type f",
+            "rg TODO", "rg -n foo src", "find . -name '*.py' -type f",
+            "rg -g '*.py' foo", "grep -rn --include='*.py' foo .", "grep -rn foo src/*",
             "diff a.txt b.txt", "readlink -f a.py",
             "realpath a.py", "echo done", "uname -a", "whoami", "date", "nproc",
             "git status", "git status --porcelain", "git log --oneline -20",
@@ -148,6 +166,67 @@ class SafeCommandTest(unittest.TestCase):
         # ".*" expands to "." and "..", so the literal path check is not enough.
         for cmd in ("ls .*", "grep -r SECRET .*", "cat .*/*", "grep -r x .*/.*",
                     "ls ..*", "ls .?", "wc -l sub/.*"):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+
+    def test_globs_that_could_expand_to_options_reject(self) -> None:
+        # A file named "--pre=sh" or "-delete" matches "*" and the command
+        # takes it for an option; "*.py" is matched by "--files0-from=x.py".
+        for cmd in ("rg foo *", "find * -name x", "find . -name *.py", "ls *", "cat ?",
+                    "wc -l *.py", "grep -r foo *.txt", "echo *", "rg --pr* x foo",
+                    "find -- *", "git diff *", "git log --oneline *.py", "git log --out*"):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+        # Quoted, a pattern is the command's to interpret; after "--" a name
+        # is an operand to a command that ends its options there; and a
+        # literal first directory fixes how every expansion begins.
+        for cmd in ("find . -name '*.py'", "find . -name \"*.py\"", "rg -g '*.py' foo",
+                    "ls -- *", "cat -- *.txt", "grep -rn foo -- *", "ls src/*.py", "ls ./*",
+                    "git diff -- *", "git log --oneline -- '*.py'"):
+            self.assertTrue(safe_command(cmd, self.cwd), cmd)
+
+    def test_a_glob_matching_a_symlink_out_of_cwd_rejects(self) -> None:
+        with tempfile.TemporaryDirectory() as outside:
+            (self.cwd / "src").mkdir()
+            (self.cwd / "src" / "a.txt").write_text("x")
+            self.assertTrue(safe_command("cat src/*", self.cwd))
+            (self.cwd / "src" / "link").symlink_to(Path(outside), target_is_directory=True)
+            self.assertFalse(safe_command("cat src/*", self.cwd))
+            self.assertFalse(safe_command("ls -- src/*", self.cwd))
+            self.assertTrue(safe_command("ls -- *", self.cwd), "lists src, not into the link")
+
+    def test_a_parent_segment_rejects(self) -> None:
+        """The shell follows a link before applying "..", while Python strikes
+        "link/.." out as text (always on Windows, and on POSIX when the path
+        does not exist as written), so link/../x is read outside the cwd."""
+        with tempfile.TemporaryDirectory() as outside:
+            deep = Path(outside) / "deep"
+            deep.mkdir()
+            (Path(outside) / "secret.txt").write_text("x")
+            (self.cwd / "secret.txt").write_text("x")
+            (self.cwd / "link").symlink_to(deep, target_is_directory=True)
+            for cmd in ("cat link/../secret.txt", "cat lin*/../secret.txt",
+                        "cat sub/../secret.txt", "ls sub/..", "grep -r x link/..",
+                        "diff --from-file=.. secret.txt", "grep -f.. secret.txt"):
+                self.assertFalse(safe_command(cmd, self.cwd), cmd)
+        with patch.dict(os.environ, {"CDPATH": ""}):
+            self.assertFalse(safe_command("cd sub && ls ../", self.cwd))
+
+    def test_abbreviated_long_options_are_denied_like_the_full_ones(self) -> None:
+        # getopt_long and git's parser both accept any unambiguous prefix.
+        for cmd in ("tail --foll a.log", "tail -n1 --follo a.log", "date --se 2020-01-01",
+                    "date --s=2020", "file --compil x", "rg --pr x foo", "rg --hostname-bi x foo",
+                    "git blame --conten x a.txt", "git log --outp=x", "git show --textc HEAD",
+                    "git diff --ext", "git log --show-sig"):
+            self.assertFalse(safe_command(cmd, self.cwd), cmd)
+        for cmd in ("tail -n 5 a.log", "rg --pre-glob '*.gz' foo", "date --utc",
+                    "git log --oneline", "git log --stat", "git log --no-ext-diff",
+                    "git show --name-only HEAD"):
+            self.assertTrue(safe_command(cmd, self.cwd), cmd)
+
+    def test_lists_of_file_names_reject(self) -> None:
+        # The names inside the list are opened and never checked.
+        for cmd in ("wc --files0-from list", "wc --files0-from=list", "du --files0-from list",
+                    "file -f list", "file --files-from list", "find . -files0-from list",
+                    "tree -R -L 1"):
             self.assertFalse(safe_command(cmd, self.cwd), cmd)
 
     def test_attached_flag_values_reject(self) -> None:
@@ -203,7 +282,7 @@ class SafeCommandTest(unittest.TestCase):
     def test_cd_chains_allowed(self) -> None:
         with patch.dict(os.environ, {"CDPATH": ""}):
             for cmd in ("cd sub && ls", "cd sub && cat a.txt",
-                        "cd sub && cd deeper && ls", "cd sub && ls ../",
+                        "cd sub && cd deeper && ls",
                         "cd 'sub' && ls", f"cd {self.cwd.as_posix()}/sub && ls", "cd sub"):
                 self.assertTrue(safe_command(cmd, self.cwd), cmd)
 
@@ -279,8 +358,40 @@ class SafeCommandTest(unittest.TestCase):
             "git ls-files -X /etc/passwd", "git ls-files -cX /etc/passwd",
             "git ls-files --exclude-from=/etc/passwd",
             "git log --show-signature", "git show --textconv HEAD:f",
+            "git blame -S revs a.txt", "git blame -wS revs a.txt",
+            "git blame --ignore-revs-file revs a.txt", "git blame --ignore-revs-file=revs a.txt",
+            "git log -O order", "git diff -Oorder", "git show -O order HEAD",
+            "git rev-parse --resolve-git-dir x", "git ls-files --exclude-per-directory=x",
+            # A %G placeholder verifies signatures, running gpg.program.
+            "git log --format=%G?", "git log --format %GG", "git log '--pretty=format:%h %GS'",
         ):
             self.assertFalse(safe_command(cmd, self.cwd), cmd)
+        for cmd in ("git log '--format=%h %s'", "git blame --ignore-rev HEAD a.txt",
+                    "git log -L 1,2:a.txt", "git diff --relative"):
+            self.assertTrue(safe_command(cmd, self.cwd), cmd)
+
+    def test_git_is_recognized_only_in_a_real_repository_root(self) -> None:
+        """git takes any directory holding HEAD, objects/ and refs/ for a
+        repository and runs what its config says (core.fsmonitor on status).
+        The agent may write such a directory unreviewed, just not a .git."""
+        evil = self.cwd / "evil"
+        for name in ("objects", "refs"):
+            (evil / name).mkdir(parents=True)
+        (evil / "HEAD").write_text("ref: refs/heads/main\n")
+        (evil / "config").write_text("[core]\n\tfsmonitor = touch pwned\n")
+        with patch.dict(os.environ, {"CDPATH": ""}):
+            self.assertTrue(safe_command("git status", self.cwd))
+            self.assertFalse(safe_command("cd evil && git status", self.cwd))
+            self.assertTrue(safe_command("cd evil && ls", self.cwd))
+            # Without its own .git the cwd itself could be made that shape.
+            self.assertFalse(safe_command("git status", evil))
+            (self.cwd / ".git").rmdir()
+            self.assertFalse(safe_command("git status", self.cwd))
+            self.assertTrue(safe_command("ls", self.cwd))
+            (self.cwd / ".git").mkdir()
+            for variable in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL"):
+                with patch.dict(os.environ, {variable: "evil"}):
+                    self.assertFalse(safe_command("git status", self.cwd), variable)
 
     def test_an_environment_that_redefines_commands_rejects(self) -> None:
         # bash imports exported functions and runs BASH_ENV before the
@@ -334,6 +445,8 @@ class WindowsSafeCommandTest(unittest.TestCase):
             "cat CON", "cat con.txt", "rg x sub/nul", "cat COM1", "cat 'AUX .log'",
             # Win32 strips trailing dots and spaces; MSYS does not.
             "cat x.", "cat 'x '", "cat sub./a",
+            # The same, attached to an option.
+            "grep -fCON .", "grep --file=con.txt .", "diff --from-file=NUL a.txt",
         ):
             self.assertFalse(safe_command(cmd, self.cwd), cmd)
 

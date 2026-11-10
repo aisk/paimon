@@ -1,8 +1,8 @@
 """Whether a tool call may run: permission modes, the read-only shell command
 recognizer, the gate, and running a call once it is authorized."""
 
+import glob
 import os
-import shlex
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,19 +139,26 @@ _SAFE_COMMANDS: dict[str, _SafeCommandSpec] = {
     "cat": _SafeCommandSpec(),
     "head": _SafeCommandSpec(),
     "tail": _SafeCommandSpec(deny_flags=("-f", "-F", "--follow")),  # hangs until timeout
-    "wc": _SafeCommandSpec(),
+    # --files0-from reads the names of the files to open from a file, and
+    # those names never reach the containment check (file -f alike).
+    "wc": _SafeCommandSpec(deny_flags=("--files0-from",)),
     "stat": _SafeCommandSpec(),
-    "file": _SafeCommandSpec(deny_flags=("-C", "--compile")),  # -C writes a .mgc file
+    # -C writes a .mgc file.
+    "file": _SafeCommandSpec(deny_flags=("-C", "--compile", "-f", "--files-from")),
     "which": _SafeCommandSpec(check_paths=False),  # args are command names, not paths
-    "du": _SafeCommandSpec(),
+    "du": _SafeCommandSpec(deny_flags=("--files0-from",)),
     "df": _SafeCommandSpec(),
     "grep": _SafeCommandSpec(),
     "rg": _SafeCommandSpec(deny_flags=("--pre", "--hostname-bin")),  # both execute programs
     # The complete set of GNU find actions with side effects; everything
-    # else prints to stdout or filters.
+    # else prints to stdout or filters. -files0-from names starting points
+    # from a file.
     "find": _SafeCommandSpec(deny_flags=("-exec", "-execdir", "-ok", "-okdir", "-delete",
-                                         "-fls", "-fprint", "-fprint0", "-fprintf")),
-    "tree": _SafeCommandSpec(deny_flags=("-o",)),  # -o writes the listing to a file
+                                         "-fls", "-fprint", "-fprint0", "-fprintf",
+                                         "-files0-from")),
+    # -o writes the listing to a file, and -R runs tree again in every
+    # directory with "-o 00Tree.html" added.
+    "tree": _SafeCommandSpec(deny_flags=("-o", "-R")),
     "diff": _SafeCommandSpec(),
     "readlink": _SafeCommandSpec(),
     "realpath": _SafeCommandSpec(),
@@ -163,6 +170,15 @@ _SAFE_COMMANDS: dict[str, _SafeCommandSpec] = {
     "nproc": _SafeCommandSpec(check_paths=False),
 }
 
+# Commands whose option parsing (getopt_long, or ripgrep's own) ends at "--",
+# so that every word after it is an operand however it begins. find is not
+# among them (it reads "-x" after its paths as an expression), nor echo (it
+# prints "--"); tree and date take no file operands worth the modelling.
+_ENDS_OPTIONS_AT_DASHDASH = frozenset({
+    "ls", "cat", "head", "tail", "wc", "stat", "file", "du", "df", "grep", "rg",
+    "diff", "readlink", "realpath",
+})
+
 # "grep" is deliberately absent: its -O/--open-files-in-pager runs an
 # arbitrary command, and git's option bundling (-nOsh) makes that hard to
 # screen reliably. Plain grep and rg cover the same ground.
@@ -171,15 +187,37 @@ _SAFE_GIT_SUBCOMMANDS = frozenset({
     "rev-parse", "ls-files", "ls-tree", "branch", "remote", "tag",
 })
 # --ext-diff/--textconv run configured external programs, --show-signature
-# runs gpg.program, --no-index reads files outside the repo. (--output and
-# --output-directory write files; matched by prefix below.)
-_UNSAFE_GIT_FLAGS = ("--ext-diff", "--textconv", "--no-index", "--show-signature")
-# Options that read a file named on the command line, which would otherwise
-# escape the cwd check git's positional args cannot get (refs vs paths).
+# runs gpg.program, --no-index reads files outside the repo, --output and
+# --output-directory write files (and any longer name starting "--output" is
+# refused along with them).
+_UNSAFE_GIT_FLAGS = ("--ext-diff", "--textconv", "--no-index", "--show-signature",
+                     "--output", "--output-directory")
+# Options that read a file named on the command line. Positional arguments
+# need no such check: git refuses a path outside the work tree itself
+# ("'../x' is outside repository"), and the work tree is the cwd (see
+# _git_repository_is_real). Each of these, though, opens whatever it is
+# given, and shows it back: blame --contents as the blamed text, -S and
+# --ignore-revs-file in their error messages.
 _GIT_DENY_FLAGS = {
-    "blame": ("--contents",),
-    "ls-files": ("-X", "--exclude-from"),
+    "blame": ("--contents", "-S", "--ignore-revs-file"),
+    "diff": ("-O",),  # the order file
+    "log": ("-O",),
+    "show": ("-O",),
+    "ls-files": ("-X", "--exclude-from", "--exclude-per-directory"),
+    "rev-parse": ("--resolve-git-dir",),
 }
+# Options that are prefixes of a denied one above but are options in their
+# own right, which git takes exactly.
+_GIT_EXACT_FLAGS = {
+    "blame": frozenset({"--ignore-rev"}),
+}
+# Variables that point git at another repository, work tree, index, object
+# store or configuration than the one found from the cwd. They come from the
+# user, not the agent, but a relative one is resolved inside the cwd, where
+# the agent writes, so git is not modelled at all while any is set.
+_GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                     "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
 # Subcommands whose bare/flag form lists but whose positional args mutate
 # (`git branch NAME` creates, `git tag NAME` tags, `git remote add` adds):
 # every token after the subcommand must come from the listed set.
@@ -283,14 +321,125 @@ def _windows_path_ok(tok: str) -> bool:
     return True
 
 
-def _flag_denied(tok: str, deny_flags: tuple[str, ...]) -> bool:
-    """True if tok matches a denied flag, including combined shorts ("-20f")."""
-    if tok.split("=", 1)[0] in deny_flags:
+def _flag_denied(tok: str, deny_flags: tuple[str, ...], exact: frozenset[str] = frozenset()) -> bool:
+    """True if tok matches a denied flag, including combined shorts ("-20f")
+    and abbreviated long options ("--foll").
+
+    getopt_long and git's option parser both take any unambiguous prefix of
+    a long option as the option itself, so a long token that is a prefix of
+    a denied one counts as that one. "--" alone (two characters) is not a
+    prefix of anything here: it ends the options. ``exact`` names options of
+    their own that happen to be prefixes of denied ones, which both parsers
+    take as themselves (blame's --ignore-rev beside --ignore-revs-file).
+    """
+    name = tok.split("=", 1)[0]
+    if name in deny_flags:
         return True
-    if tok.startswith("--"):
+    if name in exact:
         return False
+    if tok.startswith("--"):
+        return len(name) >= 3 and any(flag.startswith(name) for flag in deny_flags
+                                      if flag.startswith("--"))
     letters = {f[1] for f in deny_flags if len(f) == 2}
     return any(ch in letters for ch in tok[1:])
+
+
+def _attached_values(tok: str):
+    """Every way an option word could carry a value: what follows "=", and
+    for a short option every tail after its first letter, since which
+    letters are flags and where the value starts depends on the command."""
+    if "=" in tok:
+        yield tok.split("=", 1)[1]
+    if not tok.startswith("--"):
+        for start in range(2, len(tok)):
+            yield tok[start:]
+
+
+class _Word(str):
+    """A word of a command as sh will pass it, quotes removed, plus where
+    its first unquoted "*" or "?" is (-1 for none).
+
+    The text is what the command receives, but the shell goes by the quotes
+    it no longer shows: find -name '*.py' hands find a pattern, find -name
+    *.py hands it whatever files the shell found, and the two must not be
+    judged alike.
+    """
+
+    glob: int
+
+    def __new__(cls, text: str, glob: int) -> "_Word":
+        word = super().__new__(cls, text)
+        word.glob = glob
+        return word
+
+
+def _words(segment: str) -> list[_Word] | None:
+    """Split one segment into words the way sh does, or None on an
+    unterminated quote.
+
+    Only quotes and blanks need modelling: every other character sh treats
+    specially in a word was rejected with the metacharacters, operators were
+    split off by _split_segments, and a backslash (the one thing that could
+    escape a quote or a blank) is among the rejected.
+    """
+    words: list[_Word] = []
+    buf: list[str] = []
+    first = -1
+    started = False
+    quote = ""
+    for ch in segment:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                buf.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            started = True
+        elif ch in " \t":
+            if started:
+                words.append(_Word("".join(buf), first))
+            buf, first, started = [], -1, False
+        else:
+            if ch in "*?" and first < 0:
+                first = len(buf)
+            buf.append(ch)
+            started = True
+    if quote:
+        return None
+    if started:
+        words.append(_Word("".join(buf), first))
+    return words
+
+
+def _glob_could_be_option(word: str) -> bool:
+    """Whether the shell's expansion of ``word`` could begin with "-".
+
+    A pattern expands to names that start with its own text up to the first
+    "*" or "?", so a literal first path segment ("src/*.py", "./*") is
+    harmless, and a pattern in the first segment ("*", "*.py") is not: a file
+    named "--pre=sh" or "-delete" matches it, and the command takes it for an
+    option. A plain string, whose quoting is unknown, is taken as unquoted.
+    """
+    first = getattr(word, "glob", None)
+    if first is None:
+        first = min((i for i, ch in enumerate(word) if ch in "*?"), default=-1)
+    return first >= 0 and "/" not in word[:first]
+
+
+def _glob_matches_inside(word: _Word, base: Path, root: Path) -> bool:
+    """Whether every file the shell would expand ``word`` to is inside root.
+
+    The word itself is checked literally elsewhere, and "src/*" is inside
+    whatever it matches; a symlink matched by the pattern is not. Python's
+    glob skips hidden names the way sh does, and on Windows matches without
+    regard to case, so it finds at least every name sh would.
+    """
+    pattern = word if Path(word).is_absolute() else os.path.join(glob.escape(str(base)), word)
+    try:
+        return all(_inside(Path(match), root) for match in glob.iglob(pattern))
+    except OSError:
+        return False
 
 
 def _hidden_glob(tok: str) -> bool:
@@ -303,6 +452,32 @@ def _hidden_glob(tok: str) -> bool:
     return any(seg.startswith(".") and ("*" in seg or "?" in seg) for seg in tok.split("/"))
 
 
+def _git_repository_is_real(root: Path) -> bool:
+    """Whether the repository git finds from ``root`` is one the agent could
+    not have made up without a review.
+
+    git takes any directory holding HEAD, objects/ and refs/ for a (bare)
+    repository and honours the config file beside them, so core.fsmonitor or
+    core.pager set there runs on the next git status. Writes into a .git
+    directory are held (see _in_git_dir); writing HEAD, objects/x, refs/x and
+    config into some other directory is not. git looks at each directory
+    from the cwd upward for a .git entry first and only then at the
+    directory itself, so a .git entry in the cwd is found before anything
+    the agent can write, and without one the cwd itself could be made into
+    a bare repository a moment before the command runs. Hence: a .git in
+    the cwd, no cd before the git command (checked by the caller), and no
+    variable pointing git elsewhere.
+
+    What a real repository reads from the work tree cannot run anything on
+    its own: .gitattributes only selects drivers that config defines, and
+    .gitmodules is never a source of commands (submodule.*.update "!cmd" is
+    honoured from .git/config only).
+    """
+    if any(os.environ.get(name) for name in _GIT_LOCATION_ENV):
+        return False
+    return os.path.lexists(root / ".git")
+
+
 def _safe_git(argv: list[str]) -> bool:
     """argv is everything after "git". Global options before the subcommand
     (-c, -C, --git-dir, --exec-path, ...) all start with "-" and are rejected
@@ -313,10 +488,22 @@ def _safe_git(argv: list[str]) -> bool:
     if flags_only is not None:
         return all(tok in flags_only for tok in argv[1:])
     deny = _UNSAFE_GIT_FLAGS + _GIT_DENY_FLAGS.get(argv[0], ())
+    exact = _GIT_EXACT_FLAGS.get(argv[0], frozenset())
+    options = True
     for tok in argv[1:]:
-        if not tok.startswith("-"):
+        # A %G placeholder in a format verifies the commit's signature, which
+        # runs gpg.program the way --show-signature does, and the format may
+        # be the word after --format rather than attached to it.
+        if "%G" in tok:
+            return False
+        if options and tok == "--":
+            options = False  # git takes every word after it as a path
+            continue
+        if options and _glob_could_be_option(tok):
+            return False  # the shell may expand it to "--output=x"
+        if not options or not tok.startswith("-"):
             continue  # a ref or a pathspec; git's own repo boundary applies
-        if tok.split("=", 1)[0].startswith("--output") or _flag_denied(tok, deny):
+        if tok.split("=", 1)[0].startswith("--output") or _flag_denied(tok, deny, exact):
             return False
         if "/" in tok:
             return False  # an attached path value (--contents=/etc/passwd)
@@ -353,7 +540,7 @@ def _safe_cd(argv: list[str], base: Path, root: Path) -> Path | None:
     return target.resolve() if _inside(target, root) else None
 
 
-def _safe_simple(argv: list[str], base: Path, root: Path, shell: str) -> Path | None:
+def _safe_simple(argv: list[_Word], base: Path, root: Path, shell: str) -> Path | None:
     """Check one operator-free command from a compound line.
 
     ``base`` resolves relative paths (it moves when an earlier segment was
@@ -378,22 +565,50 @@ def _safe_simple(argv: list[str], base: Path, root: Path, shell: str) -> Path | 
     if argv[0] == "cd":
         return _safe_cd(argv, base, root)
     if argv[0] == "git":
+        # After a cd, git would discover whatever repository the new
+        # directory belongs to, which may be one the agent wrote itself.
+        if base != root or not _git_repository_is_real(root):
+            return None
         return base if _safe_git(argv[1:]) else None
     spec = _SAFE_COMMANDS.get(argv[0])  # exact match: "./ls", "/bin/ls", "FOO=1 ls" miss
     if spec is None:
         return None
+    options = True
     for tok in argv[1:]:
-        if tok.startswith("-"):
+        if options and tok == "--" and argv[0] in _ENDS_OPTIONS_AT_DASHDASH:
+            options = False
+            continue
+        globbed = getattr(tok, "glob", 0) >= 0
+        # A pattern is expanded by the shell to whatever names match it, and
+        # those can be options too, unless the command has stopped reading
+        # options or the pattern starts with a literal directory.
+        if globbed and (_hidden_glob(tok) or (options and _glob_could_be_option(tok))):
+            return None
+        if options and tok.startswith("-"):
             # A flag carrying an attached path (-f/etc/passwd, --from-file=/x)
-            # would never reach the containment check below.
-            # On Windows a drive letter needs no "/" ("-fC:x").
-            if _flag_denied(tok, spec.deny_flags) or "/" in tok or (windows and ":" in tok):
+            # would never reach the containment check below, nor would a
+            # parent directory without a slash (--from-file=..). On Windows a
+            # drive letter needs no "/" ("-fC:x"), and a device name no
+            # directory at all ("-fCON").
+            if _flag_denied(tok, spec.deny_flags) or "/" in tok or ".." in tok:
                 return None
-        elif _hidden_glob(tok):
+            if windows and (":" in tok or not all(_windows_path_ok(value)
+                                                  for value in _attached_values(tok))):
+                return None
+            continue
+        if not spec.check_paths:
+            continue
+        # The shell follows a symlink before it applies "..", and Python's
+        # path handling (Win32's always, POSIX's for a path that does not
+        # exist) strikes "link/.." out as text, so where the two meet the
+        # check below would look at a different file than the command opens.
+        if ".." in tok.split("/"):
             return None
-        elif spec.check_paths and windows and not _windows_path_ok(tok):
+        if windows and not _windows_path_ok(tok):
             return None
-        elif spec.check_paths and not _inside(_resolve(tok, base), root):
+        if not _inside(_resolve(tok, base), root):
+            return None
+        if globbed and not _glob_matches_inside(tok, base, root):
             return None
     return base
 
@@ -447,10 +662,7 @@ def safe_command(command: str, cwd: Path) -> bool:
     pure_and = all(op == "&&" for op, _ in parts[1:])
     base = cwd
     for _, seg in parts:
-        try:
-            argv = shlex.split(seg)
-        except ValueError:
-            return False
+        argv = _words(seg)
         if not argv or (argv[0] == "cd" and not pure_and):
             return False
         new_base = _safe_simple(argv, base, cwd, shell)
