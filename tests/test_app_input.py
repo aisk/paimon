@@ -122,6 +122,36 @@ class ConfirmPanelTest(AppTestCase):
                 await pilot.press("escape")
                 self.assertFalse(await task)
 
+    async def test_write_preview_reads_no_more_of_a_huge_file_than_it_shows(self) -> None:
+        # Drawn on the UI thread: reading the whole target would freeze the
+        # screen for as long as that takes.
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            with tempfile.TemporaryDirectory() as directory:
+                target = Path(directory).resolve() / "big.log"
+                target.write_bytes(b"first line\n" + b"x" * 2_000_000 + b"\nlast line\n")
+                app.pane.agent.cwd = target.parent
+                def whole(read):
+                    def guarded(path, *args, **kwargs):
+                        if path == target:
+                            raise AssertionError("the whole file was read")
+                        return read(path, *args, **kwargs)
+                    return guarded
+
+                with patch.object(Path, "read_text", whole(Path.read_text)), \
+                        patch.object(Path, "read_bytes", whole(Path.read_bytes)):
+                    task = await self._open_confirm(app, pilot, "write_file",
+                                                    {"path": "big.log", "content": "new\n"})
+                    panel = app.query_one(ConfirmPanel)
+                    shown = "\n".join("".join(segment.text for segment in line)
+                                      for line in app.console.render_lines(
+                                          panel._detail(), app.console.options.update_width(200)))
+                self.assertIn("first line", shown)
+                self.assertIn("last line", shown)
+                self.assertIn("bytes not shown", shown, "the elision is named, not silent")
+                await pilot.press("escape")
+                self.assertFalse(await task)
+
 
 class QuestionPanelTest(AppTestCase):
     """ask_user in the TUI: the panel replaces the prompt until answered."""
@@ -492,7 +522,9 @@ class UserCommandTest(AppTestCase):
             app.pane.driver.interrupt = lambda: interrupted.append(True)
 
             app.pane.run_user_command(sleeper())
-            await pilot.pause()
+            # Pressed once the command line is on screen, which is when a
+            # user would; the test below covers an Esc that comes sooner.
+            await self._wait_for(pilot, lambda: app.query(ToolCall))
             app.pane.interrupt()
             with contextlib.suppress(WorkerCancelled):
                 await app.workers.wait_for_complete()
@@ -506,6 +538,67 @@ class UserCommandTest(AppTestCase):
             # A second Esc, with no command left to stop, reaches the turn.
             app.pane.interrupt()
             self.assertEqual(interrupted, [True])
+
+    async def test_escape_while_the_command_line_is_still_being_drawn_stops_it(self) -> None:
+        # Drawing the command line takes several trips round the loop, and an
+        # Esc landing in one of them used to stop the run before there was
+        # anywhere to say so: the line stayed with no result under it.
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            hold_turn(app.pane)
+            interrupted = []
+            app.pane.driver.interrupt = lambda: interrupted.append(True)
+
+            app.pane.run_user_command(sleeper())
+            # One step, which starts the run and no more.
+            await asyncio.sleep(0)
+            app.pane.interrupt()
+            with contextlib.suppress(WorkerCancelled):
+                await app.workers.wait_for_complete()
+            await self._wait_for(pilot, lambda: app.query(ToolResult))
+
+            self.assertEqual(interrupted, [], "the Esc went to the command, not to the turn")
+            self.assertIn("!", str(app.query(ToolCall).first().render()))
+            self.assertIn("interrupted", str(app.query(ToolResult).first().render()))
+            self.assertIsNone(app.pane._shell_worker)
+
+    async def test_a_command_run_while_the_last_one_is_dying_is_the_one_esc_stops(self) -> None:
+        # Stopping a command waits for its process tree to die, and the
+        # reference to whatever runs next must survive that wait.
+        app = self.make_app()
+        started = []
+        dying = asyncio.Event()
+
+        async def run_shell(command: str) -> str:
+            started.append(command)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                # Like the tree kill, which awaits the process going.
+                await dying.wait()
+                raise
+            return "out"
+
+        async with app.run_test() as pilot:
+            pane = app.pane
+            pane.agent.run_shell = run_shell
+            pane.run_user_command("first")
+            await self._wait_for(pilot, lambda: started == ["first"])
+            pane.interrupt()
+            pane.run_user_command("second")
+            await self._wait_for(pilot, lambda: started == ["first", "second"])
+            second = pane._shell_worker
+            dying.set()
+            await self._wait_for(pilot, lambda: len(app.query(ToolResult)) == 1)
+
+            self.assertIs(pane._shell_worker, second, "the second run is still tracked")
+            pane.run_user_command("third")
+            await pilot.pause()
+            self.assertEqual(started, ["first", "second"], "a third one waits its turn")
+            self.assertIn("already running", self._log_text(pane))
+            pane.interrupt()
+            await self._wait_for(pilot, lambda: len(app.query(ToolResult)) == 2)
+            self.assertIsNone(pane._shell_worker)
 
     async def test_replayed_history_shows_the_run_again(self) -> None:
         app = self.make_app()

@@ -87,15 +87,17 @@ class Transcript(VerticalScroll):
         (container if container is not None else self).mount(widget)
         return widget
 
-    async def add_shell_call(self, command: str) -> Vertical:
+    def add_shell_call(self, command: str) -> Vertical:
         """The box a "!" run is logged in, with its command line already in it.
 
-        Awaited, since the result mounts into the box the moment the command
-        exits and a container has to be mounted before anything goes in it.
+        Not awaited: the box is in the log the moment this returns, so a run
+        stopped while it is still being drawn has somewhere to say so. Its
+        result can go in straight away, since a widget takes children as soon
+        as it is attached, and mounts are carried out in the order asked for.
         """
         step = Vertical(classes="shell-step")
-        await self.mount(step)
-        await step.mount(ToolCall("!", command))
+        self.mount(step)
+        step.mount(ToolCall("!", command))
         return step
 
     def show_todos(self, todos: list[dict]) -> None:
@@ -179,7 +181,7 @@ class EventRenderer:
             # ever hears about it.
             await self.close()
             self._first_text_block = True
-            step = await self._log.add_shell_call(ev.command)
+            step = self._log.add_shell_call(ev.command)
             self._log.add_tool_result(ev.output, label=ev.command, container=step)
 
         elif isinstance(ev, ReasoningDelta):

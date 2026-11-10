@@ -580,6 +580,10 @@ async def _spawn_shell(
         )
     except BaseException:
         pipe.close()
+        # The command is running by now, and the caller never hears of it:
+        # cancelled here (an Esc right after "!cmd"), it would run on with
+        # nobody left to stop it.
+        await _kill_tree(proc, proc.pid)
         raise
     return proc, stream, transport
 

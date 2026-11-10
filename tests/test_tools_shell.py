@@ -32,6 +32,7 @@ from tests.support.shell import (
     posix_shell,
     printer,
     reap,
+    sleeper,
     spawner,
 )
 
@@ -141,6 +142,39 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0.05)
         self.fail(f"backgrounded descendant {pid} outlived the timeout")
+
+    async def test_stopped_while_its_output_is_hooked_up_the_command_goes_too(self) -> None:
+        # The last await before the caller has the process to kill: an Esc
+        # landing there must not leave the command running with nobody to
+        # stop it.
+        loop = asyncio.get_running_loop()
+        connecting = asyncio.Event()
+        procs = []
+
+        def recording(spawn):
+            async def recorded(*args, **kwargs):
+                proc = await spawn(*args, **kwargs)
+                procs.append(proc)
+                return proc
+            return recorded
+
+        async def stuck(*args, **kwargs):
+            connecting.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(asyncio, "create_subprocess_exec", recording(asyncio.create_subprocess_exec)),
+            patch.object(asyncio, "create_subprocess_shell", recording(asyncio.create_subprocess_shell)),
+            patch.object(loop, "connect_read_pipe", stuck),
+        ):
+            task = asyncio.create_task(_shell({"command": sleeper()}, self.cwd))
+            await asyncio.wait_for(connecting.wait(), 10)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        (proc,) = procs
+        self.addCleanup(reap, proc.pid)
+        self.assertIsNotNone(proc.returncode, "the command was left running")
 
 
 class BackgroundCommandTest(unittest.IsolatedAsyncioTestCase):
