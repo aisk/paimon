@@ -239,7 +239,11 @@ class LoginScreen(ModalScreen[str | None]):
 
     @work
     async def _flow(self) -> None:
-        provider = await self.app.push_screen_wait(PickerScreen("Select provider", _providers()))
+        # Finding out which providers can be built imports each one's SDK,
+        # seconds of work the first time: off the event loop, so the screen
+        # stays alive meanwhile.
+        providers = await asyncio.to_thread(_providers)
+        provider = await self.app.push_screen_wait(PickerScreen("Select provider", providers))
         if not provider:
             self.dismiss(None)
             return

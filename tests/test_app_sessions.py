@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
 )
 from textual.widgets import Input, Static
 
-from paimon import lockfile
+from paimon import lockfile, login
 from paimon.agent import Agent
 from paimon.app import PaimonApp
 from paimon.config import Config, RunOptions, config_path
@@ -181,6 +181,13 @@ def _log_text(app: PaimonApp) -> str:
 
 
 class LoginTest(AppTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        # The first look at the providers imports every SDK, which a slow
+        # runner takes longer over than a test waits for the picker.
+        login._providers()
+
     async def test_login_is_refused_while_a_turn_is_running(self) -> None:
         """Login rewrites the model every running turn re-reads at each step."""
         app = self.make_app()
