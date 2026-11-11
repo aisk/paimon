@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import LoadingIndicator, Static, TextArea
+from textual.widgets import Static, TextArea
 from textual.worker import get_current_worker
 
 from . import lockfile
@@ -42,6 +42,7 @@ from .tools.permissions import MODES, confirm_origin
 from .turns import CompactionOver, CompactionStarted, Outcome, Result, TurnDriver, TurnOver
 from .login import PickerScreen
 from .session import Session, SessionError
+from .sparkle import Shimmer, Twinkle
 from .transcript import EventRenderer, Transcript
 from .ui import (
     BlockingPanel,
@@ -298,8 +299,8 @@ class SessionPane(Pane):
     def compose(self) -> ComposeResult:
         yield self.transcript
         status = Horizontal(
-            LoadingIndicator(),
-            Static(classes="status-label"),
+            Twinkle(classes="status-spinner"),
+            Shimmer(classes="status-label"),
             id="response-status",
         )
         status.display = False
@@ -307,7 +308,7 @@ class SessionPane(Pane):
         queued = Static(id="queued")
         queued.display = False
         yield queued
-        prompt = PromptInput(id="prompt", soft_wrap=True)
+        prompt = PromptInput(id="prompt", soft_wrap=True, placeholder=PromptInput.PLACEHOLDER)
         prompt.border_subtitle = PromptInput.INPUT_HELP
         yield prompt
 
@@ -319,6 +320,8 @@ class SessionPane(Pane):
         self._refresh_mode()
         if self._resumed:
             await self._show_resumed()
+        else:
+            self.transcript.show_welcome(self.cwd)
         diagnostics = self.agent.skill_diagnostics
         if diagnostics:
             first = diagnostics[0]
@@ -465,6 +468,7 @@ class SessionPane(Pane):
         self.transcript.clear()
         self._queue.clear()
         self._refresh_queued()
+        self.transcript.show_welcome(self.cwd)
         self.transcript.add(Content.from_markup("[$text-muted]Started new session $id[/]", id=self.agent.session.id[:8]))
         self._report_killed(killed)
         self._sync_statusbar()
@@ -555,7 +559,11 @@ class SessionPane(Pane):
         self._notify_state()
 
     def _refresh_mode(self) -> None:
-        self.query_one(PromptInput).border_title = f" {self.mode} "
+        prompt = self.query_one(PromptInput)
+        prompt.border_title = f" {self.mode} "
+        # The title is drawn as a chip in the mode's own colour.
+        for mode in MODES:
+            prompt.set_class(mode == self.mode, f"-{mode}")
 
     # ---- status --------------------------------------------------------------
 

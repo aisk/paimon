@@ -18,6 +18,8 @@ from rich.text import Span, Text
 # textual theme name -> pygments style, for the themes with a close
 # counterpart; anything else falls back to a stock dark or light style.
 _SYNTAX_THEMES = {
+    "paimon": "one-dark",
+    "paimon-light": "default",
     "textual-light": "default",
     "nord": "nord",
     "gruvbox": "gruvbox-dark",

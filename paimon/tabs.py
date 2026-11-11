@@ -69,9 +69,11 @@ class PaneTab(Static):
             self.update(Content.from_markup(
                 "[$primary]$bar[/]\n$cell", bar="━" * width, cell=cell))
             return
-        # The rule carries no markup style: $text-muted is an "auto" colour and
-        # only resolves against the background when the stylesheet applies it.
-        self.update(Content(f"{'─' * width}\n{cell}"))
+        # The same faint rule the fill carries on to the edge. Not $text-muted:
+        # that is an "auto" colour and only resolves against the background
+        # when the stylesheet applies it.
+        self.update(Content.from_markup(
+            "[$primary 25%]$bar[/]\n$cell", bar="─" * width, cell=cell))
 
 
 class _StripFill(Static):

@@ -25,7 +25,9 @@ from .errors import PaimonError
 from .login import LoginScreen, PickerScreen
 from .pane import Pane, SessionPane
 from .session import Session, SessionError
+from .sparkle import Masthead
 from .tabs import PaneTabs
+from .theme import DEFAULT_THEME, MODE_COLORS, THEMES, gauge
 from .commandpane import CommandPane
 from .jobs import Job, PaneLimitError
 from .turns import Outcome, TurnDriver
@@ -175,9 +177,13 @@ class PaimonApp(App):
         self._dropping: set[Pane] = set()
         self._switcher = ContentSwitcher(pane, initial=pane.id, id="panes")
         self._tabs = PaneTabs()
+        self._masthead = Masthead(id="masthead")
         self._pick_session = pick_session
-        if self.config.theme in self.available_themes:
-            self.theme = self.config.theme
+        for theme in THEMES:
+            self.register_theme(theme)
+        # Paimon's own look until another is picked. Not persisted from here:
+        # only a theme the user chose is written to the config.
+        self.theme = self.config.theme if self.config.theme in self.available_themes else DEFAULT_THEME
         self._persist_theme_changes = True
 
     # ---- panes --------------------------------------------------------------
@@ -231,6 +237,7 @@ class PaimonApp(App):
         # not the active one while a modal is up.
         if self.is_mounted:
             self._switcher.screen.set_class(self._tabs.display, "-tabs-bottom")
+        self._masthead.set_state(self._current.cwd, self._is_working())
         self.refresh_statusbar()
         self._report_herdr()
         self._report_program_status()
@@ -602,6 +609,7 @@ class PaimonApp(App):
 
     def compose(self) -> ComposeResult:
         yield self._tabs
+        yield self._masthead
         yield self._switcher
         yield Static(id="statusbar")
 
@@ -791,23 +799,25 @@ class PaimonApp(App):
         if not bars:
             return
         pane = self.pane
+        # Assembled rather than marked up: model names and session ids are not
+        # markup and must not be parsed as any.
         if isinstance(pane, SessionPane):
             parts = self._session_status(pane, tokens)
         elif isinstance(pane, AgentPane):
             agent = pane.job.agent
-            parts = [f"agent {pane.job_id}", f"{pane.mode} mode", agent.model_name or "no model",
-                     f"session {agent.session.id[:8]}"]
+            parts = [Content(f"agent {pane.job_id}"), self._mode_status(pane.mode),
+                     Content(agent.model_name or "no model"),
+                     Content(f"session {agent.session.id[:8]}")]
         else:
-            parts = [f"command {pane.job_id}", pane.status_text, pane.command.command]
+            parts = [Content(f"command {pane.job_id}"), Content(pane.status_text),
+                     Content(pane.command.command)]
         # A pane blocked on a confirmation the user cannot see blocks whatever
         # is waiting on it, so the count follows them to every other pane.
         waiting = sum(1 for other in self._panes if other is not pane and other.needs_confirm)
-        # Assembled rather than marked up: model names and session ids are not
-        # markup and must not be parsed as any.
-        line = Content("  ·  ".join(parts))
         if waiting:
-            line = line.append_text("  ·  ").append_text(
-                f"{waiting} waiting on you (ctrl+g)", "$text-warning")
+            parts.append(Content.styled(f"{waiting} waiting on you (ctrl+g)", "bold $text-warning"))
+        separator = Content.styled(" · ", "$foreground 35%")
+        line = separator.join(parts)
         focused = self.focused
         if not self.app_focus and not self.is_headless:
             label, style = "Terminal inactive · click terminal to return", "$text-warning"
@@ -830,16 +840,23 @@ class PaimonApp(App):
             prompt = pane.query_one(PromptInput)
             prompt.border_subtitle = (PromptInput.INPUT_HELP if focused is prompt and self.app_focus
                                       else "Input inactive · Ctrl+L or click here to focus")
-        line = Content.styled(label, style).append_text("  ·  ").append(line)
+        # The lamp says at a glance whether typing lands somewhere expected.
+        lamp = "◉ " if style == "$text-accent" else "○ "
+        line = Content.styled(lamp + label, style).append(separator).append(line)
         bars.first(Static).update(line)
 
-    def _session_status(self, pane: SessionPane, tokens: int | None) -> list[str]:
+    @staticmethod
+    def _mode_status(mode: str) -> Content:
+        return Content.styled(f"{mode} mode", f"bold $text-{MODE_COLORS.get(mode, 'primary')}")
+
+    def _session_status(self, pane: SessionPane, tokens: int | None) -> list[Content]:
         # The agent's model, not the config's: a pane may override it.
-        parts = [f"{pane.mode} mode", pane.agent.model_name or "no model",
-                 f"session {pane.agent.session.id[:8]}"]
+        parts = [self._mode_status(pane.mode), Content.styled(pane.agent.model_name or "no model", "$text"),
+                 Content(f"session {pane.agent.session.id[:8]}")]
         agents = sum(1 for job in pane.agent.jobs.values() if job.kind == "agent" and job.running)
         if agents:
-            parts.append(f"{agents} agent{'s' if agents > 1 else ''} running")
+            parts.append(Content.styled(f"{agents} agent{'s' if agents > 1 else ''} running",
+                                        "$text-accent"))
         # The last measurement stands until a new one arrives: the bar is
         # redrawn whenever any pane changes state, not only after a turn.
         if tokens is None:
@@ -849,16 +866,22 @@ class PaimonApp(App):
         if tokens is not None:
             window = pane.agent.context_window()
             if window:
-                parts.append(f"context {tokens / 1000:.1f}k/{window / 1000:.0f}k ({tokens / window:.0%})")
+                used = tokens / window
+                # The gauge warms up as the window fills, toward compaction.
+                level = "success" if used < 0.6 else "warning" if used < 0.85 else "error"
+                filled, rest = gauge(used, 6)
+                parts.append(Content.assemble(
+                    "context ", (filled, f"$text-{level}"), (rest, "$foreground 25%"),
+                    f" {tokens / 1000:.1f}k/{window / 1000:.0f}k ({used:.0%})"))
             else:
                 # Unknown window: auto-compaction cannot trigger, so say so
                 # instead of looking like it is merely waiting to.
-                parts.append(f"context ~{tokens / 1000:.1f}k tokens "
-                             "(auto-compaction off: unknown context window)")
+                parts.append(Content(f"context ~{tokens / 1000:.1f}k tokens "
+                                     "(auto-compaction off: unknown context window)"))
         if pane._tps is not None:
-            parts.append(f"{pane._tps:.0f} tokens per second")
+            parts.append(Content(f"{pane._tps:.0f} tokens per second"))
         if pane._cache_hit is not None:
-            parts.append(f"cache hit {pane._cache_hit:.0%}")
+            parts.append(Content(f"cache hit {pane._cache_hit:.0%}"))
         return parts
 
     @work(exclusive=True, group="statusbar")

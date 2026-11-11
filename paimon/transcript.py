@@ -4,6 +4,8 @@ Shared by every pane that shows an agent at work. ``SessionPane`` puts a
 prompt under one; ``AgentPane`` shows one and nothing else.
 """
 
+from pathlib import Path
+
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.widget import Widget
@@ -26,7 +28,10 @@ from .events import (
     UserInput,
 )
 from .skills import parse_skill_block
+from .sparkle import Hero
+from .theme import gauge
 from .ui import (
+    AssistantHeading,
     AssistantMessage,
     FoldedText,
     ToolCall,
@@ -59,9 +64,27 @@ class Transcript(VerticalScroll):
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._todo_panel: Static | None = None
+        self._hero: Hero | None = None
 
     def on_mount(self) -> None:
         self.anchor()
+
+    def show_welcome(self, cwd: Path) -> None:
+        """Open an empty conversation on the welcome sky.
+
+        Part of the log rather than over it, so it scrolls away with the
+        first exchange instead of having to be dismissed.
+        """
+        self._hero = Hero(cwd)
+        super().mount(self._hero)
+
+    def mount(self, *widgets, **kwargs):
+        # Whatever is logged first starts the conversation, and the welcome
+        # gives the log back to it.
+        if self._hero is not None:
+            self._hero.fold()
+            self._hero = None
+        return super().mount(*widgets, **kwargs)
 
     def add(self, renderable, classes: str = "") -> Static:
         widget = Static(renderable, classes=classes)
@@ -118,7 +141,9 @@ class Transcript(VerticalScroll):
 
     def _render_todos(self, todos: list[dict]) -> Content:
         done = sum(1 for t in todos if t.get("status") == "completed")
-        lines = [f"[$text-muted b]Plan[/][$text-muted]  {done}/{len(todos)}[/]"]
+        filled, rest = gauge(done / len(todos), min(len(todos) * 2, 16))
+        lines = [f"[$text-primary b]Plan[/]  [$text-success]{filled}[/][$foreground 25%]{rest}[/]"
+                 f"[$text-muted]  {done}/{len(todos)}[/]"]
         kwargs = {}
         for i, t in enumerate(todos):
             marker, style = _TODO_STYLE.get(t.get("status"), _TODO_STYLE["pending"])
@@ -130,6 +155,7 @@ class Transcript(VerticalScroll):
         """Empty the log for a different conversation."""
         self.remove_children()
         self._todo_panel = None
+        self._hero = None
 
 
 class EventRenderer:
@@ -200,10 +226,13 @@ class EventRenderer:
             if self._stream is None:
                 await self._close_content()
                 self._finish_tool_group()
-                widget = AssistantMessage("", heading=self._first_text_block)
+                # Only the first text block of a turn carries the heading;
+                # follow-up blocks (after tool calls) continue without it.
+                if self._first_text_block:
+                    await self._log.mount(AssistantHeading())
                 self._first_text_block = False
-                # Await the mount so the initial document (the Paimon heading)
-                # is rendered before the stream appends to it.
+                widget = AssistantMessage("")
+                # Await the mount so the stream has a document to append to.
                 await self._log.mount(widget)
                 self._stream = AssistantMessage.get_stream(widget)
             await self._stream.write(ev.text)

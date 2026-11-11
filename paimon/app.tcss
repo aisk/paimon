@@ -1,27 +1,39 @@
-/* Styles for PaimonApp. Loaded via PaimonApp.CSS_PATH. */
+/* Styles for PaimonApp. Loaded via PaimonApp.CSS_PATH.
+
+   Only theme variables are named here, so every theme works; the look these
+   were chosen against is Paimon's own (see theme.py): gold for what is
+   Paimon's or the user's, sky blue for what is under way, and the night
+   behind both. What moves is drawn in sparkle.py. */
 
 Screen { background: $background; }
+
+/* ---- masthead ---- */
+
+/* One row: it takes the place of the blank margin the panes used to open
+   with, so the name costs the conversation nothing. */
+#masthead { height: 1; margin: 0 2; padding: 0 1; text-wrap: nowrap; }
+
 /* 100% rather than the default 1fr: fr widths resolve against the container
    minus the widest sibling margins, and the status bar's own 0 2 margin would
    otherwise shave four dead columns off the right edge of every pane. */
 #panes { height: 1fr; width: 100%; }
-SessionPane, AgentPane { height: 1fr; margin: 1 2 0 2; }
+SessionPane, AgentPane, CommandPane { height: 1fr; margin: 0 2 0 2; }
 
 /* ---- pane tabs ---- */
 
 /* A compact strip along the bottom edge, hidden entirely while a single pane
    is open. Its first row is a separator; the second carries the labels. */
 #pane-tabs { dock: bottom; layout: horizontal; height: 2; padding: 0 2; }
-#pane-tabs-fill { width: 1fr; height: 2; color: $text-muted; }
+#pane-tabs-fill { width: 1fr; height: 2; color: $primary 25%; }
 .pane-tab {
     width: auto;
     height: 2;
     color: $text-muted;
     text-wrap: nowrap;
 }
-.pane-tab:hover { color: $text; background: $primary 6%; }
-.pane-tab.-active { color: $text; text-style: bold; }
-.pane-tab.-attention { color: $warning; }
+.pane-tab:hover { color: $text; background: $primary 8%; }
+.pane-tab.-active { color: $text-primary; text-style: bold; background: $primary 10%; }
+.pane-tab.-attention { color: $text-warning; text-style: bold; }
 
 /* The strip opens with a rule, so the status bar's own breathing room below
    would only hold the two apart for nothing. Spelled in full: a single-edge
@@ -32,7 +44,7 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     scrollbar-size-vertical: 1;
     scrollbar-background: transparent;
     scrollbar-background-hover: transparent;
-    scrollbar-color: $primary 55%;
+    scrollbar-color: $primary 45%;
     scrollbar-color-hover: $primary;
     scrollbar-color-active: $primary;
 }
@@ -41,11 +53,16 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 
 #log {
     height: 1fr;
-    padding: 0 1 1 1;
+    padding: 1 1 1 1;
     scrollbar-gutter: stable;
 }
 #log > * { margin-bottom: 1; }
+/* The welcome sky. Drawn cell by cell, so a line that does not fit is cut
+   rather than wrapped into the one under it. */
+.hero { height: auto; text-wrap: nowrap; text-overflow: clip; }
 .assistant { padding: 0 1; }
+/* "✦ Paimon", sitting directly on the answer it names. */
+#log > .assistant-heading { padding: 0 1; margin-bottom: 0; }
 .reasoning { color: $text-disabled; text-style: italic; text-opacity: 60%; }
 .tool-result { color: $text-disabled; }
 /* Consecutive agent tool calls collapse to one activity line. Expanding the
@@ -53,43 +70,43 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .tool-group {
     height: auto;
     padding: 0 1;
-    border-left: solid $surface-lighten-2;
+    border-left: outer $accent 35%;
 }
 .tool-group-header, .tool-entry-header {
     height: 1;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
-.tool-group-header:hover, .tool-entry-header:hover { background: $primary 8%; }
+.tool-group-header:hover, .tool-entry-header:hover { background: $accent 10%; }
 .tool-group-header:focus, .tool-entry-header:focus {
-    background: $primary 30%;
-    text-style: bold reverse;
+    background: $accent 25%;
+    text-style: bold;
 }
-#log:focus { background: $primary 4%; }
+#log:focus { background: $primary 3%; }
 .tool-group-body { height: auto; margin-top: 1; }
 .tool-entry { height: auto; }
 .tool-entry-header { padding-left: 1; color: $text-muted; }
 .tool-entry.-failed > .tool-entry-header,
-.tool-entry.-denied > .tool-entry-header { color: $warning; }
+.tool-entry.-denied > .tool-entry-header { color: $text-warning; }
 .tool-entry-detail {
     height: auto;
     margin: 0 0 1 2;
     padding-left: 1;
-    border-left: solid $surface-lighten-2;
+    border-left: solid $accent 30%;
 }
 .tool-entry-detail > .tool-result { padding-left: 1; }
 /* The calls a run_code script made, listed above its output. */
 .tool-nested { color: $text-muted; padding-left: 1; }
 /* A "!" command the user ran themselves: the same box as a step, told apart
    by its rule, since nothing the model did led to it. */
-.shell-step { height: auto; padding: 0 1; border-left: solid $accent; }
+.shell-step { height: auto; padding: 0 1; border-left: outer $secondary; }
 .edit-call { height: auto; }
 .edit-call-diff { margin-top: 1; }
-.todos { padding: 0 1; border-left: solid $primary 45%; }
+.todos { padding: 0 1; border-left: outer $primary 60%; }
 /* Unprompted, so it is the quietest block that still has a rule of its own.
    The Markdown widget's own default padding and $foreground would both win
    over "quiet", so both are restated here. */
-.recap { padding: 0 1; border-left: solid $accent 60%; color: $text-muted; }
+.recap { padding: 0 1; border-left: outer $secondary 60%; color: $text-muted; }
 /* A heading that slips past the recap instructions still belongs to the muted
    block, and the breathing room the log gives blocks is enough for it. */
 .recap MarkdownHeader { color: $text-muted; margin: 0 0 1 0; text-style: b; }
@@ -100,8 +117,8 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     width: 100%;
     height: auto;
     padding: 1 2;
-    background: $primary 12%;
-    border-left: solid $primary;
+    background: $primary 9%;
+    border-left: outer $primary;
 }
 
 /* ---- status, queue, prompt ---- */
@@ -111,7 +128,7 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     padding: 0 1;
     color: $text-muted;
 }
-#response-status LoadingIndicator { width: 3; height: 1; color: $primary; }
+#response-status .status-spinner { width: 2; height: 1; }
 #response-status .status-label { width: auto; }
 #queued { height: auto; padding: 0 1; color: $text-muted; }
 /* A background command's tab: its output fills the pane, with one line under
@@ -122,14 +139,29 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     min-height: 4;
     max-height: 12;
     padding: 0 1;
-    border: round $surface-lighten-2;
+    border: round $primary 30%;
     background: transparent;
+    /* The mode, as a chip set into the border. */
+    border-title-color: $background;
+    border-title-background: $primary;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
 }
 #prompt:focus { border: round $primary; background: transparent; }
+#prompt.-read { border-title-background: $accent; }
+#prompt.-auto { border-title-background: $success; }
+#prompt.-yolo { border-title-background: $warning; }
 /* A line starting with "!" runs as a shell command instead of being sent. */
-#prompt.bash { border: round $surface-lighten-2; }
-#prompt.bash:focus { border: round $accent; }
-#statusbar { height: 1; margin: 0 2 1 2; padding: 0 1; color: $text-muted; }
+#prompt.bash { border: round $secondary 40%; }
+#prompt.bash:focus { border: round $secondary; }
+#statusbar {
+    height: 1;
+    margin: 0 2 1 2;
+    padding: 0 1;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
 
 /* ---- permission confirmation and questions ---- */
 
@@ -137,13 +169,17 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
     height: auto;
     margin-top: 1;
     padding: 1 2;
-    border: round $surface-lighten-2;
+    border: round $warning 40%;
     background: transparent;
+    border-title-color: $background;
+    border-title-background: $warning;
+    border-title-style: bold;
 }
 .blocking-panel:focus, .blocking-panel:focus-within {
     border: round $warning;
     background: $warning 5%;
 }
+.question-panel { border: round $accent 40%; border-title-background: $accent; }
 .question-panel:focus, .question-panel:focus-within {
     border: round $accent;
     background: $accent 5%;
@@ -155,13 +191,16 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 
 /* ---- modal screens (login, pickers) ---- */
 
-LoginScreen, BrowserLoginScreen, PickerScreen, PromptScreen { align: center middle; }
+LoginScreen, BrowserLoginScreen, PickerScreen, PromptScreen {
+    align: center middle;
+    background: $background 70%;
+}
 #picker-box, #prompt-screen-box, #login-status {
     width: 70%; height: auto; max-height: 70%;
-    padding: 1 2; border: round $accent; background: $surface;
+    padding: 1 2; border: round $primary; background: $surface;
 }
 /* The sign-in address runs to many lines, and the input under it must stay in view. */
 BrowserLoginScreen #prompt-screen-box { max-height: 100%; overflow-y: auto; }
-#picker-title, #prompt-screen-title { margin-bottom: 1; }
+#picker-title, #prompt-screen-title { margin-bottom: 1; color: $text-primary; text-style: bold; }
 #picker-filter, #browser-login-notice, #browser-login-status, #browser-login-copy { margin-bottom: 1; }
-#picker-list { height: auto; max-height: 20; }
+#picker-list { height: auto; max-height: 20; background: transparent; }

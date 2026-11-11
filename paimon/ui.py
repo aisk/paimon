@@ -70,19 +70,24 @@ class UserMessage(Static):
         super().__init__(Content(body), classes="user-message")
 
 
-class AssistantMessage(Markdown):
-    """Markdown-rendered assistant response.
+class AssistantHeading(Static):
+    """Paimon's name over the first text block of a turn.
 
-    Only the first text block of a turn carries the Paimon heading; follow-up
-    blocks (after tool calls) continue without repeating it.
+    A widget of its own rather than the opening paragraph of the answer: a
+    streamed document is rewritten from its last block on, which would take
+    a heading that was the only block in it away with the first words.
     """
 
-    def __init__(self, body: str, *, heading: bool = True) -> None:
-        super().__init__(self._format_body(body, heading), classes="assistant")
+    def __init__(self) -> None:
+        super().__init__(Content.from_markup("[$text-primary b]✦ Paimon[/]"),
+                         classes="assistant-heading")
 
-    @staticmethod
-    def _format_body(body: str, heading: bool) -> str:
-        return f"**Paimon**\n\n{body}" if heading else body
+
+class AssistantMessage(Markdown):
+    """Markdown-rendered assistant response."""
+
+    def __init__(self, body: str) -> None:
+        super().__init__(body, classes="assistant")
 
 
 class RecapMessage(Markdown):
@@ -95,7 +100,7 @@ class RecapMessage(Markdown):
     every block inside it muted and quiet.
     """
 
-    HEADER = "⟲ While you were away"
+    HEADER = "✧ While you were away"
 
     def __init__(self, body: str) -> None:
         super().__init__(f"**{self.HEADER}**\n\n{body}", classes="recap")
@@ -504,6 +509,7 @@ class PromptInput(TextArea):
     """
 
     INPUT_HELP = "Enter send · Ctrl+J newline · / commands · Esc interrupt · Shift+Tab mode"
+    PLACEHOLDER = "Ask Paimon anything…"
 
     class Submitted(Message):
         def __init__(self, text: str) -> None:
@@ -652,6 +658,7 @@ class ConfirmPanel(BlockingPanel):
         # No ID: several panes can have a panel up at once, and a shared ID
         # would make an app-wide query resolve to whichever one is first.
         super().__init__(classes="blocking-panel confirm-panel")
+        self.border_title = " permission "
         self.tool_name = tool_name
         self.args = args
         # The subagents the call came from, outermost first (see
@@ -801,6 +808,7 @@ class QuestionPanel(BlockingPanel):
     def __init__(self, question: str, options: list[str],
                  future: "asyncio.Future[str | None]") -> None:
         super().__init__(classes="blocking-panel question-panel")
+        self.border_title = " question "
         self.question = self.summary = question
         self.options = list(options)
         self._future = future
