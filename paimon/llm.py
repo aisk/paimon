@@ -13,6 +13,7 @@ those lazily and raises ImportError for the rest.
 
 import importlib
 import inspect
+import os
 import platform
 import typing
 from functools import cache
@@ -118,13 +119,13 @@ def split_model_string(model: str) -> tuple[str, str]:
 # Left out on purpose: dated snapshots, superseded generations, and models
 # that are not general coding models (cyber, audio, deep research).
 _CURRENT = (
-    ("claude-fable-5-1", "claude-fable-5"),
+    ("claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"),
     ("claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"),
     ("claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-4-6-sonnet"),
-    ("claude-haiku-4-5", "claude-4-5-haiku"),
+    ("claude-haiku-5-5", "claude-haiku-4-5", "claude-4-5-haiku"),
     ("gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"),
     ("gpt-6-astra",),
-    ("gpt-5.6-terra",),
+    ("gpt-6.1-terra", "gpt-5.6-terra"),
     ("gpt-6-luna", "gpt-5.6-luna"),
     ("openai.gpt-5.6-sol",),
     ("openai.gpt-5.6-terra",),
@@ -137,7 +138,7 @@ _CURRENT = (
     ("glm-5.3-flash",),
     ("glm-5-turbo",),
     ("glm-5v-turbo",),
-    ("kimi-k3", "moonshotai/Kimi-K2.6", "kimi-k2-5"),
+    ("kimi-k3.1-pro", "kimi-k3", "kimi-k2.6", "moonshotai/Kimi-K2.6", "kimi-k2-5"),
     ("kimi-k2.7-code",),
     ("kimi-k2.7-code-highspeed",),
     ("deepseek-v4-pro", "deepseek-ai/DeepSeek-V4-Pro", "deepseek-v3-2"),
@@ -154,18 +155,30 @@ def known_models() -> list[str]:
     return sorted(typing.get_args(KnownModelName.__value__))
 
 
-def models_for(provider: str) -> list[str]:
-    """The current models of one provider, newest generation first."""
+def catalog(provider: str) -> list[str]:
+    """Every model name pydantic-ai lists for one provider."""
     if provider == ANTIGRAVITY_PROVIDER:
         return list(_ANTIGRAVITY_MODELS)
     if provider == CHATGPT_PROVIDER:
         # A ChatGPT plan serves OpenAI's own models; which ones depends on the plan.
         provider = "openai"
     prefix = provider + ":"
-    catalog = [name.removeprefix(prefix) for name in known_models() if name.startswith(prefix)]
-    current = [next((name for name in line if name in catalog), None) for line in _CURRENT]
+    return [name.removeprefix(prefix) for name in known_models() if name.startswith(prefix)]
+
+
+def successors(name: str) -> tuple[str, ...]:
+    """The row of _CURRENT that ``name`` belongs to, newest first."""
+    return next((row for row in _CURRENT if name in row), (name,))
+
+
+def models_for(provider: str) -> list[str]:
+    """The current models of one provider, newest generation first."""
+    if provider == ANTIGRAVITY_PROVIDER:
+        return list(_ANTIGRAVITY_MODELS)
+    listed = catalog(provider)
+    current = [next((name for name in line if name in listed), None) for line in _CURRENT]
     # A provider none of the rows know is shown whole rather than empty.
-    return [name for name in current if name] or catalog
+    return [name for name in current if name] or listed
 
 
 def _provider_resolved_key(provider_cls) -> str:
@@ -199,6 +212,14 @@ def build_model(model: str, api_base: str | None = None, api_key: str | None = N
     if api_base:
         if "base_url" in parameters:
             kwargs["base_url"] = api_base
+            if (not api_key and "anthropic_client" in parameters
+                    and os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                    and not os.environ.get("ANTHROPIC_API_KEY")):
+                # The provider only knows ANTHROPIC_API_KEY; the SDK's own
+                # client also reads the bearer token a proxy hands out.
+                from anthropic import AsyncAnthropic
+
+                kwargs = {"anthropic_client": AsyncAnthropic(base_url=api_base)}
         elif "openai_client" in parameters:
             # OpenAI-compatible providers with a fixed base_url (zai, deepseek,
             # moonshotai, ...) only take a custom endpoint via a full client.
@@ -211,7 +232,15 @@ def build_model(model: str, api_base: str | None = None, api_key: str | None = N
     if api_key and "openai_client" not in kwargs and "api_key" in parameters:
         kwargs["api_key"] = api_key
 
-    provider = provider_cls(**kwargs)
+    try:
+        provider = provider_cls(**kwargs)
+    except Exception:
+        if list(kwargs) != ["base_url"] or "api_key" not in parameters:
+            raise
+        # The provider found no key of its own (each looks in its own place,
+        # so it is asked rather than guessed at): a local endpoint that needs
+        # no auth takes a placeholder.
+        provider = provider_cls(**kwargs, api_key="unset")
     return infer_model(f"{provider_name}:{model_name}", provider_factory=lambda _: provider)
 
 

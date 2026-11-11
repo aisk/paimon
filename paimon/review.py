@@ -27,7 +27,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model
 
 from .errors import PaimonError
-from .llm import ask_once, split_model_string
+from .llm import ask_once, catalog, split_model_string, successors
 from .session import SHELL, SUMMARY, SUMMARY_PREFIX, shell_text, synthetic_kind
 
 # Seconds one review may take before it counts as unavailable.
@@ -102,31 +102,46 @@ _VERDICT = re.compile(r"\W*(ALLOW|BLOCK)\b\W*(.*)")
 
 # The reviewer for a model nobody chose one for: the fast, cheap tier of the
 # same provider, so it runs on the account already logged in. Keyed by that
-# reviewer, then turned around; a model no row names reviews itself.
+# reviewer, then turned around; a model no row names reviews itself, and so
+# does the fast tier. Only names pydantic-ai's catalog still lists appear
+# here, so a retired generation falls back to self-review. A reseller that
+# lists the model may not list the reviewer: default_model sorts that out.
 _REVIEWED_BY = {
-    "gpt-6-luna": ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"),
+    "gpt-6-luna": ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"),
     "gpt-5.6-luna": ("gpt-5.6-sol", "gpt-5.6-terra"),
     "openai.gpt-5.6-luna": ("openai.gpt-5.6-sol", "openai.gpt-5.6-terra"),
-    "openai-gpt-5-6-luna": ("openai-gpt-5-6-sol", "openai-gpt-5-6-terra"),
-    "claude-haiku-4-5": ("claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
-                         "claude-sonnet-5-5", "claude-sonnet-5"),
-    "claude-4-5-haiku": ("claude-opus-4-6", "claude-4-6-sonnet"),
-    "glm-5.3-flash": ("glm-5.3", "glm-5.2", "glm-5-turbo", "glm-5v-turbo"),
-    "deepseek-v4-flash": ("deepseek-v4-pro",),
-    "deepseek-ai/Deepseek-V4-Flash": ("deepseek-ai/DeepSeek-V4-Pro",),
-    "kimi-k2.7-code": ("kimi-k3",),
+    "claude-haiku-5-5": ("claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5",
+                         "claude-opus-4-8", "claude-sonnet-5-5", "claude-sonnet-4-6",
+                         "claude-4-6-sonnet"),
+    "glm-5.3-flash": ("glm-5.3", "glm-5.3-flashx", "glm-5-turbo", "glm-5v-turbo"),
+    "deepseek-flash": ("deepseek-v4-pro", "deepseek-ai/DeepSeek-V4-Pro"),
+    # Moonshot's "highspeed" names are the same model served faster at twice
+    # the price, not a cheap tier: the cheapest general model reviews.
+    "kimi-k2.6": ("kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k3", "kimi-k2.7-code",
+                  "kimi-k2.7-code-highspeed"),
 }
 DEFAULT_REVIEWERS = {name: reviewer for reviewer, names in _REVIEWED_BY.items() for name in names}
 
 
 def default_model(model: str) -> str | None:
-    """The reviewer DEFAULT_REVIEWERS pairs with ``model``, as "provider:name"."""
+    """The reviewer DEFAULT_REVIEWERS pairs with ``model``, as "provider:name".
+
+    A provider that lists the model but not its reviewer (a reseller a
+    generation behind) gets the newest fast tier it does list, or none. A
+    name the provider's catalog does not know at all is a custom endpoint,
+    which serves what it serves: the pairing is taken at its word there.
+    """
     try:
         provider, name = split_model_string(model)
     except ValueError:
         return None
     reviewer = DEFAULT_REVIEWERS.get(name)
-    return f"{provider}:{reviewer}" if reviewer else None
+    if not reviewer:
+        return None
+    listed = catalog(provider)
+    if name in listed and reviewer not in listed:
+        reviewer = next((older for older in successors(reviewer) if older in listed), None)
+    return f"{provider}:{reviewer}" if reviewer and reviewer != name else None
 
 
 class ReviewUnavailable(PaimonError):

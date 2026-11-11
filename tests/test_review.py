@@ -49,13 +49,64 @@ class DefaultModelTest(unittest.TestCase):
         self.assertEqual(review.default_model("openai:gpt-5.6-sol"), "openai:gpt-5.6-luna")
         self.assertEqual(review.default_model("openai:gpt-6.1-sol"), "openai:gpt-6-luna")
         self.assertEqual(review.default_model("anthropic:claude-opus-5-5"),
-                         "anthropic:claude-haiku-4-5")
+                         "anthropic:claude-haiku-5-5")
 
     def test_every_reviewer_is_a_model_its_provider_lists(self) -> None:
         known = {name.partition(":")[2] for name in llm.known_models()}
         self.assertLessEqual(set(review.DEFAULT_REVIEWERS.values()), known)
         self.assertLessEqual(set(review.DEFAULT_REVIEWERS), known)
-        self.assertEqual(review.default_model("zai/glm-5.2"), "zai:glm-5.3-flash")
+        self.assertEqual(review.default_model("zai/glm-5.3"), "zai:glm-5.3-flash")
+        # Provider by provider: whatever a catalog model is paired with, that
+        # same provider lists.
+        for qualified in llm.known_models():
+            reviewer = review.default_model(qualified)
+            if reviewer:
+                self.assertIn(reviewer, llm.known_models(), qualified)
+                self.assertNotEqual(reviewer, qualified)
+
+    def test_a_reseller_gets_the_fast_tier_it_lists_or_none(self) -> None:
+        self.assertEqual(review.default_model("snowflake:claude-opus-5-5"),
+                         "snowflake:claude-haiku-4-5")
+        self.assertIsNone(review.default_model("huggingface:deepseek-ai/DeepSeek-V4-Pro"))
+
+    def test_a_custom_endpoint_keeps_the_pairing(self) -> None:
+        """A name the provider's own catalog does not know is served by a
+        custom api_base, which the catalog says nothing about."""
+        self.assertEqual(review.default_model("openai:glm-5.3"), "openai:glm-5.3-flash")
+
+    def test_the_reviewer_is_never_dearer_than_the_model(self) -> None:
+        from genai_prices import Usage, calc_price
+
+        def cost(provider: str, name: str):
+            usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
+            try:
+                return calc_price(usage, name, provider_id=provider).total_price
+            except LookupError:
+                return None
+
+        for provider in ("anthropic", "openai", "zai", "deepseek", "moonshotai"):
+            for name in llm.catalog(provider):
+                reviewer = review.DEFAULT_REVIEWERS.get(name)
+                ours, theirs = cost(provider, name), reviewer and cost(provider, reviewer)
+                if ours is not None and theirs is not None:
+                    self.assertLessEqual(theirs, ours, f"{provider}:{name} -> {reviewer}")
+
+    def test_every_current_model_of_a_paired_provider_has_a_reviewer(self) -> None:
+        """A provider the pairing covers must not quietly fall back to
+        self-review: every model _CURRENT lists for it is either paired to a
+        reviewer or is itself a fast tier, apart from the fast tiers of a
+        generation the current one has replaced, which review themselves as
+        a model no row names does."""
+        paired = ("anthropic", "openai", "zai", "deepseek", "moonshotai")
+        catalog = {name.partition(":")[2] for name in llm.known_models()
+                   if name.partition(":")[0] in paired}
+        self_review = {older for reviewer in review.DEFAULT_REVIEWERS.values()
+                       for older in llm.successors(reviewer)[1:]
+                       if older not in review.DEFAULT_REVIEWERS}
+        listed = {name for row in llm._CURRENT for name in row
+                  if name in catalog and name not in self_review}
+        self.assertLessEqual(listed, set(review.DEFAULT_REVIEWERS)
+                             | set(review.DEFAULT_REVIEWERS.values()))
 
     def test_anything_else_has_none(self) -> None:
         for model in ("zai:glm-4.7", "test:stub", "unqualified", ""):
@@ -111,7 +162,7 @@ class TranscriptTest(unittest.TestCase):
         self.assertIn("user: and the slow one", lines)
         self.assertTrue(any(line.startswith("user: yyy") and "more chars" in line
                             for line in lines), "a huge message is clipped, not dropped")
-        self.assertEqual(lines[-1], 'agent called shell: {"command": "git push"}')
+        self.assertEqual(lines[-1], 'agent called shell: {"command":"git push"}')
         self.assertIn("pytest -k 119 ", transcript, "the newest calls stay")
         self.assertNotIn("pytest -k 0 ", transcript, "the oldest go first")
         self.assertRegex(lines[1], r"^\[\d+ lines left out\]$")
@@ -153,7 +204,7 @@ class JudgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(verdict, Verdict(False, "the user asked for a fix, not a push"))
         self.assertIn("user: fix the flaky test", question)
-        self.assertIn('agent called shell: {"command": "pytest"}', question)
+        self.assertIn('agent called shell: {"command":"pytest"}', question)
         self.assertIn('"command": "git push"', question)
         self.assertIn(f"<cwd>{Path('/work')}</cwd>", question)
         self.assertNotIn("surely wants", question, "the agent's own case for it is left out")

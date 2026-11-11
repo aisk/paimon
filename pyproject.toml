@@ -2,12 +2,12 @@
 name = "paimon"
 description = "A minimal code agent built on pydantic-ai + textual"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = [
     "httpx>=0.27",
     "genai-prices>=0.1.6",
-    "pydantic-ai-slim[openai,anthropic,google]>=2.54.0",
+    "pydantic-ai-slim[openai,anthropic,google]>=2.66.0",
     "textual>=8.2.7",
     "textual-serve>=1.1.3",
     "pyyaml>=6",

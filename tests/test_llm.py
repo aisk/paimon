@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -55,9 +56,36 @@ class BuildModelTest(unittest.TestCase):
         self.assertEqual(model.client.api_key, "sk-configured")
 
     def test_custom_base_without_any_key_still_builds(self) -> None:
-        """Local endpoints that need no auth keep working on a placeholder."""
-        with patch.dict("os.environ", {}, clear=True):
+        """Local endpoints that need no auth keep working on a placeholder.
+
+        The environment keeps its system variables: Windows cannot build an
+        SSL context without them, and importing a provider may import a
+        library that builds one."""
+        without_keys = {k: v for k, v in os.environ.items() if not k.endswith("_API_KEY")}
+        with patch.dict("os.environ", without_keys, clear=True):
             model = build_model("zai:glm-5.2", api_base="http://localhost:8080/v4")
+        self.assertEqual(model.client.api_key, "unset")
+
+    def test_custom_base_leaves_the_key_to_a_provider_that_finds_its_own(self) -> None:
+        """Google's client keeps its key where no other provider does: it must
+        be asked for it, not second-guessed into a placeholder."""
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "g-from-env"}):
+            os.environ.pop("GEMINI_API_KEY", None)
+            model = build_model("google:gemini-3-pro", api_base="http://localhost:8080")
+        self.assertEqual(model.client._api_client.api_key, "g-from-env")
+
+    def test_custom_base_takes_anthropics_bearer_token(self) -> None:
+        with patch.dict("os.environ", {"ANTHROPIC_AUTH_TOKEN": "tok"}):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            model = build_model("anthropic:claude-opus-5-5", api_base="http://localhost:8080")
+        self.assertEqual(model.client.auth_token, "tok")
+        self.assertIsNone(model.client.api_key)
+
+    def test_custom_base_without_any_key_builds_anthropic_too(self) -> None:
+        without_keys = {k: v for k, v in os.environ.items()
+                        if not k.endswith(("_API_KEY", "_AUTH_TOKEN"))}
+        with patch.dict("os.environ", without_keys, clear=True):
+            model = build_model("anthropic:claude-opus-5-5", api_base="http://localhost:8080")
         self.assertEqual(model.client.api_key, "unset")
 
     def test_missing_sdk_reports_the_provider_by_name(self) -> None:
