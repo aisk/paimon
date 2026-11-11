@@ -177,18 +177,22 @@ class RecapTest(AppTestCase):
 
     async def test_a_pane_left_before_the_wait_runs_out_asks_for_nothing(self) -> None:
         # Not just shown nowhere: a recap nobody will see is not paid for.
-        app = self.make_app(config=self._config(idle=0.5))
+        # The wait is run out by hand rather than by the clock: a short one
+        # can fire before a slow machine has seen it armed or left the pane.
+        app = self.make_app(config=self._config(idle=30))
         with patch("paimon.agent.build_model", return_value=self._model()):
             async with app.run_test() as pilot:
                 first = app.pane
                 await self._finish_a_turn(app, pilot)
-                await self._armed(app, pilot)
+                armed = await self._armed(app, pilot)
                 recap = AsyncMock(return_value=self.RECAP)
                 first.agent.recap = recap
 
                 await app.action_new_pane()
                 self.assertIsNot(app.pane, first)
-                await self._wait_for(pilot, lambda: first._recap_timer is None)
+                armed.stop()
+                first._recap_due()
+                self.assertIsNone(first._recap_timer)
                 await self._stays_away(pilot, lambda: recap.await_count > 0)
                 self.assertFalse(app.query(RecapMessage))
 
