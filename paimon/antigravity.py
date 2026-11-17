@@ -6,7 +6,7 @@ as Google's own Antigravity client and calls the internal endpoint that
 client talks to. That is outside what the plan is sold for and probably
 against its terms: Google may throttle or close an account used this way, and
 the endpoint can change or stop answering without notice. NOTICE says so
-wherever a login starts.
+wherever a login starts, and the login waits for it to be accepted.
 
 The endpoint speaks the Gemini dialect inside an envelope of its own, for
 Gemini, Claude and GPT-OSS models alike. AntigravityModel lets pydantic-ai's

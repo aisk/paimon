@@ -237,21 +237,47 @@ class LoginTest(AppTestCase):
                 await self._wait_for(pilot, lambda: app.config.model == "chatgpt:gpt-5.5")
                 self.assertEqual(app.config.providers, {})
 
-    async def test_antigravity_login_shows_that_it_is_unsupported(self) -> None:
+    async def _open_antigravity_login(self, app: PaimonApp, pilot) -> None:
+        app.action_login()
+        await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+        app.screen.dismiss("antigravity")
+        await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
+        notice = app.screen.query_one("#browser-login-notice", Static)
+        self.assertIn("at your own risk", str(notice.render()))
+
+    async def test_antigravity_login_signs_in_only_once_the_risk_is_accepted(self) -> None:
+        started: list[bool] = []
+
         async def sign_in(show_url, redirect) -> None:
+            started.append(True)
             await redirect
 
         app = self.make_app()
         with patch("paimon.antigravity.login", sign_in):
             async with app.run_test() as pilot:
-                app.action_login()
-                await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
-                app.screen.dismiss("antigravity")
-                await self._wait_for(pilot, lambda: isinstance(app.screen, BrowserLoginScreen))
-                notice = app.screen.query_one("#browser-login-notice", Static)
-                self.assertIn("at your own risk", str(notice.render()))
+                await self._open_antigravity_login(app, pilot)
+                await pilot.pause()
+                self.assertEqual(started, [])
+                self.assertFalse(app.screen.query("#prompt-screen-input"))
+                await pilot.click("#browser-login-accept")
+                await self._wait_for(pilot, lambda: started == [True])
+                self.assertFalse(app.screen.query("#browser-login-confirm"))
+                self.assertTrue(app.screen.query_one("#prompt-screen-input", Input).has_focus)
                 await pilot.press("escape")
                 await self._wait_for(pilot, lambda: self._login_screens(app) == [])
+
+    async def test_antigravity_login_declined_signs_nothing_in(self) -> None:
+        async def sign_in(show_url, redirect) -> None:
+            self.fail("signed in without the risk accepted")
+
+        app = self.make_app()
+        with patch("paimon.antigravity.login", sign_in):
+            async with app.run_test() as pilot:
+                await self._open_antigravity_login(app, pilot)
+                # Cancel holds the focus, so Enter alone declines.
+                await pilot.press("enter")
+                await self._wait_for(pilot, lambda: self._login_screens(app) == [])
+                self.assertEqual(app.config.model, "test-model")
 
     async def test_a_cancelled_chatgpt_login_keeps_the_model(self) -> None:
         async def sign_in(show_url, redirect) -> None:
