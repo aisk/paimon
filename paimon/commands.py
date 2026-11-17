@@ -159,6 +159,31 @@ def _read_api_key(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _accept_notice(provider: str, accepted: bool) -> bool:
+    """Show the risk a plan's sign-in carries and have it accepted first.
+
+    A plan with no NOTICE needs nothing. With no terminal to answer on, only
+    --accept-risk lets the sign-in go ahead: a script must not take the risk
+    by default just because nobody could be asked.
+    """
+    import importlib
+
+    notice = getattr(importlib.import_module(f".{provider}", __package__), "NOTICE", None)
+    if not notice:
+        return True
+    print(f"paimon: {notice}\n", file=sys.stderr)
+    if accepted:
+        return True
+    if not sys.stdin.isatty():
+        print("paimon: nothing to confirm this on, pass --accept-risk to sign in anyway", file=sys.stderr)
+        return False
+    print("Sign in anyway? [y/N] ", end="", file=sys.stderr, flush=True)
+    if sys.stdin.readline().strip().lower() in ("y", "yes"):
+        return True
+    print("paimon: sign-in cancelled", file=sys.stderr)
+    return False
+
+
 def _browser_login(provider: str) -> None:
     """Sign in to a plan from a terminal: print the address, wait for the
     browser to come back, or for the redirect URL pasted on stdin."""
@@ -167,8 +192,6 @@ def _browser_login(provider: str) -> None:
     import threading
 
     plan = importlib.import_module(f".{provider}", __package__)
-    if notice := getattr(plan, "NOTICE", None):
-        print(f"paimon: {notice}\n", file=sys.stderr)
 
     def show_url(url: str) -> None:
         print(f"Open this address to sign in with {LOGIN_PROVIDERS[provider]}:\n\n{url}\n", file=sys.stderr)
@@ -222,6 +245,9 @@ def login(argv: list) -> int:
                             help="read the API key from stdin")
     parser.add_argument("--force", action="store_true",
                         help="set an unreadable config aside and log in fresh")
+    parser.add_argument("--accept-risk", action="store_true",
+                        help="sign in to a plan whose provider does not support it (antigravity) "
+                             "without being asked to confirm")
     args = parser.parse_args(argv)
 
     try:
@@ -241,6 +267,9 @@ def login(argv: list) -> int:
                 f"'paimon model {provider}:name' selects it")
     except ValueError as exc:
         print(f"paimon: {exc}", file=sys.stderr)
+        return 1
+    # Before the config is touched: a declined sign-in leaves everything as it was.
+    if provider in LOGIN_PROVIDERS and not _accept_notice(provider, args.accept_risk):
         return 1
 
     try:

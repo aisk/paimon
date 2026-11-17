@@ -203,4 +203,6 @@ LoginScreen, BrowserLoginScreen, PickerScreen, PromptScreen {
 BrowserLoginScreen #prompt-screen-box { max-height: 100%; overflow-y: auto; }
 #picker-title, #prompt-screen-title { margin-bottom: 1; color: $text-primary; text-style: bold; }
 #picker-filter, #browser-login-notice, #browser-login-status, #browser-login-copy { margin-bottom: 1; }
+#browser-login-confirm { height: auto; }
+#browser-login-accept { margin-right: 2; }
 #picker-list { height: auto; max-height: 20; background: transparent; }

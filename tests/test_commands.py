@@ -39,9 +39,10 @@ class CommandTestCase(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data), encoding="utf-8")
 
-    def _run(self, *argv: str, stdin: str = "") -> tuple[int, str, str]:
+    def _run(self, *argv: str, stdin: str = "", tty: bool = False) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        fake_stdin = SimpleNamespace(read=lambda: stdin, isatty=lambda: False)
+        lines = io.StringIO(stdin)
+        fake_stdin = SimpleNamespace(read=lambda: stdin, readline=lines.readline, isatty=lambda: tty)
         with patch("sys.argv", ["paimon", *argv]), patch("sys.stdin", fake_stdin), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as ctx:
@@ -265,15 +266,55 @@ class LoginTest(CommandTestCase):
         sign_in.assert_called_once_with("chatgpt")
         self.assertEqual(json.loads(config_path().read_text()), {"model": "chatgpt:gpt-5.5"})
 
-    def test_antigravity_login_says_it_is_unsupported_before_signing_in(self) -> None:
+    def _antigravity_login(self, *flags: str, stdin: str = "", tty: bool = False) -> tuple[int, str, list]:
+        addresses: list[str] = []
+
         async def sign_in(show_url, pasted) -> None:
             show_url("https://accounts.example/authorize")
+            addresses.append("https://accounts.example/authorize")
 
         with patch("paimon.antigravity.login", sign_in), patch("paimon.antigravity.open_browser"):
-            code, out, err = self._run("login", "--model", "antigravity:gemini-3.8-flash-high")
+            code, out, err = self._run("login", "--model", "antigravity:gemini-3.8-flash-high", *flags,
+                                       stdin=stdin, tty=tty)
+        return code, err, addresses
+
+    def test_antigravity_login_says_it_is_unsupported_before_signing_in(self) -> None:
+        code, err, addresses = self._antigravity_login("--accept-risk")
         self.assertEqual(code, 0)
+        self.assertEqual(len(addresses), 1)
         self.assertIn("at your own risk", err)
         self.assertLess(err.index("at your own risk"), err.index("https://accounts.example/authorize"))
+
+    def test_antigravity_login_without_a_terminal_needs_accept_risk(self) -> None:
+        self._write_config(model="zai:glm-4.7")
+        code, err, addresses = self._antigravity_login()
+        self.assertEqual(code, 1)
+        self.assertEqual(addresses, [])
+        self.assertIn("--accept-risk", err)
+        self.assertEqual(json.loads(config_path().read_text())["model"], "zai:glm-4.7")
+
+    def test_antigravity_login_on_a_terminal_asks_first(self) -> None:
+        code, err, addresses = self._antigravity_login(stdin="y\n", tty=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(addresses), 1)
+        self.assertLess(err.index("[y/N]"), err.index("https://accounts.example/authorize"))
+        self.assertEqual(json.loads(config_path().read_text())["model"], "antigravity:gemini-3.8-flash-high")
+
+    def test_antigravity_login_declined_on_a_terminal_signs_nothing_in(self) -> None:
+        for answer in ("\n", "n\n", ""):
+            with self.subTest(answer=answer):
+                code, err, addresses = self._antigravity_login(stdin=answer, tty=True)
+                self.assertEqual(code, 1)
+                self.assertEqual(addresses, [])
+                self.assertIn("cancelled", err)
+                self.assertFalse(config_path().exists())
+
+    def test_chatgpt_login_asks_nothing(self) -> None:
+        with patch("paimon.commands._browser_login") as sign_in:
+            code, out, err = self._run("login", "--model", "chatgpt:gpt-5.5", tty=True)
+        self.assertEqual(code, 0)
+        self.assertNotIn("[y/N]", err)
+        sign_in.assert_called_once_with("chatgpt")
 
     def test_chatgpt_login_refuses_an_api_key(self) -> None:
         with patch.dict("os.environ", {"MY_KEY": "sk-openai"}), \

@@ -20,7 +20,7 @@ import importlib
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
@@ -176,13 +176,40 @@ class BrowserLoginScreen(ModalScreen[bool]):
             if notice := getattr(self._plan, "NOTICE", None):
                 yield Static(Content.from_markup("[$text-warning]$notice[/]", notice=notice),
                              id="browser-login-notice")
-            yield Static("Opening the browser…", id="browser-login-status")
-            yield Button("Copy link", id="browser-login-copy", compact=True, disabled=True)
-            yield Input(placeholder="or paste the final redirect URL here", id="prompt-screen-input")
+                # Nothing is opened or listened on until the risk is accepted.
+                with Horizontal(id="browser-login-confirm"):
+                    yield Button("Sign in anyway", id="browser-login-accept", variant="warning", compact=True)
+                    yield Button("Cancel", id="browser-login-decline", compact=True)
+            else:
+                yield from self._sign_in_widgets()
+
+    @staticmethod
+    def _sign_in_widgets() -> list:
+        return [Static("Opening the browser…", id="browser-login-status"),
+                Button("Copy link", id="browser-login-copy", compact=True, disabled=True),
+                Input(placeholder="or paste the final redirect URL here", id="prompt-screen-input")]
 
     def on_mount(self) -> None:
+        if self.query("#browser-login-confirm"):
+            self.query_one("#browser-login-decline", Button).focus()
+        else:
+            self._start()
+
+    def _start(self) -> None:
         self.query_one("#prompt-screen-input", Input).focus()
         self._flow()
+
+    @on(Button.Pressed, "#browser-login-accept")
+    async def _accept(self, event: Button.Pressed) -> None:
+        event.stop()
+        await self.query_one("#browser-login-confirm").remove()
+        await self.query_one("#prompt-screen-box").mount_all(self._sign_in_widgets())
+        self._start()
+
+    @on(Button.Pressed, "#browser-login-decline")
+    def _decline(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(False)
 
     def _show_url(self, url: str) -> None:
         lead = ("Finish signing in in the browser. If it did not open, visit:"
