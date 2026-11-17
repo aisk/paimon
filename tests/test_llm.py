@@ -113,5 +113,34 @@ class ProviderAvailabilityTest(unittest.TestCase):
         with patch("paimon.llm.known_models", return_value=[
             "zai:model", "anthropic:one", "bedrock:model", "anthropic:two", "unqualified",
         ]), patch("paimon.login.is_provider_available", side_effect=lambda name: name != "bedrock"):
-            self.assertEqual(_providers(), ["anthropic", "antigravity", "chatgpt", "zai"])
+            self.assertEqual(_providers(), ["kilo", "anthropic", "antigravity", "chatgpt", "zai"])
+
+
+class KiloTest(unittest.TestCase):
+    def test_builds_without_any_key(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            model = build_model("kilo:cohere/north-mini-code:free")
+        self.assertEqual(type(model).__name__, "OpenAIChatModel")
+        self.assertEqual(model.model_name, "cohere/north-mini-code:free")
+        self.assertEqual(model.base_url, "https://ai-gateway.kilo.ai/api/v1/")
+        self.assertEqual(model.client.api_key, "anonymous")
+
+    def test_a_stored_key_beats_the_environment(self) -> None:
+        with patch.dict("os.environ", {"KILO_API_KEY": "from-env"}):
+            self.assertEqual(build_model("kilo:kilo-auto/free").client.api_key, "from-env")
+            self.assertEqual(build_model("kilo:kilo-auto/free", api_key="stored").client.api_key,
+                             "stored")
+
+    def test_listed_models_know_their_window_and_others_still_build(self) -> None:
+        self.assertEqual(build_model("kilo:cohere/north-mini-code:free").context_window, 256_000)
+        self.assertEqual(build_model("kilo:anthropic/claude-sonnet-5.5").model_name,
+                         "anthropic/claude-sonnet-5.5")
+
+    def test_is_available_and_lists_its_free_models(self) -> None:
+        from paimon.llm import models_for
+
+        self.assertTrue(is_provider_available("kilo"))
+        models = models_for("kilo")
+        self.assertEqual(models[0], "cohere/north-mini-code:free")
+        self.assertTrue(all("free" in name for name in models))
 

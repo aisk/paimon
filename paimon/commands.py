@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .config import UNSET, Config, config_path
 from .errors import PaimonError
-from .llm import LOGIN_PROVIDERS, build_model, require_provider, signed_in_plans, split_model_string
+from .llm import KILO_PROVIDER, LOGIN_PROVIDERS, build_model, require_provider, signed_in_plans, split_model_string
 from .logtext import render_record, settled_parts, superseded_seqs
 from .session import Session, synthetic_kind
 
@@ -116,7 +116,8 @@ def status(argv: list) -> int:
         if provider in LOGIN_PROVIDERS:
             key_note = f"{LOGIN_PROVIDERS[provider]} plan"
         else:
-            key_note = "api key set" if api_key else "no api key stored"
+            key_note = "api key set" if api_key else (
+                "free models only" if provider == KILO_PROVIDER else "no api key stored")
         print(f"paimon {version()}")
         print(f"model: {config.model} ({key_note})")
         if api_base:

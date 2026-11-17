@@ -295,6 +295,34 @@ class LoginTest(AppTestCase):
                 self.assertNotIsInstance(app.screen, PickerScreen)
                 self.assertEqual(app.config.model, "test-model")
 
+    async def test_kilo_is_offered_first_and_needs_no_key(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.action_login()
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            self.assertEqual(app.screen._options[0], "kilo")
+            app.screen.dismiss("kilo")
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
+            notice = app.screen.query_one("#browser-login-notice", Static)
+            self.assertIn("train on your prompts", str(notice.render()))
+            app.screen.dismiss("")
+            await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
+            self.assertEqual(app.screen._options[0], "kilo:cohere/north-mini-code:free")
+            self.assertEqual(Config.load().providers, {}, "a keyless login stores nothing")
+            app.screen.dismiss("kilo:cohere/north-mini-code:free")
+            await self._wait_for(pilot, lambda: Config.load().model == "kilo:cohere/north-mini-code:free")
+
+    async def test_a_kilo_key_is_stored(self) -> None:
+        app = self.make_app()
+        async with app.run_test() as pilot:
+            app.action_login()
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            app.screen.dismiss("kilo")
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PromptScreen))
+            app.screen.dismiss("sk-kilo")
+            await self._wait_for(pilot, lambda: "Select model" in getattr(app.screen, "_title", ""))
+            self.assertEqual(Config.load().providers, {"kilo": {"api_key": "sk-kilo"}})
+
     async def _log_in_with_key(self, app: PaimonApp, pilot, provider: str, key: str) -> None:
         """Drive the login up to the model picker that follows it."""
         app.action_login()

@@ -36,6 +36,27 @@ ANTIGRAVITY_PROVIDER = "antigravity"
 # rather than an endpoint and a key, with the name of the plan each spends.
 LOGIN_PROVIDERS = {CHATGPT_PROVIDER: "ChatGPT", ANTIGRAVITY_PROVIDER: "Antigravity"}
 
+# Kilo's gateway, OpenAI-compatible, answers its free models without a key:
+# rate limited by IP, and the providers behind it may keep and train on what
+# is sent. A key, stored or in KILO_API_KEY, opens the paid models too.
+KILO_PROVIDER = "kilo"
+KILO_API_BASE = "https://ai-gateway.kilo.ai/api/v1"
+KILO_NOTICE = ("Free models need no key, but the providers behind them may keep and "
+               "train on your prompts and code, and use is limited to 200 requests "
+               "an hour per IP address.")
+# The free models offered, best for coding first, with their context windows
+# (pydantic-ai has no record of them). Kept by hand from the gateway's
+# /models, where they come and go; any other name can be typed in.
+# kilo-auto/free switches models behind one name and failed tool turns when
+# tried, so it is last rather than first.
+_KILO_MODELS = {
+    "cohere/north-mini-code:free": 256_000,
+    "particle-ai/particle-1:free": 1_048_576,
+    "reflection/beam-free": 1_048_576,
+    "nvidia/nemotron-3-ultra-550b-a55b:free": 1_000_000,
+    "kilo-auto/free": 256_000,
+}
+
 # What an Antigravity plan serves, by the names its endpoint takes. The
 # thinking level is part of the name. Kept by hand from pi-antigravity's
 # src/models/models.ts (ANTIGRAVITY_ROUTING), see paimon.antigravity for the
@@ -73,7 +94,7 @@ def provider_class(provider_name: str):
 
 def is_provider_available(provider_name: str) -> bool:
     """Whether this provider can be constructed with the installed dependencies."""
-    if provider_name in LOGIN_PROVIDERS:
+    if provider_name in LOGIN_PROVIDERS or provider_name == KILO_PROVIDER:
         return True
     try:
         infer_provider_class(provider_name)
@@ -159,6 +180,8 @@ def catalog(provider: str) -> list[str]:
     """Every model name pydantic-ai lists for one provider."""
     if provider == ANTIGRAVITY_PROVIDER:
         return list(_ANTIGRAVITY_MODELS)
+    if provider == KILO_PROVIDER:
+        return list(_KILO_MODELS)
     if provider == CHATGPT_PROVIDER:
         # A ChatGPT plan serves OpenAI's own models; which ones depends on the plan.
         provider = "openai"
@@ -173,8 +196,8 @@ def successors(name: str) -> tuple[str, ...]:
 
 def models_for(provider: str) -> list[str]:
     """The current models of one provider, newest generation first."""
-    if provider == ANTIGRAVITY_PROVIDER:
-        return list(_ANTIGRAVITY_MODELS)
+    if provider in (ANTIGRAVITY_PROVIDER, KILO_PROVIDER):
+        return catalog(provider)
     listed = catalog(provider)
     current = [next((name for name in line if name in listed), None) for line in _CURRENT]
     # A provider none of the rows know is shown whole rather than empty.
@@ -205,6 +228,8 @@ def build_model(model: str, api_base: str | None = None, api_key: str | None = N
         from . import antigravity
 
         return antigravity.build_model(model_name)
+    if provider_name == KILO_PROVIDER:
+        return _build_kilo_model(model_name, api_base, api_key)
     provider_cls = provider_class(provider_name)
     parameters = inspect.signature(provider_cls.__init__).parameters
 
@@ -242,6 +267,24 @@ def build_model(model: str, api_base: str | None = None, api_key: str | None = N
         # no auth takes a placeholder.
         provider = provider_cls(**kwargs, api_key="unset")
     return infer_model(f"{provider_name}:{model_name}", provider_factory=lambda _: provider)
+
+
+def _build_kilo_model(model_name: str, api_base: str | None, api_key: str | None) -> Model:
+    """A model on Kilo's gateway, keyless unless a key is stored or in KILO_API_KEY.
+
+    Plain chat completions: the gateway speaks OpenRouter's dialect but
+    leaves out the ``provider`` field pydantic-ai's OpenRouterModel requires.
+    """
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    # The OpenAI client insists on some key; the gateway takes a request
+    # with an unknown one as anonymous.
+    key = api_key or os.environ.get("KILO_API_KEY") or "anonymous"
+    provider = OpenAIProvider(base_url=api_base or KILO_API_BASE, api_key=key)
+    window = _KILO_MODELS.get(model_name)
+    return OpenAIChatModel(model_name, provider=provider,
+                           profile={"context_window": window} if window else None)
 
 
 def request_settings(model: Model, cache_key: str | None = None) -> dict:

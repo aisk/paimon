@@ -30,12 +30,17 @@ from textual.style import Style
 
 from paimon import llm
 from paimon.errors import PaimonError
-from paimon.llm import LOGIN_PROVIDERS, is_provider_available
+from paimon.llm import KILO_NOTICE, KILO_PROVIDER, LOGIN_PROVIDERS, is_provider_available
+
+# How the picker shows the providers that need saying more than their name.
+_PROVIDER_LABELS = {KILO_PROVIDER: "kilo — free models, no key needed"}
 
 
 def _providers() -> list[str]:
+    """Kilo first, as the one that works without an account, then the rest by name."""
     names = {name.split(":", 1)[0] for name in llm.known_models() if ":" in name}
-    return sorted(name for name in names | set(LOGIN_PROVIDERS) if is_provider_available(name))
+    rest = sorted(name for name in names | set(LOGIN_PROVIDERS) if is_provider_available(name))
+    return [KILO_PROVIDER, *(name for name in rest if name != KILO_PROVIDER)]
 
 
 class PickerScreen(ModalScreen[str | None]):
@@ -43,11 +48,13 @@ class PickerScreen(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(self, title: str, options: list[str]) -> None:
+    def __init__(self, title: str, options: list[str], labels: dict[str, str] | None = None) -> None:
         super().__init__()
         self._title = title
         self._options = options
         self._filtered: list[str] = options
+        # What an option shows and is filtered on, when not its own value.
+        self._labels = labels or {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="picker-box"):
@@ -61,11 +68,11 @@ class PickerScreen(ModalScreen[str | None]):
 
     def _populate(self, query: str) -> None:
         q = query.strip().lower()
-        self._filtered = [o for o in self._options if q in o.lower()]
+        self._filtered = [o for o in self._options if q in self._labels.get(o, o).lower()]
         ol = self.query_one("#picker-list", OptionList)
         ol.clear_options()
         for o in self._filtered:
-            ol.add_option(Option(o, id=o))
+            ol.add_option(Option(self._labels.get(o, o), id=o))
         if self._filtered:
             ol.action_first()
 
@@ -123,15 +130,20 @@ class PromptScreen(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(self, title: str, *, password: bool = False, placeholder: str = "") -> None:
+    def __init__(self, title: str, *, password: bool = False, placeholder: str = "",
+                 notice: str = "") -> None:
         super().__init__()
         self._title = title
         self._password = password
         self._placeholder = placeholder
+        self._notice = notice
 
     def compose(self) -> ComposeResult:
         with Vertical(id="prompt-screen-box"):
             yield Static(self._title, id="prompt-screen-title")
+            if self._notice:
+                yield Static(Content.from_markup("[$text-warning]$notice[/]", notice=self._notice),
+                             id="browser-login-notice")
             yield Input(
                 placeholder=self._placeholder,
                 password=self._password,
@@ -270,7 +282,8 @@ class LoginScreen(ModalScreen[str | None]):
         # seconds of work the first time: off the event loop, so the screen
         # stays alive meanwhile.
         providers = await asyncio.to_thread(_providers)
-        provider = await self.app.push_screen_wait(PickerScreen("Select provider", providers))
+        provider = await self.app.push_screen_wait(
+            PickerScreen("Select provider", providers, _PROVIDER_LABELS))
         if not provider:
             self.dismiss(None)
             return
@@ -291,6 +304,19 @@ class LoginScreen(ModalScreen[str | None]):
             return
 
         config = self.app.config  # type: ignore[attr-defined] (pushed only by PaimonApp)
+        stored = (config.providers.get(provider) or {}).get("api_key")
+        if provider == KILO_PROVIDER:
+            # The endpoint is fixed and the key optional, so only the key is
+            # asked for, under a word on what going without one costs.
+            blank = "keep the stored one" if stored else "use the free models only"
+            api_key = await self.app.push_screen_wait(PromptScreen(
+                f"Kilo API key (leave blank to {blank})", password=True, notice=KILO_NOTICE))
+            if api_key is None:
+                self.dismiss(None)
+                return
+            await self._store(provider, {"api_key": api_key.strip()} if api_key.strip() else {})
+            return
+
         api_base = await self.app.push_screen_wait(
             PromptScreen(
                 "API base (leave blank for provider default)",
@@ -301,7 +327,6 @@ class LoginScreen(ModalScreen[str | None]):
             self.dismiss(None)
             return
 
-        stored = (config.providers.get(provider) or {}).get("api_key")
         blank = "keep the stored one" if stored else "use the provider's environment variable"
         api_key = await self.app.push_screen_wait(
             PromptScreen(f"API key (leave blank to {blank})", password=True, placeholder="sk-…")
@@ -312,6 +337,14 @@ class LoginScreen(ModalScreen[str | None]):
         fields: dict = {"api_base": api_base.strip() or None}
         if api_key.strip():
             fields["api_key"] = api_key.strip()
+        await self._store(provider, fields)
+
+    async def _store(self, provider: str, fields: dict) -> None:
+        """Save what was typed for provider, then close on it."""
+        config = self.app.config  # type: ignore[attr-defined]
+        if not fields:
+            self.dismiss(provider)
+            return
         try:
             # On a thread: save() can wait on the cross-process config lock.
             await asyncio.to_thread(config.save, provider=provider, **fields)

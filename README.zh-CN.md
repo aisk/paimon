@@ -24,7 +24,7 @@ paimon
 uvx paimon
 ```
 
-首次启动会询问 provider 及其 API base 和 key，然后选择模型。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。
+首次启动会询问 provider 及其 API base 和 key，然后选择模型。列在第一位的 Kilo 无需账号：它的免费模型不用 key 就能用，但背后的模型提供方可能保留提示词和代码并用于训练，且每个 IP 每小时限 200 次请求。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。
 
 运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 只读，**auto** 放行工作目录内的编辑，其余操作交给另一次模型调用审批，**yolo** 不做任何检查，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
@@ -119,7 +119,7 @@ paimon --model zai:glm-4.7          # 仅本次运行使用该模型
 
 ## 配置
 
-模型设置保存在 `~/.config/paimon/config.json`，由首次启动或 `paimon login` 写入。每个 provider 各自保存凭据，用 `paimon model provider:name` 或命令面板里的 Switch model 选择要用的模型。也可以用 ChatGPT 订阅代替 API key，`paimon login chatgpt` 会通过浏览器登录。会话存放在 `~/.local/share/paimon/sessions/`。
+模型设置保存在 `~/.config/paimon/config.json`，由首次启动或 `paimon login` 写入。每个 provider 各自保存凭据，用 `paimon model provider:name` 或命令面板里的 Switch model 选择要用的模型。也可以用 ChatGPT 订阅代替 API key，`paimon login chatgpt` 会通过浏览器登录。`paimon model kilo:cohere/north-mini-code:free` 无需登录即可选用 Kilo 的免费模型；配置 Kilo key（`paimon login kilo --api-key-env KILO_API_KEY`）后也能用它的付费模型。会话存放在 `~/.local/share/paimon/sessions/`。
 
 read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉。Windows 上命令由 Git Bash 执行，通过 PATH 上的 `git` 或默认安装位置找到；没装 Git for Windows 时改由 cmd.exe 执行，这时一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。当前的模型默认用同一家里快速档的那个来审批（GPT 用 Luna，Claude 用 Haiku，GLM 用 Flash），其余模型自己审自己，在配置里写 `"review_model": "provider:name"` 可以自行指定。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 
