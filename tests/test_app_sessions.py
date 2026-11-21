@@ -398,6 +398,32 @@ class ModelSwitchTest(AppTestCase):
             self.assertEqual(first.agent.model_name, "zai:glm-5.3-flash")
             self.assertEqual(Config.load().providers, {}, "credentials are not touched")
 
+    async def test_a_thinking_effort_picked_is_saved_and_shown_for_every_pane(self) -> None:
+        agent = Agent.open(config=Config(model="zai:glm-5.3", providers={"zai": {"api_key": "k"}}),
+                           run_options=RunOptions(thinking="low"))
+        app = PaimonApp(agent)
+        async with app.run_test() as pilot:
+            first = app.pane
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            self.assertEqual(first.agent.thinking_level(), "low")
+            app.action_thinking()
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            self.assertEqual(app.screen._options[:2], ["model default", "off"])
+            app.screen.dismiss("high")
+            await self._wait_for(pilot, lambda: Config.load().thinking == "high")
+            # What the run was launched with gives way to what was picked.
+            self.assertEqual(first.agent.thinking_level(), "high")
+            self.assertEqual(app.pane.agent.thinking_level(), "high")
+            self.assertIn("thinking high", str(app.query_one("#statusbar", Static).content))
+
+            app.action_thinking()
+            await self._wait_for(pilot, lambda: isinstance(app.screen, PickerScreen))
+            app.screen.dismiss("model default")
+            await self._wait_for(pilot, lambda: Config.load().thinking is None)
+            self.assertIsNone(app.pane.agent.thinking_level())
+            self.assertNotIn("thinking", str(app.query_one("#statusbar", Static).content))
+
     async def test_a_model_without_a_provider_is_asked_for_again(self) -> None:
         app = self._app()
         async with app.run_test() as pilot:

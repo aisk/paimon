@@ -2,7 +2,10 @@ import os
 import unittest
 from unittest.mock import patch
 
-from paimon.llm import build_model, is_provider_available, split_model_string
+from pydantic_ai.models import ModelRequestParameters
+
+from paimon.llm import (build_model, is_provider_available, request_settings, split_model_string,
+                        takes_thinking)
 
 
 class SplitModelStringTest(unittest.TestCase):
@@ -94,6 +97,38 @@ class BuildModelTest(unittest.TestCase):
                 build_model("bedrock:anthropic.claude-opus-4", api_key="k")
         self.assertIn("bedrock", str(caught.exception))
         self.assertIn("missing SDK", str(caught.exception))
+
+
+class ThinkingTest(unittest.TestCase):
+    def test_a_level_is_asked_of_a_model_that_takes_one(self) -> None:
+        model = build_model("anthropic:claude-opus-4-6", api_key="k")
+        self.assertTrue(takes_thinking(model))
+        self.assertEqual(request_settings(model, thinking="high")["thinking"], "high")
+        self.assertIs(request_settings(model, thinking="off")["thinking"], False)
+
+    def test_no_level_asks_for_nothing(self) -> None:
+        model = build_model("anthropic:claude-opus-4-6", api_key="k")
+        self.assertNotIn("thinking", request_settings(model))
+
+    def test_a_model_without_the_setting_is_asked_nothing(self) -> None:
+        model = build_model("openai:gpt-4o", api_key="k")
+        self.assertFalse(takes_thinking(model))
+        self.assertNotIn("thinking", request_settings(model, thinking="high"))
+
+    def test_a_model_that_fixes_its_own_level_is_asked_nothing(self) -> None:
+        model = build_model("anthropic:claude-opus-4-6", api_key="k")
+        model.fixed_thinking = True
+        self.assertNotIn("thinking", request_settings(model, thinking="high"))
+
+    def test_the_level_reaches_the_provider_in_its_own_terms(self) -> None:
+        import warnings
+
+        model = build_model("openai:gpt-5.6-sol", api_key="k")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _, parameters = model.prepare_request(
+                request_settings(model, thinking="low"), ModelRequestParameters())
+        self.assertEqual(parameters.thinking, "low")
 
 
 class ProviderAvailabilityTest(unittest.TestCase):

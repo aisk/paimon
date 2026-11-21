@@ -280,6 +280,18 @@ def _typed(path: Path, name: str, value: object, kind: str) -> object:
     return float(value) if kind == "number" else value
 
 
+# How hard the model is asked to think, least first. "off" asks for none, or
+# for as little as a model that cannot stop will do.
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _thinking_level(path: Path, value: object) -> str | None:
+    if value is not None and value not in THINKING_LEVELS:
+        raise ConfigError(f"{path}: thinking must be one of {', '.join(THINKING_LEVELS)} or null, "
+                          f"not {json.dumps(value)}. The file was left untouched, fix it")
+    return value  # type: ignore[return-value]
+
+
 @dataclass
 class Config:
     """What config.json holds, and nothing else — no module-level state.
@@ -299,6 +311,9 @@ class Config:
     # print it in headless mode. When off the TUI folds it behind a line-count
     # stub instead; either way it is still generated, persisted and sent back.
     show_reasoning: bool = False
+    # How hard the model is asked to think, one of THINKING_LEVELS. None asks
+    # for nothing, which leaves a model at its own default.
+    thinking: str | None = None
     # Auto-allow clearly read-only shell commands (ls, git status, ...) in
     # read/auto modes. A guardrail toggle, not a security boundary.
     safe_commands: bool = True
@@ -338,6 +353,7 @@ class Config:
             providers=_parse_providers(data.get("providers")),
             theme=setting(data, "theme", "text", None),
             show_reasoning=setting(data, "show_reasoning", "bool", cls.show_reasoning),
+            thinking=_thinking_level(path, data.get("thinking")),
             safe_commands=setting(data, "safe_commands", "bool", cls.safe_commands),
             review_model=setting(data, "review_model", "text", None),
             recap_enabled=setting(data, "recap_enabled", "bool", cls.recap_enabled),
@@ -379,6 +395,7 @@ class Config:
         api_key: object = UNSET,
         theme: object = UNSET,
         show_reasoning: object = UNSET,
+        thinking: object = UNSET,
         recap_enabled: object = UNSET,
         provider: str | None = None,
     ) -> None:
@@ -407,6 +424,7 @@ class Config:
             ("model", model),
             ("theme", theme),
             ("show_reasoning", show_reasoning),
+            ("thinking", thinking),
             ("recap_enabled", recap_enabled),
         ) if value is not UNSET]
 
@@ -450,12 +468,17 @@ class RunOptions:
     skills: tuple[str, ...] = ()
     # --no-skills: skip the default skill locations.
     no_skills: bool = False
+    # --thinking: how hard the model is asked to think, over the config's.
+    thinking: str | None = None
 
     # The settings the config and the run both have a say in, combined here
     # and nowhere else.
 
     def safe_commands(self, config: Config) -> bool:
         return config.safe_commands and not self.strict
+
+    def thinking_level(self, config: Config) -> str | None:
+        return self.thinking or config.thinking
 
     def code_mode(self, config: Config) -> bool:
         return config.code_mode and not self.no_code_mode

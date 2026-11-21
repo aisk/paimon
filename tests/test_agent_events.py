@@ -32,7 +32,7 @@ from paimon.events import (
     UserInput,
     replay_events,
 )
-from paimon.config import Config
+from paimon.config import Config, RunOptions
 from paimon.session import (
     Session,
     job_message,
@@ -844,3 +844,42 @@ class LogFirstTest(unittest.IsolatedAsyncioTestCase):
                     [event async for event in agent.run("go")]
             self.assertEqual(agent.history, agent.session.messages())
             self.assertEqual(agent.history[-1].parts[0].outcome, "interrupted")
+
+
+class ThinkingLevelTest(unittest.IsolatedAsyncioTestCase):
+    async def _thinking_sent(self, config: Config, options: RunOptions, profile: dict) -> tuple[object, str | None]:
+        sent: list = []
+
+        async def stream(messages, info):
+            sent.append(info.model_request_parameters.thinking)
+            yield "done"
+
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            session = make_session(cwd)
+            session.append_system_prompt("snapshot")
+            with patch("paimon.agent.build_model",
+                       return_value=FunctionModel(stream_function=stream, profile=profile)):
+                agent = Agent.open(cwd=cwd, session=session, config=config, run_options=options)
+                [event async for event in agent.run("hi")]
+                level = agent.thinking_level()
+        return sent[0], level
+
+    async def test_a_turn_asks_for_the_configured_level(self) -> None:
+        sent, level = await self._thinking_sent(
+            Config(model="test:stub", thinking="high"), RunOptions(), {"supports_thinking": True})
+        self.assertEqual(sent, "high")
+        self.assertEqual(level, "high")
+
+    async def test_the_runs_level_wins(self) -> None:
+        sent, level = await self._thinking_sent(
+            Config(model="test:stub", thinking="high"), RunOptions(thinking="off"),
+            {"supports_thinking": True})
+        self.assertIs(sent, False)
+        self.assertEqual(level, "off")
+
+    async def test_a_model_that_takes_no_level_is_asked_nothing(self) -> None:
+        sent, level = await self._thinking_sent(
+            Config(model="test:stub", thinking="high"), RunOptions(), {})
+        self.assertIsNone(sent)
+        self.assertIsNone(level)

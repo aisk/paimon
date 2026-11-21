@@ -103,6 +103,7 @@ paimon --web                        # the same UI in a browser (--port, default 
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"
 paimon --model zai:glm-4.7          # this model for this run only
+paimon --thinking high              # this thinking effort for this run only
 ```
 
 `-p` never stops to ask, so with the default `yolo` mode it can already write files and run commands. Add `--output-format result` for a single JSON object with the outcome, which is what a calling program should read. `paimon --help` lists the rest.
@@ -123,6 +124,8 @@ You can ask it, for example, to “find why `#prompt` is narrower than expected,
 ## Configuration
 
 Model settings are kept in `~/.config/paimon/config.json`, written by the first launch or by `paimon login`. Each provider keeps its own credentials, and `paimon model provider:name` or Switch model in the command palette picks the model to run on. A ChatGPT plan works in place of an API key: `paimon login chatgpt` signs in through the browser. `paimon login antigravity` does the same for an Antigravity plan, which Google does not support outside Antigravity: Paimon signs in as the Antigravity client and calls an internal endpoint, so the account may be limited or closed, and the risk is yours. The sign-in asks you to accept that before it starts; without a terminal to ask on, pass `--accept-risk`. `paimon model kilo:cohere/north-mini-code:free` picks a free Kilo model without logging in; a Kilo key (`paimon login kilo --api-key-env KILO_API_KEY`) opens its paid models too. Sessions live in `~/.local/share/paimon/sessions/`.
+
+Thinking effort in the command palette sets how hard the model thinks before it answers: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or left to the model (the default). The choice is kept as `"thinking"` in the config and holds for every pane; `--thinking` covers one run. A level a provider lacks becomes the nearest one it has. A model that offers no such setting ignores it, and so do Antigravity's, whose level is part of the model name; the status bar shows the level only when the current model takes it. Compaction summaries, auto mode's reviews and recaps are sent without it.
 
 Read and auto modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) on their own; `--strict` turns that off. On Windows commands run in Git Bash, found through `git` on your PATH or the standard install locations; without Git for Windows they run in cmd.exe, and then none are recognized. Read mode refuses everything else. Auto mode asks a reviewer model, which sees your messages and the agent's tool calls but not its reasoning or any tool output, and answers allow or block. It asks you instead when the reviewer cannot be reached or has blocked three calls in a row, and under `-p` those are refusals. Current models review with their provider's fast tier by default (GPT with Luna, Claude with Haiku, GLM with Flash) and the rest review with themselves; set `"review_model": "provider:name"` in the config to choose. **All of this is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
 

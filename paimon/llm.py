@@ -287,8 +287,25 @@ def _build_kilo_model(model_name: str, api_base: str | None, api_key: str | None
                            profile={"context_window": window} if window else None)
 
 
-def request_settings(model: Model, cache_key: str | None = None) -> dict:
+def takes_thinking(model: Model) -> bool:
+    """Whether a thinking level asked of this model changes what it does.
+
+    Not when its profile offers no such setting, as with most models behind a
+    gateway or a custom endpoint, and not when the model fixes its own, as
+    Antigravity's do from the level in their name.
+    """
+    profile = model.profile
+    return (not getattr(model, "fixed_thinking", False)
+            and bool(profile.get("supports_thinking") or profile.get("thinking_always_enabled")))
+
+
+def request_settings(model: Model, cache_key: str | None = None,
+                     thinking: str | None = None) -> dict:
     """The settings every request carries.
+
+    ``thinking`` is one of config.THINKING_LEVELS, asked of the models that
+    take one; pydantic-ai puts it in each provider's own terms, and a level a
+    provider lacks becomes the nearest it has.
 
     ``cache_key`` names the conversation the request belongs to. OpenAI
     spreads requests over machines that each keep their own prompt cache, and
@@ -296,6 +313,8 @@ def request_settings(model: Model, cache_key: str | None = None) -> dict:
     never seen and is billed in full.
     """
     settings: dict = {"extra_headers": {"User-Agent": user_agent()}}
+    if thinking and takes_thinking(model):
+        settings["thinking"] = False if thinking == "off" else thinking
     if cache_key and model.system == "openai":
         settings["openai_prompt_cache_key"] = cache_key
     elif cache_key and (setting := getattr(model, "session_setting", None)):

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon.config import Config, ConfigError, config_path
+from paimon.config import Config, ConfigError, RunOptions, config_path
 
 
 def _hammer_save(config_home: str, field: str, rounds: int) -> None:
@@ -124,6 +124,30 @@ class ConfigTest(unittest.TestCase):
         config.save(recap_enabled=False)
         self.assertFalse(config.recap_enabled)
         self.assertFalse(Config.load().recap_enabled)
+
+    def test_thinking_is_saved_and_cleared(self) -> None:
+        config = Config.load()
+        self.assertIsNone(config.thinking)
+        config.save(thinking="high")
+        self.assertEqual(Config.load().thinking, "high")
+        config.save(thinking=None)
+        self.assertIsNone(Config.load().thinking)
+        self.assertNotIn("thinking", json.loads(config_path().read_text()))
+
+    def test_a_thinking_level_that_does_not_exist_is_refused(self) -> None:
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for stored in ("extreme", True, 3):
+            path.write_text(json.dumps({"thinking": stored}))
+            with self.assertRaises(ConfigError) as caught:
+                Config.load()
+            self.assertIn("thinking", str(caught.exception))
+
+    def test_the_runs_thinking_level_is_asked_over_the_configs(self) -> None:
+        config = Config(thinking="low")
+        self.assertEqual(RunOptions().thinking_level(config), "low")
+        self.assertEqual(RunOptions(thinking="max").thinking_level(config), "max")
+        self.assertIsNone(RunOptions().thinking_level(Config()))
 
     def test_safe_commands_defaults_on(self) -> None:
         self.assertTrue(Config.load().safe_commands)
