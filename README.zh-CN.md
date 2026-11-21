@@ -102,6 +102,7 @@ paimon --web                        # 在浏览器中使用同一套 UI（--port
 paimon -p "what does cli.py do?"    # 直接在 stdout 输出回答，不启动 UI
 cat log.txt | paimon -p "summarize this"
 paimon --model zai:glm-4.7          # 仅本次运行使用该模型
+paimon --thinking high              # 仅本次运行使用该推理强度
 ```
 
 `-p` 不会停下来询问，配合默认的 `yolo` 模式，它已经可以修改文件和执行命令。加 `--output-format result` 会输出一个包含结果的 JSON 对象，调用方程序读这个就够了。其余选项见 `paimon --help`。
@@ -120,6 +121,8 @@ paimon --model zai:glm-4.7          # 仅本次运行使用该模型
 ## 配置
 
 模型设置保存在 `~/.config/paimon/config.json`，由首次启动或 `paimon login` 写入。每个 provider 各自保存凭据，用 `paimon model provider:name` 或命令面板里的 Switch model 选择要用的模型。也可以用 ChatGPT 订阅代替 API key，`paimon login chatgpt` 会通过浏览器登录。`paimon model kilo:cohere/north-mini-code:free` 无需登录即可选用 Kilo 的免费模型；配置 Kilo key（`paimon login kilo --api-key-env KILO_API_KEY`）后也能用它的付费模型。会话存放在 `~/.local/share/paimon/sessions/`。
+
+命令面板里的 “Thinking effort” 设置模型回答前推理的强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，或者交给模型自己决定（默认）。选择保存在配置的 `"thinking"` 里，对所有 pane 生效，`--thinking` 只管本次运行。provider 没有的档位会落到它最接近的一档。不提供这项设置的模型会忽略它，Antigravity 的档位写在模型名里，也不受它影响；只有当前模型接受时，状态栏才显示档位。压缩摘要、auto 模式的审批和 recap 不带这项设置。
 
 read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`、`git status` 等），`--strict` 可以关掉。Windows 上命令由 Git Bash 执行，通过 PATH 上的 `git` 或默认安装位置找到；没装 Git for Windows 时改由 cmd.exe 执行，这时一条也不识别。read 模式拒绝其余所有操作。auto 模式把它们交给审批模型，它能看到你的消息和 agent 的工具调用，看不到 agent 的推理和工具输出，只回答放行或拦截。审批模型不可用或者连续拦截三次时改为询问你，`-p` 下则直接拒绝。当前的模型默认用同一家里快速档的那个来审批（GPT 用 Luna，Claude 用 Haiku，GLM 用 Flash），其余模型自己审自己，在配置里写 `"review_model": "provider:name"` 可以自行指定。**这些都是防止 agent 失误的护栏，不是安全边界。** 需要真正的隔离时，请在容器或虚拟机中运行 Paimon。
 

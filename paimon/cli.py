@@ -12,7 +12,7 @@ from . import telemetry
 from . import textual_debug
 from .agent import Agent
 from .app import PaimonApp
-from .config import Config, RunOptions
+from .config import THINKING_LEVELS, Config, RunOptions
 from .errors import PaimonError
 from .llm import split_model_string
 from .session import SessionError, resume_hint
@@ -65,6 +65,9 @@ def main() -> None:
                         help="resume the most recent session in this directory")
     parser.add_argument("--model", default=None, metavar="PROVIDER:NAME",
                         help="model for this run only; the configured one is untouched")
+    parser.add_argument("--thinking", choices=THINKING_LEVELS, default=None,
+                        help="how hard the model thinks, for this run only; ignored by a "
+                             "model that offers no such setting")
     parser.add_argument("-p", "--print", nargs="?", const="", default=None, metavar="PROMPT",
                         dest="prompt",
                         help="run one prompt without the UI and exit; with no value the "
@@ -126,7 +129,7 @@ def main() -> None:
         sys.exit(1)
     run_options = RunOptions(strict=args.strict, no_web_search=args.no_web_search,
                              no_code_mode=args.no_code_mode, skills=tuple(args.skills),
-                             no_skills=args.no_skills)
+                             no_skills=args.no_skills, thinking=args.thinking)
     if args.model is not None:
         try:
             split_model_string(args.model)

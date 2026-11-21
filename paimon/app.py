@@ -7,6 +7,7 @@ of them started in ``AgentPane``, and everything belonging to one background
 command in ``CommandPane``.
 """
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from .sparkle import Masthead
 from .tabs import PaneTabs
 from .theme import DEFAULT_THEME, MODE_COLORS, THEMES, gauge
 from .commandpane import CommandPane
+from .config import THINKING_LEVELS
 from .jobs import Job, PaneLimitError
 from .turns import Outcome, TurnDriver
 from .ui import BlockingPanel, PromptInput
@@ -92,6 +94,11 @@ class PaimonApp(App):
                 "Switch model",
                 "Change to another model, of any provider you are logged in to",
                 self.action_switch_model,
+            ),
+            SystemCommand(
+                "Thinking effort",
+                "How hard the model thinks before it answers, on the models that can be told",
+                self.action_thinking,
             ),
             SystemCommand(
                 "Toggle thinking display",
@@ -693,6 +700,33 @@ class PaimonApp(App):
         state = "streamed live" if self.config.show_reasoning else "folded"
         self.pane.notice(Content.from_markup(f"[$text-muted]Thinking: {state}[/]"))
 
+    def action_thinking(self) -> None:
+        """Pick how hard the model thinks, for every pane and later runs."""
+        if self._config_is_busy():
+            self.pane.notice(Content.from_markup("[$text-muted]Busy — change thinking after this turn[/]"))
+            return
+        default = "model default"
+        labels = {level: level for level in THINKING_LEVELS} | {default: "default (leave it to the model)"}
+
+        def _done(level: str | None) -> None:
+            # A turn may have started while the picker was up.
+            if level is None or self._config_is_busy():
+                return
+            self.save_config(thinking=None if level == default else level)
+            # This run's --thinking gives way, as --model does to a model picked.
+            self._run_options = replace(self._run_options, thinking=None)
+            for session in self.sessions:
+                session.agent.run_options = self._run_options
+            pane = self._session()
+            note = ""
+            if level != default and pane and pane.agent.thinking_level() is None:
+                note = f", which {pane.agent.model_name or 'this model'} ignores"
+            self.pane.notice(Content.from_markup("[$text-muted]Thinking effort: $level$note[/]",
+                                                 level=level, note=note))
+            self.refresh_statusbar()
+
+        self.push_screen(PickerScreen("Thinking effort", [default, *THINKING_LEVELS], labels), _done)
+
     def action_toggle_recap(self) -> None:
         """Turn the after-idle recap off (or back on), for every pane.
 
@@ -851,8 +885,11 @@ class PaimonApp(App):
 
     def _session_status(self, pane: SessionPane, tokens: int | None) -> list[Content]:
         # The agent's model, not the config's: a pane may override it.
-        parts = [self._mode_status(pane.mode), Content.styled(pane.agent.model_name or "no model", "$text"),
-                 Content(f"session {pane.agent.session.id[:8]}")]
+        parts = [self._mode_status(pane.mode), Content.styled(pane.agent.model_name or "no model", "$text")]
+        # Only a level the model takes: one it ignores would read as in force.
+        if thinking := pane.agent.thinking_level():
+            parts.append(Content(f"thinking {thinking}"))
+        parts.append(Content(f"session {pane.agent.session.id[:8]}"))
         agents = sum(1 for job in pane.agent.jobs.values() if job.kind == "agent" and job.running)
         if agents:
             parts.append(Content.styled(f"{agents} agent{'s' if agents > 1 else ''} running",

@@ -54,7 +54,7 @@ from .events import (
 )
 from .jobs import Jobs
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
-                  signed_in_plans, split_model_string)
+                  signed_in_plans, split_model_string, takes_thinking)
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -480,6 +480,15 @@ class Agent:
     def model_name(self) -> str | None:
         """The model this agent talks to: its own override, else the config's."""
         return self.model_override or self.config.model
+
+    def thinking_level(self) -> str | None:
+        """The thinking level this agent's turns ask for, None when its model
+        takes none or there is nothing to ask it with."""
+        level = self.run_options.thinking_level(self.config)
+        try:
+            return level if level and takes_thinking(self._model()) else None
+        except Exception:  # noqa: BLE001 — a model that cannot be built is asked nothing
+            return None
 
     def _model(self) -> Model:
         """The configured model, rebuilt when login changes the config."""
@@ -1159,7 +1168,8 @@ class Agent:
                     async with model_request_stream(
                         model,
                         request_messages,
-                        model_settings=request_settings(model, self.session.id),
+                        model_settings=request_settings(
+                            model, self.session.id, self.run_options.thinking_level(self.config)),
                         model_request_parameters=parameters,
                     ) as stream:
                         async for event in stream:

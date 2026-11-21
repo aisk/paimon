@@ -270,6 +270,8 @@ class AntigravityModel(GoogleModel):
     """Gemini requests, wrapped the way Cloud Code Assist takes them."""
 
     session_setting = SESSION_SETTING
+    # The level is part of the model name, see llm.takes_thinking.
+    fixed_thinking = True
 
     def __init__(self, model_name: str, credentials: oauth.Credentials,
                  http_client: httpx.AsyncClient | None = None) -> None:
