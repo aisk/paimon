@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from .images import content_text
 from .session import JOB, SHELL, SUMMARY, job_text, shell_text, synthetic_kind
 from .tools.registry import normalize_todos
 from .tools.result import Status, ToolResult
@@ -130,6 +131,14 @@ class ModelRetry:
     error: str
 
 
+@dataclass
+class ImagesRejected:
+    """The model refused a request that had images in it, which is being sent
+    again without them, as every later one to this model will be."""
+
+    model: str
+
+
 # ---- Events that stand for a message, live and on replay ----------------------
 
 
@@ -179,7 +188,7 @@ class ShellRun:
 AgentEvent = (
     TextDelta | ReasoningDelta | ToolStart | ToolEnd | TodosUpdate
     | RequestStats | ToolBudgetExhausted | TurnEnd
-    | ContextCompacted | ContextCompactionFailed | ModelRetry | UserInput
+    | ContextCompacted | ContextCompactionFailed | ModelRetry | ImagesRejected | UserInput
     | CompactionNotice | JobNotice | ShellRun
 )
 
@@ -206,7 +215,7 @@ def _nested_calls(part: ToolReturnPart) -> list[dict]:
 def _returned(part: ToolReturnPart) -> ToolResult:
     """A persisted return part as the result it recorded; see agent._settled."""
     detail = part.metadata.get("detail") if isinstance(part.metadata, dict) else None
-    return ToolResult(str(part.content or "(no output)"), part.outcome,
+    return ToolResult(content_text(part.content) or "(no output)", part.outcome,
                       detail if isinstance(detail, str) else "")
 
 
@@ -235,8 +244,8 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
             continue
         if isinstance(message, ModelRequest):
             for part in message.parts:
-                if isinstance(part, UserPromptPart) and isinstance(part.content, str) and part.content:
-                    events.append(UserInput(part.content))
+                if isinstance(part, UserPromptPart) and content_text(part.content):
+                    events.append(UserInput(content_text(part.content)))
                 elif (isinstance(part, ToolReturnPart)
                       and part.tool_call_id not in consumed
                       and part.tool_name != "write_todos"):

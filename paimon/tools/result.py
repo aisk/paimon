@@ -15,6 +15,14 @@ Status = Literal["success", "failed", "denied", "interrupted"]
 
 
 @dataclass(frozen=True)
+class Image:
+    """A picture read from disk, in one of the formats every provider takes."""
+
+    data: bytes
+    media_type: str
+
+
+@dataclass(frozen=True)
 class ToolResult:
     """One tool call's result.
 
@@ -23,11 +31,13 @@ class ToolResult:
     beside it so nothing has to read it back out of the text. ``detail`` is a
     short word for a renderer ("exit 2", "timed out"); it defaults to the
     status itself whenever the call did not succeed, and is empty when it did.
+    ``images`` are shown to the model after the text, where it can see them.
     """
 
     text: str
     status: Status = "success"
     detail: str = ""
+    images: tuple[Image, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status != "success" and not self.detail:

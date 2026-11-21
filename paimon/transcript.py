@@ -18,6 +18,7 @@ from .events import (
     CompactionNotice,
     ContextCompactionFailed,
     ContextCompacted,
+    ImagesRejected,
     ModelRetry,
     ReasoningDelta,
     ShellRun,
@@ -293,6 +294,15 @@ class EventRenderer:
                     delay=f"{ev.delay:g}",
                     attempt=str(ev.attempt),
                     total=str(ev.max_attempts - 1),
+                )
+            )
+
+        elif isinstance(ev, ImagesRejected):
+            await self.close()
+            self._log.add(
+                Content.from_markup(
+                    "[$text-warning]$model refused the images; sending without them[/]",
+                    model=ev.model,
                 )
             )
 

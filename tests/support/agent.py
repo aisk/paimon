@@ -27,6 +27,7 @@ EVENT_SAMPLES = {
     "TurnEnd": (),
     "ContextCompacted": (10, 5),
     "ContextCompactionFailed": ("boom",),
+    "ImagesRejected": ("stub",),
     "ModelRetry": (1, 4, 2.0, "HTTP 429"),
     "UserInput": ("hi",),
     "CompactionNotice": (),

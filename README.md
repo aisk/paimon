@@ -24,7 +24,7 @@ Or run it without installing anything:
 uvx paimon
 ```
 
-The first launch asks for a provider, its API base and key, then a model. The first provider on offer, Kilo, needs no account: its free models run without a key, but the providers behind them may keep and train on your prompts and code, and use is limited to 200 requests an hour per IP address. Then just type what you want done. Write `@path/to/file` in a prompt to hand a file to the agent.
+The first launch asks for a provider, its API base and key, then a model. The first provider on offer, Kilo, needs no account: its free models run without a key, but the providers behind them may keep and train on your prompts and code, and use is limited to 200 requests an hour per IP address. Then just type what you want done. Write `@path/to/file` in a prompt to hand a file to the agent. An image mentioned that way (PNG, JPEG, GIF or WebP, up to 5 MB) is attached for the model to look at, and the agent can open images itself with its file tool.
 
 While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** only reads, **auto** edits inside the working directory and has a second model call approve everything else, **yolo** checks nothing and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
 

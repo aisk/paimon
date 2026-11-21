@@ -55,7 +55,8 @@ _GUIDELINES: tuple[tuple[tuple[str, ...], str], ...] = (
     ((),
      "User @path mentions are expanded into <mentioned_file> tags. A tag with a body "
      "contains the complete file; a self-closing tag gives only the path, so read "
-     "the file when you need its contents."),
+     "the file when you need its contents. A <mentioned_image> tag is an image "
+     "attached to the same message, in the order the tags appear."),
     ((),
      "Be direct. When the task is done, briefly state what you did. Don't narrate every step."),
 )

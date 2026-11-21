@@ -5,6 +5,9 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
+from .tools.files import read_image
+from .tools.result import Image, ToolError
+
 
 # Inline only files small enough that one accidental @ cannot dominate the
 # request. Anything larger is referenced by path; the model uses read_file.
@@ -15,8 +18,12 @@ MAX_INLINE_BYTES = 4_000
 _PUNCTUATION = ".,;:!?'\"()[]{}<>，。、；：！？…（）【】《》“”‘’"
 
 
-def expand_mentions(text: str, cwd: Path) -> str:
-    """Replace token-start ``@path`` mentions. Spaces are written as ``\\ ``."""
+def expand_mentions(text: str, cwd: Path, images: list[Image] | None = None) -> str:
+    """Replace token-start ``@path`` mentions. Spaces are written as ``\\ ``.
+
+    A mentioned image is added to ``images``, for the caller to attach to the
+    message; without a list to add to it is referenced by path like any binary.
+    """
     cwd = cwd.resolve()
     result: list[str] = []
     cursor = 0
@@ -41,7 +48,7 @@ def expand_mentions(text: str, cwd: Path) -> str:
             index += 1
             continue
         requested = "".join(path_chars)
-        resolved = _resolve(requested, cwd)
+        resolved = _resolve(requested, cwd, images)
         # A mention that names no readable file is left verbatim: it is more
         # likely ordinary text (a decorator, an email address) than a mistake.
         if resolved is None:
@@ -59,9 +66,9 @@ def expand_mentions(text: str, cwd: Path) -> str:
     return "".join(result)
 
 
-def _resolve(requested: str, cwd: Path) -> tuple[str, int] | None:
+def _resolve(requested: str, cwd: Path, images: list[Image] | None) -> tuple[str, int] | None:
     """A mention's tag and the length of the path it consumed, or None."""
-    tag = _expand_path(requested, cwd)
+    tag = _expand_path(requested, cwd, images)
     if tag is not None:
         return tag, len(requested)
     # The whole token is not a file, so punctuation inside it probably ends the
@@ -70,13 +77,13 @@ def _resolve(requested: str, cwd: Path) -> tuple[str, int] | None:
     for cut in range(len(requested) - 1, 0, -1):
         if requested[cut] not in _PUNCTUATION:
             continue
-        tag = _expand_path(requested[:cut], cwd)
+        tag = _expand_path(requested[:cut], cwd, images)
         if tag is not None:
             return tag, cut
     return None
 
 
-def _expand_path(requested: str, cwd: Path) -> str | None:
+def _expand_path(requested: str, cwd: Path, images: list[Image] | None) -> str | None:
     """The tag for a mention, or None when it does not name a readable file."""
     path = Path(requested)
     if not path.is_absolute():
@@ -85,6 +92,15 @@ def _expand_path(requested: str, cwd: Path) -> str | None:
         path = path.resolve(strict=True)
         if not path.is_file():
             return None
+        if images is not None:
+            escaped = html.escape(str(path), quote=True)
+            try:
+                image = read_image(path)
+            except ToolError:
+                return f'<mentioned_image path="{escaped}" error="too large to attach" />'
+            if image is not None:
+                images.append(image)
+                return f'<mentioned_image path="{escaped}" />'
         data = path.read_bytes()
     except (OSError, RuntimeError):
         return None

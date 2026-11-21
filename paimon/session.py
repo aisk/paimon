@@ -26,6 +26,7 @@ from pydantic_ai.messages import (
 
 from . import lockfile
 from .errors import PaimonError
+from .images import content_text
 
 # Paimon writes three kinds of user message the user never typed. Each is
 # marked in its ModelRequest's metadata, under this key, as
@@ -523,10 +524,10 @@ class Session:
             if message.get("kind") != "request" or synthetic_kind(message) is not None:
                 continue
             for part in message.get("parts") or []:
-                content = part.get("content") if isinstance(part, dict) else None
-                if (isinstance(part, dict) and part.get("part_kind") == "user-prompt"
-                        and isinstance(content, str)):
-                    return content
+                if isinstance(part, dict) and part.get("part_kind") == "user-prompt":
+                    content = content_text(part.get("content"))
+                    if content:
+                        return content
         return None
 
     def append_system_prompt(self, content: str, appended: str | None = None) -> None:

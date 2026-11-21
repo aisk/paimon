@@ -28,6 +28,7 @@ from pydantic_ai.models import Model
 
 from .errors import PaimonError
 from .llm import ask_once, catalog, split_model_string, successors
+from .images import content_text
 from .session import SHELL, SUMMARY, SUMMARY_PREFIX, shell_text, synthetic_kind
 
 # Seconds one review may take before it counts as unavailable.
@@ -193,9 +194,9 @@ def _transcript(history: list[ModelMessage], subagent: bool = False) -> str:
         if kind is not None:
             continue
         for part in message.parts:
-            if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+            if isinstance(part, UserPromptPart) and isinstance(part.content, (str, list)):
                 requests.append(len(lines))
-                lines.append((f"{author}: {_clip(part.content, _MAX_USER_TEXT)}", 1))
+                lines.append((f"{author}: {_clip(content_text(part.content), _MAX_USER_TEXT)}", 1))
             elif isinstance(part, ToolCallPart):
                 lines.append((f"agent called {part.tool_name}: "
                               f"{_clip(part.args_as_json_str(), _MAX_PAST_CALL)}", 2))

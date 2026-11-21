@@ -66,6 +66,15 @@ def is_context_overflow(exc: BaseException) -> bool:
     return any(hint in text for hint in _OVERFLOW_HINTS)
 
 
+def is_rejection(exc: BaseException) -> bool:
+    """Whether the provider refused the request for what it contains, as one
+    does an image it cannot take: a 4xx that is neither a credential problem
+    nor one of the transient ones."""
+    return (isinstance(exc, ModelHTTPError) and 400 <= exc.status_code < 500
+            and exc.status_code not in (401, 403, *_TRANSIENT_STATUS)
+            and not is_context_overflow(exc))
+
+
 def backoff(attempt: int) -> float:
     """Seconds to wait before ``attempt`` (1 is the first retry).
 
