@@ -24,6 +24,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model
 
 from .errors import PaimonError
+from .images import IMAGE_TOKENS, replace_images
 from .llm import ask_once
 from .session import summary_message
 
@@ -127,6 +128,9 @@ def count_tokens(messages: list[ModelMessage], tool_schemas: list[dict] | None =
         message.pop("metadata", None)
         for part in message.get("parts") or []:
             part.pop("metadata", None)
+            # An image costs what its pixels do, not what its base64 weighs.
+            if isinstance(part.get("content"), list):
+                part["content"] = replace_images(part["content"], "x" * IMAGE_TOKENS * 4)
     payload = json.dumps(raw, ensure_ascii=False)
     if tool_schemas:
         payload += json.dumps(tool_schemas, ensure_ascii=False, default=str)
@@ -182,7 +186,7 @@ def _serialize_messages(messages: list[ModelMessage]) -> str:
         raw.pop("metadata", None)
         for part in raw.get("parts") or []:
             part.pop("metadata", None)
-            content = part.get("content")
+            content = part["content"] = replace_images(part.get("content"), "[image]")
             if part.get("part_kind") == "tool-return" and isinstance(content, str) and len(content) > _TOOL_RESULT_LIMIT:
                 part["content"] = content[:_TOOL_RESULT_LIMIT] + "\n[tool result truncated for summary]"
         serialized.append(json.dumps(raw, ensure_ascii=False))

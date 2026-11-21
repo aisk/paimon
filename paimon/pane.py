@@ -27,6 +27,7 @@ from .events import (
     CompactionNotice,
     ContextCompactionFailed,
     ContextCompacted,
+    ImagesRejected,
     ModelRetry,
     ReasoningDelta,
     RequestStats,
@@ -866,7 +867,7 @@ class SessionPane(Pane):
             self._used_tools = True
             self._set_state("tool")
         elif isinstance(ev, (ToolEnd, TodosUpdate, ContextCompacted,
-                             ContextCompactionFailed, ModelRetry)):
+                             ContextCompactionFailed, ModelRetry, ImagesRejected)):
             # the model is about to react to what just happened
             self._set_state("waiting")
         elif isinstance(ev, ReasoningDelta):

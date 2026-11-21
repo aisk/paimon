@@ -12,6 +12,7 @@ import json
 import re
 
 from .logtext import render_record, settled_parts, superseded_seqs
+from .images import content_text
 from .session import Session, synthetic_kind
 from .tools.result import ToolError
 
@@ -79,6 +80,8 @@ def _searchable_parts(record: dict):
             continue
         kind = part.get("part_kind")
         content = part.get("content")
+        if isinstance(content, list):
+            content = content_text(content)
         if kind == "user-prompt":
             yield author, str(content or "")
         elif kind == "text":

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Collection
 
+from .images import content_text
 from .session import synthetic_kind
 
 
@@ -59,6 +60,8 @@ def _result_status(part: dict) -> str | None:
 def _render_part(seq: int, part: dict, full: bool, author: str = "user") -> str:
     kind = part.get("part_kind")
     content = part.get("content")
+    if isinstance(content, list):
+        content = content_text(content)
     if kind == "user-prompt":
         label, detail = author, _clip(content, full)
     elif kind == "text":

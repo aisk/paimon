@@ -56,6 +56,7 @@ from .events import (
     JobNotice,
     ContextCompacted,
     ContextCompactionFailed,
+    ImagesRejected,
     ModelRetry,
     ReasoningDelta,
     TextDelta,
@@ -65,8 +66,10 @@ from .events import (
     ToolStart,
 )
 from .config import Config, RunOptions
+from .images import with_images
 from .mentions import expand_mentions
 from .skills import Skill, expand_skill_command
+from .tools.result import Image
 from .session import Session, SessionError, resume_hint
 from .tools.registry import BACKGROUND_TOOLS, INTERACTIVE_TOOLS, REGISTRY, render_todos, without
 
@@ -98,7 +101,8 @@ def read_stdin(stream=None) -> str:
     return text
 
 
-def build_prompt(prompt: str, piped: str, cwd: Path, skills: Sequence[Skill] = ()) -> str:
+def build_prompt(prompt: str, piped: str, cwd: Path,
+                 skills: Sequence[Skill] = ()) -> str | list:
     """Combine the -p prompt with piped stdin into one user message.
 
     Only the prompt gets /skill:name and @path expansion: piped content is
@@ -107,16 +111,17 @@ def build_prompt(prompt: str, piped: str, cwd: Path, skills: Sequence[Skill] = (
     """
     prompt = prompt.strip()
     piped = piped.strip()
+    images: list[Image] = []
     if prompt:
         def mentions(part: str) -> str:
-            return expand_mentions(part, cwd)
+            return expand_mentions(part, cwd, images)
 
         expanded = expand_skill_command(prompt, skills, expand_args=mentions)
         prompt = mentions(prompt) if expanded is prompt else expanded
-    if not piped:
-        return prompt
-    block = f"<{PIPED_TAG}>\n{piped}\n</{PIPED_TAG}>"
-    return f"{block}\n\n{prompt}" if prompt else block
+    if piped:
+        block = f"<{PIPED_TAG}>\n{piped}\n</{PIPED_TAG}>"
+        prompt = f"{block}\n\n{prompt}" if prompt else block
+    return with_images(prompt, images)
 
 
 def _write(stream, text: str) -> None:
@@ -227,6 +232,9 @@ class TextRenderer:
             self._note(f"paimon: {ev.error}, retrying in {ev.delay:g}s "
                        f"({ev.attempt}/{ev.max_attempts - 1})")
 
+        elif isinstance(ev, ImagesRejected):
+            self._note(f"paimon: {ev.model} refused the images, sending without them")
+
     async def close(self) -> None:
         # No await anywhere in here: close() runs from a finally block while
         # the turn may be cancelling, and any real suspension point would
@@ -261,6 +269,7 @@ class JsonRenderer:
         ContextCompacted: "compacted",
         ContextCompactionFailed: "compaction_failed",
         ModelRetry: "retry",
+        ImagesRejected: "images_rejected",
     }
 
     def __init__(self, out=None, config: Config | None = None) -> None:
@@ -318,6 +327,8 @@ class JsonRenderer:
         elif isinstance(ev, ModelRetry):
             self._emit({"type": name, "attempt": ev.attempt,
                         "max_attempts": ev.max_attempts, "delay": ev.delay, "error": ev.error})
+        elif isinstance(ev, ImagesRejected):
+            self._emit({"type": name, "model": ev.model})
 
     def _flush_block(self) -> None:
         if self._current:

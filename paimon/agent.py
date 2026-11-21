@@ -40,6 +40,7 @@ from .events import (
     ContextCompacted,
     ContextCompactionFailed,
     JobNotice,
+    ImagesRejected,
     ModelRetry,
     ReasoningDelta,
     RequestStats,
@@ -55,6 +56,7 @@ from .events import (
 from .jobs import Jobs
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string, takes_thinking)
+from .images import has_images, takes_images, with_images, without_images
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -78,7 +80,7 @@ from .tools.registry import (
     validate_args,
     without,
 )
-from .tools.result import ToolError, ToolResult
+from .tools.result import Image, ToolError, ToolResult
 from .tools.shell import user_shell
 
 # Transient compaction failures tolerated in one turn before it is left off.
@@ -129,8 +131,8 @@ def _settled(slot: ToolReturnPart, result: ToolResult,
     kept.pop("detail", None)
     if result.detail != ("" if result.ok else result.status):
         kept["detail"] = result.detail
-    return dataclasses.replace(slot, content=result.text, outcome=result.status,
-                               metadata=kept or None)
+    return dataclasses.replace(slot, content=with_images(result.text, result.images),
+                               outcome=result.status, metadata=kept or None)
 
 
 def _held(toolset: dict[str, Tool] | None, config: Config, options: RunOptions) -> dict[str, Tool]:
@@ -352,6 +354,8 @@ class Agent:
         # to, and those responses are still the model's own (see
         # _strip_foreign_thinking).
         self._reported_ids: dict[tuple[str, str], set[str]] = {}
+        # Models that refused a request for its images, by (system, name).
+        self._image_blind: set[tuple[str, str]] = set()
         # Refusals in a row from the auto-mode reviewer; see _review.
         self._review_blocks = 0
         # (history length, provider-reported tokens) after the last completed
@@ -648,10 +652,14 @@ class Agent:
         the recap); the reviewer and compaction write their own text.
         """
         aliases = self._reported_ids.get((model.system, model.model_name), set())
-        return [
-            ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]),
-            *_failures_as_text(_strip_foreign_thinking(self.history, model, aliases)),
-        ]
+        history = _failures_as_text(_strip_foreign_thinking(self.history, model, aliases))
+        if not self._sees_images(model):
+            history = without_images(history)
+        return [ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)]), *history]
+
+    def _sees_images(self, model: Model) -> bool:
+        return (takes_images(model)
+                and (model.system, model.model_name) not in self._image_blind)
 
     async def recap(self) -> str:
         """Where the session stands, in a few lines, for a user coming back to it.
@@ -915,6 +923,10 @@ class Agent:
                 # reads the error the way the model would; only the record
                 # says it failed.
                 record["status"] = "ok" if result.ok else "error"
+                if result.images:
+                    # A script gets text back and nothing else.
+                    return ("This file is an image, which a script cannot look at. "
+                            "Call read_file on its own to see it.")
                 return result.text
             finally:
                 record["seconds"] = round(time.perf_counter() - started, 3)
@@ -943,17 +955,20 @@ class Agent:
                          safe_commands=self.run_options.safe_commands(self.config),
                          ctx=self.tool_context) == "allow")
 
-    def expand_input(self, text: str) -> str:
+    def expand_input(self, text: str) -> str | list:
         """What a typed message becomes: a /skill:name command expands to the
-        skill's content, then @path mentions are inlined."""
+        skill's content, then @path mentions are inlined, and the images
+        among them attached."""
+        images: list[Image] = []
+
         def mentions(part: str) -> str:
-            return expand_mentions(part, self.cwd)
+            return expand_mentions(part, self.cwd, images)
 
         expanded = expand_skill_command(text, self.skills, expand_args=mentions)
         # Unchanged (the same object back) means it was not a skill command.
-        return mentions(text) if expanded is text else expanded
+        return with_images(mentions(text) if expanded is text else expanded, images)
 
-    async def run(self, user_input: str | None, *, expand: bool = True,
+    async def run(self, user_input: str | list | None, *, expand: bool = True,
                   max_tool_calls: int | None = None) -> AsyncIterator[AgentEvent]:
         """Run one user turn to completion, yielding events along the way.
 
@@ -1034,7 +1049,7 @@ class Agent:
         finally:
             self._in_flight = None
 
-    async def run_until_idle(self, user_input: str | None, *, expand: bool = True,
+    async def run_until_idle(self, user_input: str | list | None, *, expand: bool = True,
                              max_tool_calls: int | None = None) -> AsyncIterator[AgentEvent]:
         """Run ``user_input``, then keep the agent going until it has nothing
         left to wait for, yielding the events of every turn.
@@ -1236,6 +1251,20 @@ class Agent:
                                                    compacted.tokens_after)
                             request_messages = self._context(model)
                             continue
+                    if (not started and retry.is_rejection(exc)
+                            and self._sees_images(model) and has_images(self.history)):
+                        # Profiles call nearly every model able to see, so a
+                        # text-only one is found out here, by its refusal.
+                        # The request goes again in words alone, and so does
+                        # every later one to this model: the images stay in
+                        # the history, which would otherwise never be
+                        # accepted again.
+                        self._image_blind.add((model.system, model.model_name))
+                        self.session.append_meta("images_rejected",
+                                                 error=f"{type(exc).__name__}: {exc}")
+                        yield ImagesRejected(model.model_name)
+                        request_messages = self._context(model)
+                        continue
                     # Counted only here: the compact-and-retry above is its own
                     # allowance, not one of the transient retries.
                     attempt += 1

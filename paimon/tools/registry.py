@@ -319,7 +319,8 @@ REGISTRY: dict[str, Tool] = {
         run=lambda args, cwd, mode, ctx: asyncio.to_thread(_read_file, args, cwd, _READ_BUDGET),
         description=(
             "Read a text file and return its contents with line numbers. A long "
-            "file is returned up to a limit, with the offset to read on from."
+            "file is returned up to a limit, with the offset to read on from. A "
+            "PNG, JPEG, GIF or WebP image is returned as the picture itself."
         ),
         params=ReadFileArgs,
     ),

@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Iterator
 
-from .result import ToolError
+from .result import Image, ToolError, ToolResult
 
 
 def _resolve(path: str, cwd: Path) -> Path:
@@ -86,8 +86,47 @@ def _encode_preserving(text: str, newline: str, bom: bool) -> bytes:
     return codecs.BOM_UTF8 + raw if bom else raw
 
 
-def _read_file(args: dict, cwd: Path, budget: int | None = None) -> str:
-    """The file's lines, numbered.
+# Anthropic refuses a larger image, and it is the lowest of the limits.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def image_type(head: bytes) -> str | None:
+    """The media type of the image these first bytes open, or None.
+
+    Told from the content, never the name: a screenshot tool's ``.png`` may
+    hold a JPEG, and a provider refuses an image whose type is misdeclared.
+    """
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def read_image(path: Path) -> Image | None:
+    """The image at ``path``, or None when the file is not one.
+
+    Raises ToolError for an image too large to send, and OSError as reading
+    any file does.
+    """
+    with path.open("rb") as source:
+        media_type = image_type(source.read(12))
+        if media_type is None:
+            return None
+        size = os.fstat(source.fileno()).st_size
+        if size > MAX_IMAGE_BYTES:
+            raise ToolError(f"Error: {path} is a {size / 1_048_576:.1f} MB image; "
+                            f"one over {MAX_IMAGE_BYTES // 1_048_576} MB cannot be sent to the model.")
+        source.seek(0)
+        return Image(source.read(), media_type)
+
+
+def _read_file(args: dict, cwd: Path, budget: int | None = None) -> str | ToolResult:
+    """The file's lines, numbered, or the picture itself when it is an image.
 
     Read as a stream, and no further than ``budget`` characters of result: a
     longer file ends with a line saying where to read on from, instead of
@@ -96,6 +135,10 @@ def _read_file(args: dict, cwd: Path, budget: int | None = None) -> str:
     path = _resolve(args["path"], cwd)
     if not path.exists():
         raise ToolError(f"Error: file not found: {path}")
+    image = read_image(path) if path.is_file() else None
+    if image is not None:
+        return ToolResult(f"{path} is an image ({image.media_type}, {len(image.data):,} bytes), "
+                          "shown below.", images=(image,))
     # Refused rather than clamped or ignored: a limit of 0 read as "no limit"
     # hands back the whole file, and an offset of 0 is a model counting from
     # zero, which deserves to hear that lines count from 1.
