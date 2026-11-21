@@ -23,7 +23,7 @@ from .base import MAX_OUTPUT, Tool, ToolContext
 from .files import _edit_file, _glob, _read_file, _write_file
 from .grep import _GREP_DEFAULT_RESULTS, _GREP_MAX_RESULTS, _grep_async
 from .result import ToolError, ToolResult
-from .shell import _shell
+from .shell import _COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT, _shell
 
 
 # An ask callback puts a question (and optional choices) to the user and
@@ -231,6 +231,10 @@ class WebSearchArgs(TypedDict):
 @_spec
 class ShellArgs(TypedDict):
     command: str
+    timeout: NotRequired[Annotated[int, Field(ge=1, le=MAX_COMMAND_TIMEOUT, description=(
+        f"Seconds the command may run before it is killed (optional, default "
+        f"{_COMMAND_TIMEOUT:g}, maximum {MAX_COMMAND_TIMEOUT}). Raise it for a build or a "
+        f"test suite known to take longer."))]]
 
 
 @_spec
@@ -360,7 +364,8 @@ REGISTRY: dict[str, Tool] = {
         description=(
             "Run a shell command in the working directory and return its combined "
             "stdout/stderr. Use this for git, running tests and anything the other "
-            "tools do not cover. Output is truncated to the last 2000 lines or ~28KB, whichever "
+            "tools do not cover. A command still running when its timeout passes is "
+            "killed, so pass a longer timeout for one known to be slow. Output is truncated to the last 2000 lines or ~28KB, whichever "
             "comes first; when that happens the full output is written to a file and its "
             "path is included in the result, so you can read the earlier part back."
         ),
