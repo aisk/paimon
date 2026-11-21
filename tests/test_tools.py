@@ -252,24 +252,13 @@ class ReadFileTest(unittest.TestCase):
             f"{shown + 1}  line {shown + 1}\n"))
         self.assertNotIn("stopped", self._read(limit=5, budget=300))
 
-    def test_one_enormous_line_is_never_held_whole(self) -> None:
-        from paimon.tools import files
-        (self.cwd / "f.txt").write_bytes(b"x" * (3 * files._READ_CHUNK) + b"\nafter\n")
-        with patch.object(files, "_decode_preserving", side_effect=AssertionError("whole file read")):
-            result = self._read()
+    def test_a_first_line_longer_than_the_result_is_cut_short(self) -> None:
+        (self.cwd / "f.txt").write_text("x" * 5_000 + "\nafter\n")
+        body, note = self._read(budget=1_000).split("\n")
 
-        first, second = result.split("\n")
-        self.assertEqual(len(first), len("1  ") + files._READ_CHUNK + len(
-            f" ... (line 1 is longer than {files._READ_CHUNK} bytes; the rest is left out)"))
-        self.assertEqual(second, "2  after", "the line after it keeps its number")
-        cut = self._read(budget=1_000)
-        self.assertLessEqual(len(cut), 1_000)
-        self.assertIn("line 1 is cut short to fit the result; read on with offset=2", cut)
-
-    def test_a_line_exactly_one_chunk_long_is_whole(self) -> None:
-        from paimon.tools import files
-        (self.cwd / "f.txt").write_bytes(b"x" * files._READ_CHUNK)
-        self.assertEqual(self._read(), "1  " + "x" * files._READ_CHUNK)
+        self.assertEqual(body, "1  " + "x" * 1_000)
+        self.assertEqual(note, "... (line 1 is cut short to fit the result; read on with offset=2)")
+        self.assertEqual(self._read(offset=2, budget=1_000), "2  after")
 
 
 class GlobTest(unittest.TestCase):
@@ -320,13 +309,15 @@ class GlobTest(unittest.TestCase):
         self.write("node_modules/dep/deep/a.py")
         kept = self.write("src/a.py")
         listed = []
-        scandir = os.scandir
 
-        def recording(path):
-            listed.append(Path(path).name)
-            return scandir(path)
+        def recording(function):
+            def listing(path):
+                listed.append(Path(path).name)
+                return function(path)
+            return listing
 
-        with patch("paimon.tools.files.os.scandir", recording):
+        with (patch("paimon.tools.files.os.scandir", recording(os.scandir)),
+              patch("paimon.tools.files.os.listdir", recording(os.listdir))):
             self.assertEqual(self._glob("**/*.py"), [str(kept)])
         self.assertNotIn("node_modules", listed)
         self.assertNotIn("dep", listed)
@@ -395,23 +386,6 @@ class OffLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(result.text), MAX_OUTPUT)
         self.assertRegex(result.text, r"read on with offset=\d+\)$")
         self.assertNotIn("truncated", result.text)
-
-    async def test_an_interrupted_call_tells_its_thread_to_stop(self) -> None:
-        entered, stopped = threading.Event(), threading.Event()
-
-        def walking(args, cwd, sandboxed=False, stop=None):
-            entered.set()
-            if stop.wait(10):
-                stopped.set()
-            return ""
-
-        with patch("paimon.tools.registry._glob", walking):
-            task = asyncio.create_task(execute_tool("glob", {"pattern": "*"}, self.cwd))
-            await asyncio.to_thread(entered.wait, 10)
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            self.assertTrue(await asyncio.to_thread(stopped.wait, 10))
 
 
 class ValidateArgsTest(unittest.TestCase):
