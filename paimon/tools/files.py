@@ -7,7 +7,6 @@ import codecs
 import fnmatch
 import os
 import re
-import threading
 import time
 from pathlib import Path
 from typing import Iterator
@@ -87,54 +86,12 @@ def _encode_preserving(text: str, newline: str, bom: bool) -> bytes:
     return codecs.BOM_UTF8 + raw if bom else raw
 
 
-# Read a line at a time and never more of one than this, so a file with no
-# newline in it at all (a minified bundle, a database dump) costs this much
-# memory rather than its whole size.
-_READ_CHUNK = 64 * 1024
+def _read_file(args: dict, cwd: Path, budget: int | None = None) -> str:
+    """The file's lines, numbered.
 
-
-def _stopped(stop: threading.Event | None) -> bool:
-    return stop is not None and stop.is_set()
-
-
-def _numbered_lines(source, stop: threading.Event | None) -> Iterator[tuple[int, bytes, bool]]:
-    """(line number, the line's first bytes without its ending, whether more
-    of it was left unread) for every line of a file opened in binary mode.
-
-    Only "\n" ends a line, "\r\n" being one way to write it: str.splitlines()
-    also breaks at form feeds, \x1c-\x1e, NEL and the Unicode separators, and
-    drops them, so line numbers would disagree with grep's and an old_string
-    copied from this output would not be found by edit_file.
-    """
-    number = 0
-    while not _stopped(stop):
-        raw = source.readline(_READ_CHUNK)
-        if not raw:
-            return
-        number += 1
-        ended = raw.endswith(b"\n")
-        clipped = False
-        # The rest of a longer line is passed over, never held.
-        while not ended and len(raw) == _READ_CHUNK and not _stopped(stop):
-            more = source.readline(_READ_CHUNK)
-            if not more:
-                break
-            clipped, ended = True, more.endswith(b"\n")
-        if number == 1 and raw.startswith(codecs.BOM_UTF8):
-            raw = raw[len(codecs.BOM_UTF8):]
-        if raw.endswith(b"\n"):
-            raw = raw[:-1].removesuffix(b"\r")
-        yield number, raw, clipped
-
-
-def _read_file(args: dict, cwd: Path, budget: int | None = None,
-               stop: threading.Event | None = None) -> str:
-    """The file's lines, numbered, read as a stream.
-
-    ``budget`` is how many characters the result may run to. Reading ends
-    there, with a line saying where to go on from, instead of the whole file
-    being loaded for a result that is cut down to a fraction of it afterwards.
-    ``stop`` ends the read early for a caller that is no longer waiting.
+    Read as a stream, and no further than ``budget`` characters of result: a
+    longer file ends with a line saying where to read on from, instead of
+    being loaded whole for a result that is cut to a fraction of it afterwards.
     """
     path = _resolve(args["path"], cwd)
     if not path.exists():
@@ -150,41 +107,42 @@ def _read_file(args: dict, cwd: Path, budget: int | None = None,
         raise ToolError("Error: limit must be at least 1; leave it out to read to the end.")
     last = offset - 1 + int(limit) if limit is not None else None
 
-    selected: list[str] = []
-    size = width = 0
+    lines: list[str] = []
+    chars = 0
     note = ""
     with path.open("rb") as source:
-        for number, raw, clipped in _numbered_lines(source, stop):
+        # A file read as bytes ends a line at "\n" and nowhere else.
+        # str.splitlines() also breaks at form feeds, \x1c-\x1e, NEL and the
+        # Unicode separators, and drops them, so line numbers would disagree
+        # with grep's and an old_string copied from this output would not be
+        # found by edit_file.
+        for number, raw in enumerate(source, 1):
             if number < offset:
                 continue
             if last is not None and number > last:
                 break
+            if number == 1:
+                raw = raw.removeprefix(codecs.BOM_UTF8)
+            raw = raw[:-2] if raw.endswith(b"\r\n") else raw.removesuffix(b"\n")
             # Lossy on purpose: this text is shown, never written back.
             line = raw.decode("utf-8", errors="replace")
-            if clipped:
-                line += f" ... (line {number} is longer than {_READ_CHUNK} bytes; the rest is left out)"
-            # Every number is padded to the width of the last one, so a line
-            # whose number is a digit longer widens all the lines before it.
-            digits = len(str(number))
-            size += len(selected) * (digits - width)
-            width = digits
-            cost = len(line) + width + 3  # two spaces and the newline
-            if budget is not None and size + cost > budget:
-                if selected:
+            chars += len(line)
+            # Each line also carries its number, two spaces and a newline.
+            framing = (len(lines) + 1) * (len(str(number)) + 3)
+            if budget is not None and chars + framing > budget:
+                if lines:
                     note = (f"... (stopped before line {number} to keep the result short; "
                             f"read on with offset={number})")
-                    break
-                line = line[:max(budget - 200, 0)]
-                note = (f"... (line {number} is cut short to fit the result; "
-                        f"read on with offset={number + 1})")
-                selected.append(line)
+                else:
+                    lines.append(line[:budget])
+                    note = (f"... (line {number} is cut short to fit the result; "
+                            f"read on with offset={number + 1})")
                 break
-            selected.append(line)
-            size += cost
-    if not selected:
+            lines.append(line)
+    if not lines:
         return "(file is empty or offset past end of file)"
-    width = len(str(offset + len(selected) - 1))
-    text = "\n".join(f"{offset + i:>{width}}  {line}" for i, line in enumerate(selected))
+    width = len(str(offset + len(lines) - 1))
+    text = "\n".join(f"{offset + i:>{width}}  {line}" for i, line in enumerate(lines))
     return f"{text}\n{note}" if note else text
 
 
@@ -240,79 +198,61 @@ _GLOB_IGNORE = {
 }
 
 
-# How long a glob may walk. The walk runs off the event loop, where a caller
-# that stops waiting cannot interrupt it, so this is also what ends a walk
-# nobody is waiting for any more.
+# How long a glob may walk. It runs in a thread, which nothing can interrupt,
+# so this is also what ends a walk whose caller has stopped waiting.
 _GLOB_TIMEOUT = 10.0
 
 _GLOB_MAGIC = re.compile(r"[*?\[]")
 
 
-class _GlobTimeout(Exception):
-    pass
+def _subdirectories(directory: Path) -> list[Path]:
+    """The directories in ``directory``, leaving out symlinks to one."""
+    try:
+        with os.scandir(directory) as entries:
+            return [Path(entry.path) for entry in entries
+                    if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
 
 
-def _glob_files(base: Path, parts: tuple[str, ...], skip: set[str],
-                expired) -> Iterator[Path]:
-    """Files under ``base`` matching the pattern's ``parts``, the way
-    Path.glob matches them, except that a directory named in ``skip`` is never
-    entered: filtering its files out afterwards means walking all of
-    node_modules to throw every result away.
+def _named(directory: Path, part: str) -> list[Path]:
+    """What one part of a pattern names in ``directory``."""
+    if not _GLOB_MAGIC.search(part):
+        return [directory / part]
+    try:
+        return [directory / name for name in fnmatch.filter(os.listdir(directory), part)]
+    except OSError:
+        return []
 
-    "**" matches any number of directories and does not follow a symlink to
-    one, so the walk ends; a named or wildcard part does follow it.
+
+def _glob_files(directory: Path, parts: tuple[str, ...], skip: set[str],
+                deadline: float) -> Iterator[Path]:
+    """The files under ``directory`` that ``parts`` match, as Path.glob matches
+    them, except that a directory named in ``skip`` is never entered:
+    filtering its files out afterwards means walking all of node_modules to
+    throw every result away.
     """
-    matchers = [None if part == "**" or not _GLOB_MAGIC.search(part)
-                else re.compile(fnmatch.translate(os.path.normcase(part))).match
-                for part in parts]
-
-    def entries(directory: Path) -> list[os.DirEntry]:
-        try:
-            with os.scandir(directory) as found:
-                return list(found)
-        except OSError:
-            return []
-
-    def is_dir(entry: os.DirEntry, follow: bool) -> bool:
-        try:
-            return entry.is_dir(follow_symlinks=follow)
-        except OSError:
-            return False
-
-    def walk(directory: Path, index: int) -> Iterator[Path]:
-        if expired():
-            raise _GlobTimeout
-        part, last = parts[index], index == len(parts) - 1
-        if part == "**":
-            yield from walk(directory, index + 1)
-            for entry in entries(directory):
-                if entry.name not in skip and is_dir(entry, follow=False):
-                    yield from walk(Path(entry.path), index)
-        elif (match := matchers[index]) is None:
-            child = directory / part
-            if last:
-                if child.is_file():
-                    yield child
-            elif part not in skip and child.is_dir():
-                yield from walk(child, index + 1)
-        else:
-            for entry in entries(directory):
-                if not match(os.path.normcase(entry.name)):
-                    continue
-                if last:
-                    try:
-                        if entry.is_file():
-                            yield Path(entry.path)
-                    except OSError:
-                        continue
-                elif entry.name not in skip and is_dir(entry, follow=True):
-                    yield from walk(Path(entry.path), index + 1)
-
-    yield from walk(base, 0)
+    if time.monotonic() >= deadline:
+        raise ToolError(f"Error: glob timed out after {_GLOB_TIMEOUT:g} seconds. "
+                        "Narrow the pattern or the path.")
+    part, rest = parts[0], parts[1:]
+    if part == "**":
+        # No directory at all, then each one below. Not through a symlink,
+        # which is what makes the walk end.
+        yield from _glob_files(directory, rest, skip, deadline)
+        for child in _subdirectories(directory):
+            if child.name not in skip:
+                yield from _glob_files(child, parts, skip, deadline)
+        return
+    for child in _named(directory, part):
+        if not rest:
+            if child.is_file():
+                yield child
+        elif child.name not in skip and child.is_dir():
+            yield from _glob_files(child, rest, skip, deadline)
 
 
-def _glob(args: dict, cwd: Path, sandboxed: bool = False,
-          stop: threading.Event | None = None) -> str:
+def _glob(args: dict, cwd: Path, sandboxed: bool = False) -> str:
     base = _resolve(args["path"], cwd) if args.get("path") else cwd
     if not base.is_dir():
         raise ToolError(f"Error: not a directory: {base}")
@@ -329,28 +269,19 @@ def _glob(args: dict, cwd: Path, sandboxed: bool = False,
         parts += ("*",)
     # The ignore list names directories: a file called "build" is matched.
     skip = set() if args.get("include_ignored") else _GLOB_IGNORE
-    deadline = time.monotonic() + _GLOB_TIMEOUT
-
-    def expired() -> bool:
-        return _stopped(stop) or time.monotonic() >= deadline
-
+    found = _glob_files(base, parts, skip, time.monotonic() + _GLOB_TIMEOUT)
     # Timed in one pass, and a file gone since it was listed is left out:
     # it is no longer there to match, and one stat failing must not fail
     # the whole call.
     dated = []
-    try:
-        for p in dict.fromkeys(_glob_files(base, parts, skip, expired)):
-            # sandboxed keeps symlinks under base from listing files outside it
-            if sandboxed and not _inside(p, base):
-                continue
-            try:
-                dated.append((p.stat().st_mtime, p))
-            except OSError:
-                continue
-    except _GlobTimeout:
-        raise ToolError(f"Error: glob timed out after {_GLOB_TIMEOUT:g} seconds with "
-                        f"{len(dated)} files matched so far. Narrow the pattern or the "
-                        "path.") from None
+    for p in dict.fromkeys(found):  # "**/a/**" reaches a file by more than one route
+        # sandboxed keeps symlinks under base from listing files outside it
+        if sandboxed and not _inside(p, base):
+            continue
+        try:
+            dated.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
     if not dated:
         return "(no files matched)"
     dated.sort(key=lambda item: item[0], reverse=True)
