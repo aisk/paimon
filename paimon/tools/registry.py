@@ -9,6 +9,7 @@ gating. Adding a tool means adding one registry entry.
 import asyncio
 import dataclasses
 import inspect
+import threading
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Awaitable, Callable, Literal
@@ -128,6 +129,24 @@ def _read_history(args: dict, ctx: ToolContext) -> str:
     if ctx.session is None:
         raise ToolError("Error: no session log available")
     return history.read(ctx.session, args, _READ_BUDGET)
+
+
+async def _off_loop(function: Callable, *args, **kwargs):
+    """Run a blocking file tool in a thread, so a walk through a huge tree or
+    a read of a huge file does not freeze every pane and the interrupt key
+    along with it.
+
+    A thread cannot be cancelled, so the function is handed an event that is
+    set when the caller stops waiting, and gives up at its next check.
+
+    Only for tools that change nothing: an interrupted write that completes
+    anyway would be recorded as one that never happened.
+    """
+    stop = threading.Event()
+    try:
+        return await asyncio.to_thread(function, *args, **kwargs, stop=stop)
+    finally:
+        stop.set()
 
 
 async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
@@ -306,8 +325,11 @@ class RunCodeArgs(TypedDict):
 REGISTRY: dict[str, Tool] = {
     "read_file": Tool(
         access="read",
-        run=lambda args, cwd, mode, ctx: _read_file(args, cwd),
-        description="Read a text file and return its contents with line numbers.",
+        run=lambda args, cwd, mode, ctx: _off_loop(_read_file, args, cwd, budget=_READ_BUDGET),
+        description=(
+            "Read a text file and return its contents with line numbers. A long "
+            "file is returned up to a limit, with the offset to read on from."
+        ),
         params=ReadFileArgs,
     ),
     "write_file": Tool(
@@ -324,7 +346,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "glob": Tool(
         access="read",
-        run=lambda args, cwd, mode, ctx: _glob(args, cwd, sandboxed=mode != "yolo"),
+        run=lambda args, cwd, mode, ctx: _off_loop(_glob, args, cwd, sandboxed=mode != "yolo"),
         description="Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
         params=GlobArgs,
     ),

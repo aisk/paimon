@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -200,9 +201,9 @@ class ReadFileTest(unittest.TestCase):
         self.cwd = Path(tmp.name).resolve()
         (self.cwd / "f.txt").write_text("a\nb\nc\n")
 
-    def _read(self, **args) -> str:
+    def _read(self, budget: int | None = None, **args) -> str:
         from paimon.tools.files import _read_file
-        return _read_file({"path": "f.txt", **args}, self.cwd)
+        return _read_file({"path": "f.txt", **args}, self.cwd, budget=budget)
 
     def test_offset_and_limit_select_a_window(self) -> None:
         self.assertEqual(self._read(offset=2, limit=1), "2  b")
@@ -236,6 +237,39 @@ class ReadFileTest(unittest.TestCase):
         self.assertEqual(self._read(), "1  a\n2  b\n3  ")
         (self.cwd / "f.txt").write_bytes(b"")
         self.assertEqual(self._read(), "(file is empty or offset past end of file)")
+
+
+    def test_a_long_file_stops_at_a_line_and_says_where_to_read_on(self) -> None:
+        (self.cwd / "f.txt").write_text("".join(f"line {n}\n" for n in range(1, 1001)))
+        first = self._read(budget=300)
+
+        body, note = first.rsplit("\n", 1)
+        self.assertLessEqual(len(body), 300)
+        shown = len(body.splitlines())
+        self.assertEqual(note, f"... (stopped before line {shown + 1} to keep the result short; "
+                               f"read on with offset={shown + 1})")
+        self.assertTrue(self._read(offset=shown + 1, budget=300).startswith(
+            f"{shown + 1}  line {shown + 1}\n"))
+        self.assertNotIn("stopped", self._read(limit=5, budget=300))
+
+    def test_one_enormous_line_is_never_held_whole(self) -> None:
+        from paimon.tools import files
+        (self.cwd / "f.txt").write_bytes(b"x" * (3 * files._READ_CHUNK) + b"\nafter\n")
+        with patch.object(files, "_decode_preserving", side_effect=AssertionError("whole file read")):
+            result = self._read()
+
+        first, second = result.split("\n")
+        self.assertEqual(len(first), len("1  ") + files._READ_CHUNK + len(
+            f" ... (line 1 is longer than {files._READ_CHUNK} bytes; the rest is left out)"))
+        self.assertEqual(second, "2  after", "the line after it keeps its number")
+        cut = self._read(budget=1_000)
+        self.assertLessEqual(len(cut), 1_000)
+        self.assertIn("line 1 is cut short to fit the result; read on with offset=2", cut)
+
+    def test_a_line_exactly_one_chunk_long_is_whole(self) -> None:
+        from paimon.tools import files
+        (self.cwd / "f.txt").write_bytes(b"x" * files._READ_CHUNK)
+        self.assertEqual(self._read(), "1  " + "x" * files._READ_CHUNK)
 
 
 class GlobTest(unittest.TestCase):
@@ -279,6 +313,105 @@ class GlobTest(unittest.TestCase):
 
         with patch.object(Path, "stat", vanishing):
             self.assertEqual(self._glob("*.txt"), [str(kept)])
+
+
+    def test_an_ignored_directory_is_never_walked(self) -> None:
+        """Filtering afterwards means walking all of node_modules for nothing."""
+        self.write("node_modules/dep/deep/a.py")
+        kept = self.write("src/a.py")
+        listed = []
+        scandir = os.scandir
+
+        def recording(path):
+            listed.append(Path(path).name)
+            return scandir(path)
+
+        with patch("paimon.tools.files.os.scandir", recording):
+            self.assertEqual(self._glob("**/*.py"), [str(kept)])
+        self.assertNotIn("node_modules", listed)
+        self.assertNotIn("dep", listed)
+
+    def test_matches_what_path_glob_matches(self) -> None:
+        for relative in ("a.py", "b.txt", ".env", "src/a.py", "src/pkg/b.py", "src/pkg/.hidden/c.py",
+                         "docs/a.md", "docs/src/d.py"):
+            self.write(relative)
+        if os.name == "posix":  # making one takes a privilege on Windows
+            os.symlink(self.cwd / "src", self.cwd / "link", target_is_directory=True)
+        for pattern in ("*", "*.py", "**/*.py", "**/*", "src/**/*.py", "*/a.*", "**/src/*.py",
+                        "**/**/b.py", "./src/*.py", "**/.*", "[sd]*/*", "link/*.py", "link/**/*.py",
+                        "src/a.py", "nope/*", "src/../docs/*"):
+            with self.subTest(pattern=pattern):
+                expected = [str(p) for p in self.cwd.glob(pattern) if p.is_file()]
+                self.assertEqual(sorted(self._glob(pattern)), sorted(expected) or ["(no files matched)"])
+
+    def test_a_trailing_double_star_lists_everything_below(self) -> None:
+        a, b = self.write("src/a.py"), self.write("src/pkg/b.py")
+        self.assertEqual(sorted(self._glob("src/**")), sorted([str(a), str(b)]))
+
+    def test_an_absolute_pattern_is_refused_with_what_to_do_instead(self) -> None:
+        with self.assertRaisesRegex(ToolError, "pass the directory to search as path"):
+            self._glob(str(self.cwd / "*.py"))
+
+    def test_a_walk_that_takes_too_long_is_given_up(self) -> None:
+        self.write("src/a.py")
+        with (patch("paimon.tools.files._GLOB_TIMEOUT", 0.0),
+              self.assertRaisesRegex(ToolError, "glob timed out after 0 seconds")):
+            self._glob("**/*.py")
+
+
+class OffLoopTest(unittest.IsolatedAsyncioTestCase):
+    """read_file and glob run in a thread, so neither can freeze the loop."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        (self.cwd / "f.txt").write_text("a\nb\n")
+
+    async def test_they_run_off_the_event_loop(self) -> None:
+        from paimon.tools import files
+        threads = []
+
+        def recording(function):
+            def run(*args, **kwargs):
+                threads.append(threading.current_thread())
+                return function(*args, **kwargs)
+            return run
+
+        with (patch("paimon.tools.registry._read_file", recording(files._read_file)),
+              patch("paimon.tools.registry._glob", recording(files._glob))):
+            read = await execute_tool("read_file", {"path": "f.txt"}, self.cwd)
+            found = await execute_tool("glob", {"pattern": "*.txt"}, self.cwd)
+
+        self.assertEqual(read.text, "1  a\n2  b")
+        self.assertEqual(found.text, str(self.cwd / "f.txt"))
+        self.assertEqual(len(threads), 2)
+        self.assertNotIn(threading.main_thread(), threads)
+
+    async def test_a_long_read_comes_back_within_the_output_limit(self) -> None:
+        (self.cwd / "f.txt").write_text("".join(f"line {n}\n" for n in range(1, 20_001)))
+        result = await execute_tool("read_file", {"path": "f.txt"}, self.cwd)
+
+        self.assertLessEqual(len(result.text), MAX_OUTPUT)
+        self.assertRegex(result.text, r"read on with offset=\d+\)$")
+        self.assertNotIn("truncated", result.text)
+
+    async def test_an_interrupted_call_tells_its_thread_to_stop(self) -> None:
+        entered, stopped = threading.Event(), threading.Event()
+
+        def walking(args, cwd, sandboxed=False, stop=None):
+            entered.set()
+            if stop.wait(10):
+                stopped.set()
+            return ""
+
+        with patch("paimon.tools.registry._glob", walking):
+            task = asyncio.create_task(execute_tool("glob", {"pattern": "*"}, self.cwd))
+            await asyncio.to_thread(entered.wait, 10)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(await asyncio.to_thread(stopped.wait, 10))
 
 
 class ValidateArgsTest(unittest.TestCase):
