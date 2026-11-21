@@ -315,6 +315,7 @@ REGISTRY: dict[str, Tool] = {
     # recorded as one that never ran.
     "read_file": Tool(
         access="read",
+        parallel=True,
         run=lambda args, cwd, mode, ctx: asyncio.to_thread(_read_file, args, cwd, _READ_BUDGET),
         description=(
             "Read a text file and return its contents with line numbers. A long "
@@ -336,12 +337,14 @@ REGISTRY: dict[str, Tool] = {
     ),
     "glob": Tool(
         access="read",
+        parallel=True,
         run=lambda args, cwd, mode, ctx: asyncio.to_thread(_glob, args, cwd, mode != "yolo"),
         description="Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
         params=GlobArgs,
     ),
     "grep": Tool(
         access="read",
+        parallel=True,
         run=lambda args, cwd, mode, ctx: _grep_async(args, cwd, sandboxed=mode != "yolo"),
         description=(
             "Search file contents for a regular expression and return matching "
@@ -357,6 +360,7 @@ REGISTRY: dict[str, Tool] = {
     # --no-web-search takes the tool away for a run where that matters.
     "web_search": Tool(
         access="none",
+        parallel=True,
         run=lambda args, cwd, mode, ctx: websearch.search(args),
         description=(
             "Search the web and return a numbered list of results, each with its "
@@ -385,6 +389,7 @@ REGISTRY: dict[str, Tool] = {
     # conversation once.
     "search_history": Tool(
         access="read",
+        parallel=True,
         run=lambda args, cwd, mode, ctx: _search_history(args, ctx),
         description=(
             "Search this session's full history log on disk. The log keeps every "
@@ -399,6 +404,7 @@ REGISTRY: dict[str, Tool] = {
     ),
     "read_history": Tool(
         access="read",
+        parallel=True,
         run=lambda args, cwd, mode, ctx: _read_history(args, ctx),
         description=(
             "Read full records from this session's history log by seq number, "

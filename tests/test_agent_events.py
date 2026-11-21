@@ -454,7 +454,9 @@ class ToolBatchLogTest(unittest.IsolatedAsyncioTestCase):
             records = session_records(agent.session)
             self.assertFalse(any("replaces" in record for record in records))
             settled = [record for record in records if record["type"] == "tool_result"]
-            self.assertEqual([record["index"] for record in settled], list(range(len(calls))))
+            # Sorted: the reads run together, so they settle as they finish.
+            self.assertEqual(sorted(record["index"] for record in settled),
+                             list(range(len(calls))))
 
             replayed = Session(agent.session.path, agent.session.id, cwd).messages()
             self.assertEqual(replayed, agent.history)
@@ -466,7 +468,10 @@ class ToolBatchLogTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(returns[f"c{self.FILES + 1}"].metadata, {"detail": "exit 2"})
 
     async def test_an_interrupted_batch_replays_with_every_call_answered(self) -> None:
-        calls = [("read_file", '{"path": "a.txt"}'), ("read_file", '{"path": "a.txt"}')]
+        # The second call writes, so it waits for the first instead of
+        # running alongside it, and has not started when the turn ends.
+        calls = [("read_file", '{"path": "a.txt"}'),
+                 ("write_file", '{"path": "b.txt", "content": "never"}')]
         with tempfile.TemporaryDirectory() as directory:
             cwd = Path(directory)
             (cwd / "a.txt").write_text("hello\n")
@@ -483,6 +488,7 @@ class ToolBatchLogTest(unittest.IsolatedAsyncioTestCase):
             first, second = replayed[-1].parts
             self.assertEqual((first.outcome, second.outcome), ("success", "interrupted"))
             self.assertIn("hello", first.content)
+            self.assertFalse((cwd / "b.txt").exists())
 
 
 class TurnOutcomeTest(unittest.IsolatedAsyncioTestCase):

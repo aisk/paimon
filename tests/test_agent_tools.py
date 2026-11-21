@@ -1,3 +1,5 @@
+import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,9 +22,11 @@ from paimon.events import (
     replay_events,
 )
 from paimon.config import Config, RunOptions
+from paimon.session import Session
 from paimon.review import MAX_BLOCKS, Verdict
 from paimon.tools.permissions import READ_DENIAL, USER_DENIAL
 from paimon.tools.registry import REGISTRY, SUBAGENT_DENIED, without
+from paimon.tools.result import ToolResult
 from tests.support.agent import make_session, open_agent, stub_model
 from tests.support.shell import modelled_shell
 
@@ -455,3 +459,167 @@ class JobToolsTest(unittest.IsolatedAsyncioTestCase):
                     agent._cached_model = None
                     end = await self._call(agent, name, '{"job_id": "a1f2"}')
                     self.assertIn("no agent or background command a1f2", end.result)
+
+
+class ParallelToolsTest(unittest.IsolatedAsyncioTestCase):
+    """Neighbouring calls that only read run together; everything else, and
+    every event, stays in the order the model wrote."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+        self.log: list[tuple[str, int]] = []
+        self.active = self.peak = 0
+        self.release = asyncio.Event()
+        self.release.set()
+
+    @staticmethod
+    def _model(calls: list[tuple[str, dict]]) -> FunctionModel:
+        requests = 0
+
+        async def stream(messages, info):
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                yield {index: DeltaToolCall(name=name, json_args=json.dumps(args),
+                                            tool_call_id=f"c{index}")
+                       for index, (name, args) in enumerate(calls)}
+            else:
+                yield "done"
+
+        return FunctionModel(stream_function=stream)
+
+    async def _tool(self, name, args, *rest, **options) -> ToolResult:
+        """Stands in for run_tool: says when a call starts and ends, and holds
+        it until every call that can run with it has started too."""
+        index = args["n"]
+        self.log.append(("start", index))
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            await asyncio.sleep(0)  # lets whatever was started with it start
+            await self.release.wait()
+        finally:
+            self.active -= 1
+        self.log.append(("end", index))
+        return ToolResult(f"result {index}")
+
+    async def _run(self, calls: list[tuple[str, dict]], **options) -> list:
+        agent = open_agent(self.cwd, **options.pop("agent", {}))
+        self.addCleanup(agent.close)
+        self.agent = agent
+        with (patch("paimon.agent.build_model", return_value=self._model(calls)),
+              patch("paimon.agent.run_tool", self._tool)):
+            return [event async for event in agent.run("go", **options)]
+
+    @staticmethod
+    def _read(n: int) -> tuple[str, dict]:
+        return "read_file", {"path": "a.txt", "n": n}
+
+    async def test_a_run_of_reads_starts_together_and_reports_in_order(self) -> None:
+        events = await self._run([self._read(n) for n in range(4)])
+
+        self.assertEqual(self.log[:4], [("start", n) for n in range(4)])
+        self.assertEqual(self.peak, 4)
+        tools = [(type(event), event.id) for event in events
+                 if isinstance(event, (ToolStart, ToolEnd))]
+        self.assertEqual(tools, [pair for n in range(4)
+                                 for pair in ((ToolStart, f"c{n}"), (ToolEnd, f"c{n}"))])
+        returns = self.agent.history[-2].parts
+        self.assertEqual([part.content for part in returns], [f"result {n}" for n in range(4)])
+        replayed = [event for event in replay_events(self.agent.history)
+                    if isinstance(event, (ToolStart, ToolEnd))]
+        self.assertEqual(replayed, [event for event in events
+                                    if isinstance(event, (ToolStart, ToolEnd))])
+
+    async def test_a_call_that_writes_waits_for_the_reads_before_it_and_holds_those_after(self) -> None:
+        calls = [self._read(0), self._read(1),
+                 ("write_file", {"path": "a.txt", "content": "x", "n": 2}),
+                 self._read(3), self._read(4)]
+        await self._run(calls)
+
+        self.assertEqual(self.peak, 2)
+        order = {entry: position for position, entry in enumerate(self.log)}
+        self.assertGreater(order[("start", 2)], max(order[("end", 0)], order[("end", 1)]))
+        self.assertLess(order[("end", 2)], min(order[("start", 3)], order[("start", 4)]))
+
+    async def test_only_so_many_run_at_once(self) -> None:
+        from paimon.agent import _PARALLEL_TOOLS
+
+        await self._run([self._read(n) for n in range(_PARALLEL_TOOLS * 2 + 3)])
+
+        self.assertEqual(self.peak, _PARALLEL_TOOLS)
+        self.assertEqual(sorted(n for kind, n in self.log if kind == "end"),
+                         list(range(_PARALLEL_TOOLS * 2 + 3)))
+
+    async def test_a_read_someone_has_to_be_asked_about_goes_on_its_own(self) -> None:
+        outside = str(self.cwd.parent / "elsewhere.txt")
+        agent = open_agent(self.cwd, mode="auto")
+
+        self.assertTrue(agent._runs_alongside("read_file", {"path": "a.txt"}))
+        self.assertTrue(agent._runs_alongside("grep", {"pattern": "x"}))
+        self.assertFalse(agent._runs_alongside("read_file", {"path": outside}))
+        self.assertFalse(agent._runs_alongside("write_file", {"path": "a.txt", "content": ""}))
+        self.assertFalse(agent._runs_alongside("shell", {"command": "ls"}))
+        agent.mode = "yolo"
+        self.assertTrue(agent._runs_alongside("read_file", {"path": outside}))
+        self.assertFalse(agent._runs_alongside("shell", {"command": "ls"}))
+        agent.close()
+
+        calls = [self._read(0), ("read_file", {"path": outside, "n": 1}), self._read(2)]
+        await self._run(calls, agent={"mode": "auto"})
+        self.assertEqual(self.peak, 1)
+
+    async def test_the_budget_is_spent_in_the_order_the_model_wrote(self) -> None:
+        events = await self._run([self._read(n) for n in range(4)], max_tool_calls=2)
+
+        self.assertEqual(sorted(n for kind, n in self.log if kind == "start"), [0, 1])
+        ends = [event for event in events if isinstance(event, ToolEnd)]
+        self.assertEqual([end.status for end in ends], ["success", "success", "failed", "failed"])
+        self.assertIsInstance(events[-1], ToolBudgetExhausted)
+
+    async def test_an_interrupt_stops_the_calls_still_running(self) -> None:
+        self.release.clear()
+        agent = open_agent(self.cwd)
+        self.addCleanup(agent.close)
+        with (patch("paimon.agent.build_model",
+                    return_value=self._model([self._read(n) for n in range(3)])),
+              patch("paimon.agent.run_tool", self._tool)):
+            run = agent.run("go")
+            async for event in run:
+                if isinstance(event, ToolStart):
+                    break
+            await asyncio.sleep(0)  # the calls started with the first one get going
+            await run.aclose()
+
+        self.assertEqual(self.active, 0, "nothing is left running behind the turn")
+        self.assertEqual([kind for kind, _ in self.log], ["start"] * 3)
+        self.assertEqual([part.outcome for part in agent.history[-1].parts], ["interrupted"] * 3)
+
+    async def test_results_settled_out_of_order_replay_to_the_live_history(self) -> None:
+        for name in ("a", "b", "c"):
+            (self.cwd / f"{name}.txt").write_text(f"needle-{name}\n")
+        delays = {"needle-a": 0.2, "needle-b": 0.1, "needle-c": 0.0}
+        finished = []
+
+        async def slowed(name, args, *rest, **options) -> ToolResult:
+            await asyncio.sleep(delays[args["pattern"]])
+            finished.append(args["pattern"])
+            return await real(name, args, *rest, **options)
+
+        from paimon.agent import run_tool as real
+        agent = open_agent(self.cwd)
+        self.addCleanup(agent.close)
+        calls = [("grep", {"pattern": pattern}) for pattern in delays]
+        with (patch("paimon.agent.build_model", return_value=self._model(calls)),
+              patch("paimon.agent.run_tool", slowed)):
+            [event async for event in agent.run("go")]
+
+        self.assertEqual(finished, ["needle-c", "needle-b", "needle-a"])
+        returns = agent.history[-2].parts
+        self.assertEqual([part.tool_call_id for part in returns], ["c0", "c1", "c2"])
+        for part, name in zip(returns, "abc"):
+            self.assertIn(f"{name}.txt:1:needle-{name}", part.content)
+        replayed = Session(agent.session.path, agent.session.id, self.cwd).messages()
+        self.assertEqual(replayed, agent.history)

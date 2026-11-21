@@ -214,9 +214,10 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
     """Persisted messages replayed as the events a live ``Agent.run`` yields.
 
     Lets a UI render resumed history through the same code path as live turns.
-    Tools run serially, so each call replays as its ToolStart immediately
-    followed by its ToolEnd (looked up in the next request), matching the live
-    order — not all starts of a batch first. The persisted ``outcome`` field
+    A call's events go out together even when it ran alongside others, so each
+    call replays as its ToolStart immediately followed by its ToolEnd (looked
+    up in the next request), matching the live order — not all starts of a
+    batch first. The persisted ``outcome`` field
     and its detail restore each call's status as it was shown live.
     """
     events: list[AgentEvent] = []

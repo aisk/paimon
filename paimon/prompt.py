@@ -32,6 +32,9 @@ _GUIDELINES: tuple[tuple[tuple[str, ...], str], ...] = (
      "old_string; only use write_file for new files or full rewrites."),
     (("glob", "grep"),
      "Use glob to find files by name pattern and grep to search file contents."),
+    (("read_file", "glob", "grep"),
+     "read_file, glob and grep calls made in one response run at the same time, so "
+     "ask for independent ones together rather than one per step."),
     (("shell",),
      "Use the shell tool for git, running tests and anything the other tools do not cover."),
     (("run_code",),

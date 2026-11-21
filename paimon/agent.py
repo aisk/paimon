@@ -65,7 +65,7 @@ from .session import (
     shell_message,
 )
 from .tools.base import Tool, ToolContext
-from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, confirm_for, run_tool
+from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, confirm_for, gate, run_tool
 from .tools.registry import (
     REGISTRY,
     SUBAGENT_DENIED,
@@ -85,6 +85,11 @@ from .tools.shell import user_shell
 _MAX_COMPACTION_FAILURES = 3
 
 _RECAP_MAX_TOKENS = 2_048
+
+# How many read-only calls of one response run at once. A grep is a process
+# of its own and a web search a connection, so a model asking for fifty is
+# served eight at a time.
+_PARALLEL_TOOLS = 8
 
 
 class AgentBusyError(PaimonError):
@@ -918,6 +923,17 @@ class Agent:
         "stop_job": _run_job_tool,
     }
 
+    def _runs_alongside(self, name: str, args: dict) -> bool:
+        """Whether a call may run while its neighbours do: a tool that only
+        reads, and a call nobody has to be asked about. One that is held goes
+        to the user or the reviewer on its own, in its turn, so two questions
+        are never on screen at once."""
+        tool = self.toolset.get(name)
+        return (tool is not None and tool.parallel and tool.run is not None
+                and gate(name, args, self.mode, self.cwd, self.toolset,
+                         safe_commands=self.run_options.safe_commands(self.config),
+                         ctx=self.tool_context) == "allow")
+
     def expand_input(self, text: str) -> str:
         """What a typed message becomes: a /skill:name command expands to the
         skill's content, then @path mentions are inlined."""
@@ -1259,68 +1275,108 @@ class Agent:
                 yield TurnEnd()
                 return
 
-            for index, call in enumerate(calls):
-                # Writes this one slot, so each result is durable the moment
-                # it is settled without rewriting the others.
-                settle = functools.partial(self._settle_slot, record_id, index, tool_request)
+            def admit(call: ToolCallPart) -> tuple[str, dict, ToolResult | None]:
+                """The call's name and arguments, and the failed result that
+                answers it when it is refused before it runs: "failed" rather
+                than "denied", which means a permission refusal."""
                 args = parse_args(call.args)
                 name = call.tool_name
-
-                # A call refused before it runs is still answered, with a
-                # failed result saying why: "failed" rather than "denied",
-                # which means a permission refusal.
-                refused: ToolResult | None = None
                 if (over := spend()) is not None:
                     # The budget check comes before any dispatch,
                     # agent-handled tools included: a refused call never
                     # executes, and its slot records why instead of a generic
                     # interrupted placeholder.
-                    refused = ToolResult(over, "failed", "over budget")
-                elif name not in self.toolset:
+                    return name, args, ToolResult(over, "failed", "over budget")
+                if name not in self.toolset:
                     # Rejected before the agent-handled table below, so
                     # excluding write_todos or ask_user from a toolset
                     # actually disables them.
-                    refused = ToolResult(f"Error: unknown tool {name!r}", "failed")
-                elif (invalid := validate_args(name, args, self.toolset)) is not None:
+                    return name, args, ToolResult(f"Error: unknown tool {name!r}", "failed")
+                if (invalid := validate_args(name, args, self.toolset)) is not None:
                     # One schema validation for every call — before gating
                     # and before the agent-handled dispatch below — so a
                     # malformed argument is a tool error the model can react
                     # to, never an exception ending the turn (TOOLS-1).
-                    refused = ToolResult(f"Error: invalid arguments for {name}: {invalid}",
-                                         "failed")
-                if refused is not None:
-                    yield ToolStart(call.tool_call_id, name, args)
-                    settle(refused)
-                    yield ToolEnd.of(call.tool_call_id, name, refused)
-                    continue
+                    return name, args, ToolResult(
+                        f"Error: invalid arguments for {name}: {invalid}", "failed")
+                return name, args, None
 
-                if name == codemode.NAME:
-                    # Not in the table below: it needs the turn's budget, which
-                    # only this scope holds. An interrupt leaves the slot its
-                    # placeholder, like any other tool cut short.
-                    yield ToolStart(call.tool_call_id, name, args)
-                    text, completed, nested = await self._run_code(args["code"], spend)
-                    result = ToolResult(text) if completed else ToolResult(text, "failed")
-                    # Kept beside the result, where it is persisted for replay
-                    # and never sent to the model.
-                    settle(result, {"calls": nested})
-                    yield ToolEnd.of(call.tool_call_id, name, result, nested)
-                    continue
+            def slot(index: int) -> Callable[..., None]:
+                # Writes this one slot, so each result is durable the moment
+                # it is settled without rewriting the others.
+                return functools.partial(self._settle_slot, record_id, index, tool_request)
 
-                handler = self._AGENT_HANDLED.get(name)
-                if handler is not None:
-                    async for event in handler(self, call, args, settle):
-                        yield event
-                    continue
-
-                yield ToolStart(call.tool_call_id, name, args)
+            async def execute(index: int, name: str, args: dict) -> ToolResult:
                 result = await run_tool(name, args, self.cwd, self.mode,
                                         self.confirm, self.toolset,
                                         safe_commands=self.run_options.safe_commands(self.config),
                                         ctx=self.tool_context,
                                         review=self._review)
-                settle(result)
-                yield ToolEnd.of(call.tool_call_id, name, result)
+                slot(index)(result)
+                return result
+
+            # A run of neighbouring calls that only read is started together,
+            # so ten greps take as long as the slowest one. Their events still
+            # go out one call at a time and in the order the model wrote them:
+            # every consumer, the replay of a resumed session included, shows
+            # a call as its start followed by its end.
+            #
+            # Admitted in the model's order, ahead of their turn in the loop
+            # below, so the budget is spent in the same order as before.
+            admitted: dict[int, tuple[str, dict, ToolResult | None]] = {}
+            running: dict[int, asyncio.Task[ToolResult]] = {}
+            try:
+                for index, call in enumerate(calls):
+                    settle = slot(index)
+                    name, args, refused = admitted.pop(index, None) or admit(call)
+
+                    if refused is not None:
+                        yield ToolStart(call.tool_call_id, name, args)
+                        settle(refused)
+                        yield ToolEnd.of(call.tool_call_id, name, refused)
+                        continue
+
+                    if name == codemode.NAME:
+                        # Not in the table below: it needs the turn's budget, which
+                        # only this scope holds. An interrupt leaves the slot its
+                        # placeholder, like any other tool cut short.
+                        yield ToolStart(call.tool_call_id, name, args)
+                        text, completed, nested = await self._run_code(args["code"], spend)
+                        result = ToolResult(text) if completed else ToolResult(text, "failed")
+                        # Kept beside the result, where it is persisted for replay
+                        # and never sent to the model.
+                        settle(result, {"calls": nested})
+                        yield ToolEnd.of(call.tool_call_id, name, result, nested)
+                        continue
+
+                    handler = self._AGENT_HANDLED.get(name)
+                    if handler is not None:
+                        async for event in handler(self, call, args, settle):
+                            yield event
+                        continue
+
+                    if index not in running and self._runs_alongside(name, args):
+                        running[index] = asyncio.create_task(execute(index, name, args))
+                        for ahead in range(index + 1, min(index + _PARALLEL_TOOLS, len(calls))):
+                            admitted[ahead] = admit(calls[ahead])
+                            if (admitted[ahead][2] is not None
+                                    or not self._runs_alongside(*admitted[ahead][:2])):
+                                break
+                            running[ahead] = asyncio.create_task(
+                                execute(ahead, *admitted[ahead][:2]))
+
+                    yield ToolStart(call.tool_call_id, name, args)
+                    started = running.pop(index, None)
+                    result = await (started if started is not None
+                                    else execute(index, name, args))
+                    yield ToolEnd.of(call.tool_call_id, name, result)
+            finally:
+                # The turn ended with calls still running: interrupted, or
+                # closed while the caller rendered an event. What has not
+                # finished keeps its "interrupted" placeholder.
+                for task in running.values():
+                    task.cancel()
+                await asyncio.gather(*running.values(), return_exceptions=True)
 
             if budget_hit:
                 record_outcome("max_tool_calls")

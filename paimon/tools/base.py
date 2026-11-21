@@ -39,9 +39,14 @@ class Tool:
     "write" runs freely inside cwd in auto mode, "execute" is held outside
     yolo except for commands safe_command() recognizes as read-only,
     "background" is "execute" with no such exception, "none" is never gated.
+
+    ``parallel`` marks a tool that changes nothing and depends on no other
+    call in the same response, so the loop may run it alongside its
+    neighbours instead of after them.
     """
 
     description: str
     params: type
     run: Callable[[dict, Path, str, ToolContext], object] | None
     access: str = "none"
+    parallel: bool = False
