@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 from paimon.tools.background import BackgroundCommand, _TaskOutput, start_background, tail_text
 from paimon.tools.base import MAX_OUTPUT
+from paimon.tools.registry import REGISTRY, validate_args
 from paimon.tools.shell import (
+    MAX_COMMAND_TIMEOUT,
     _SHELL_MAX_BYTES,
     _kill_tree,
     _OutputTail,
@@ -112,6 +114,31 @@ class ShellOutputTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((outcome.status, outcome.detail), ("failed", "timed out"))
         self.assertIn("partial-output", result, "a timeout is when output matters most")
         self.assertIn("(timed out after 0.3s)", result)
+
+    async def test_a_call_names_its_own_timeout(self) -> None:
+        command = printer("partial-output", then_sleep=True, ignore_term=True)
+        with (
+            patch("paimon.tools.shell._KILL_GRACE", 0.05),
+            patch("paimon.tools.shell._KILL_TIMEOUT", 0.5),
+        ):
+            started = time.monotonic()
+            outcome = await _shell({"command": command, "timeout": 1}, self.cwd)
+            elapsed = time.monotonic() - started
+
+        self.assertEqual((outcome.status, outcome.detail), ("failed", "timed out"))
+        self.assertIn("(timed out after 1s)", outcome.text)
+        self.assertLess(elapsed, 20.0, "the default would have waited two minutes")
+
+    def test_a_timeout_outside_its_range_is_refused_before_anything_runs(self) -> None:
+        for timeout, problem in ((0, "greater than or equal to 1"),
+                                 (MAX_COMMAND_TIMEOUT + 1, f"less than or equal to {MAX_COMMAND_TIMEOUT}"),
+                                 ("60", "valid integer")):
+            with self.subTest(timeout=timeout):
+                invalid = validate_args("shell", {"command": "ls", "timeout": timeout}, REGISTRY)
+                self.assertIn("'timeout'", invalid)
+                self.assertIn(problem, invalid)
+        self.assertIsNone(validate_args("shell", {"command": "ls", "timeout": 600}, REGISTRY))
+        self.assertIsNone(validate_args("shell", {"command": "ls"}, REGISTRY))
 
     async def test_a_backgrounded_descendant_does_not_hold_the_turn(self) -> None:
         """The command is finished even though something it started holds the pipe."""

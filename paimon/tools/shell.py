@@ -18,7 +18,10 @@ from .files import _real
 from .result import ToolResult
 
 
-_COMMAND_TIMEOUT = 120.0
+_COMMAND_TIMEOUT = 120.0  # what a command gets when the call names no timeout
+# The most a call may ask for. Bounded because nothing shows a foreground
+# command's output until it ends: an hour of silence is already a long turn.
+MAX_COMMAND_TIMEOUT = 3600
 _KILL_GRACE = 2.0  # seconds to wait after SIGTERM before forcing SIGKILL
 _KILL_TIMEOUT = 2.0  # maximum wait to reap the process after SIGKILL
 _READ_CHUNK = 64 * 1024
@@ -635,6 +638,7 @@ async def _collect(
     stream: asyncio.StreamReader,
     transport: asyncio.ReadTransport,
     tail: _OutputTail,
+    timeout: float,
 ) -> None:
     """Read output until the command exits, then drain what is still in flight.
 
@@ -645,7 +649,7 @@ async def _collect(
     """
     reader = asyncio.create_task(_pump(stream, tail))
     try:
-        await asyncio.wait_for(proc.wait(), timeout=_COMMAND_TIMEOUT)
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
         await _drain(reader, tail)
     finally:
         await _stop_reader(reader, transport)
@@ -658,6 +662,9 @@ async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> ToolR
     place the model reads it from; the result's own status is what everything
     else goes by.
     """
+    # Read at call time, and only the default: a model that knows its build
+    # takes ten minutes says so, instead of losing it at two.
+    timeout = float(args.get("timeout") or _COMMAND_TIMEOUT)
     proc, stream, transport = await _spawn_shell(args["command"], cwd)
     # The child leads its own group, so the group id is its pid. Recorded here
     # because os.getpgid() stops working the moment that leader is reaped.
@@ -665,12 +672,12 @@ async def _shell(args: dict, cwd: Path, ctx: ToolContext | None = None) -> ToolR
     tail = _OutputTail()
     try:
         try:
-            await _collect(proc, stream, transport, tail)
+            await _collect(proc, stream, transport, tail, timeout)
             status = f"(exit code {proc.returncode})"
             problem = f"exit {proc.returncode}" if proc.returncode else ""
         except asyncio.TimeoutError:
             await _kill_tree(proc, pgid)
-            status = f"(timed out after {_COMMAND_TIMEOUT:g}s)"
+            status = f"(timed out after {timeout:g}s)"
             problem = "timed out"
         except asyncio.CancelledError:
             await _kill_tree(proc, pgid)
