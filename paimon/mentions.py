@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 
-from .tools.files import read_image
+from .tools.files import read_image, resolve_path
 from .tools.result import Image, ToolError
 
 
@@ -64,6 +65,39 @@ def expand_mentions(text: str, cwd: Path, images: list[Image] | None = None) -> 
         index = end
     result.append(text[cursor:])
     return "".join(result)
+
+
+def mentioned_images(text: str, cwd: Path) -> tuple[Image, ...]:
+    """The images ``text`` mentions, in the order it does."""
+    images: list[Image] = []
+    expand_mentions(text, cwd, images)
+    return tuple(images)
+
+
+# A markdown image, its target bare or in angle brackets, with or without a title.
+_LINKED = re.compile(r"""!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+["'][^)]*)?\s*\)""")
+_FENCED = re.compile(r"^(```|~~~).*?^\1", re.S | re.M)
+
+
+def linked_images(text: str, cwd: Path) -> tuple[Image, ...]:
+    """The local images an answer shows with ``![alt](path)``, in order.
+
+    One that is not there, is not an image or is too large is passed over:
+    the answer still names it, which is all a missing picture can do.
+    """
+    images: list[Image] = []
+    for match in _LINKED.finditer(_FENCED.sub("", text)):
+        target = match[1] or match[2]
+        if re.match(r"[a-z][a-z0-9+.-]*://", target, re.I):
+            continue
+        try:
+            path = resolve_path(target, cwd)
+            image = read_image(path) if path.is_file() else None
+        except (OSError, RuntimeError, ValueError, ToolError):
+            continue
+        if image is not None:
+            images.append(image)
+    return tuple(images)
 
 
 def _resolve(requested: str, cwd: Path, images: list[Image] | None) -> tuple[str, int] | None:

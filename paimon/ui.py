@@ -7,22 +7,28 @@ import os
 import re
 from collections import Counter
 from pathlib import Path
+from typing import Sequence
 
+from rich.color import Color
 from rich.console import Group, RenderableType
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 from textual import events
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
+from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static, TextArea
 
-from . import clipboard, progstatus
+from . import clipboard, progstatus, termimage
 from .diff import locate_line, render_diff
 from .logtext import summarize_call
 from .session import data_dir
 from .tools.files import resolve_path
+from .tools.result import Image
 
 
 def abbreviate(text: str, limit: int) -> str:
@@ -70,6 +76,64 @@ class UserMessage(Static):
 
     def __init__(self, body: str) -> None:
         super().__init__(Content(body), classes="user-message")
+
+
+class Picture(Widget):
+    """An image, drawn by the terminal over the cells this holds for it.
+
+    The widget's own content is placeholder text (see termimage). The picture
+    is handed to the terminal when the widget is mounted and taken back when
+    it goes, so a terminal holds no more of them than the log shows.
+    """
+
+    def __init__(self, png: bytes, columns: int, rows: int) -> None:
+        super().__init__(classes="picture")
+        self._png = png
+        self._columns = columns
+        self._rows = rows
+        self._id = termimage.new_id()
+        self.styles.width = columns
+        self.styles.height = rows
+
+    @classmethod
+    def of(cls, images: Sequence[Image], app: App) -> "list[Picture]":
+        """A picture for each of ``images`` this terminal can draw: none on a
+        terminal without the protocol, and none for a format it does not take."""
+        if not images or not cls.drawn_by(app):
+            return []
+        cell = termimage.cell_size()
+        pictures = []
+        for image in images:
+            size = termimage.png_size(image.data)
+            if size is not None:
+                pictures.append(cls(image.data, *termimage.fit(size, cell)))
+        return pictures
+
+    @staticmethod
+    def drawn_by(app: App) -> bool:
+        # The placeholder's colour is the picture's number, so it has to reach
+        # the terminal as written: a console with fewer colours rounds it off.
+        return (not app.is_headless and not app.is_web
+                and app.console.color_system == "truecolor"
+                and termimage.supported(os.environ))
+
+    def _send(self, sequence: str) -> None:
+        driver = self.app._driver
+        if driver is not None:
+            driver.write(sequence)
+
+    def on_mount(self) -> None:
+        self._send(termimage.transmit(self._id, self._png, self._columns, self._rows))
+
+    def on_unmount(self) -> None:
+        self._send(termimage.delete(self._id))
+
+    def render_line(self, y: int) -> Strip:
+        if y >= self._rows:
+            return Strip.blank(self._columns, self.rich_style)
+        style = Style(color=Color.from_rgb(*termimage.colour(self._id)),
+                      bgcolor=self.rich_style.bgcolor)
+        return Strip([Segment(termimage.placeholder(y, self._columns), style)], self._columns)
 
 
 class AssistantHeading(Static):
@@ -420,7 +484,8 @@ class ToolEntry(Vertical):
         self.query_one(".tool-entry-header", Static).update(self._header())
 
     async def finish(self, result: str, *, label: str = "", status: str = "success",
-                     detail: str = "", calls: list[dict] | None = None) -> None:
+                     detail: str = "", calls: list[dict] | None = None,
+                     images: Sequence[Image] = ()) -> None:
         """Show the call's result. ``status`` and ``detail`` are the ones the
         agent reported (see ToolEnd); nothing is read back out of the text."""
         denied = status == "denied"
@@ -432,7 +497,8 @@ class ToolEntry(Vertical):
             # Between the script and its output, which is where they happened.
             await detail.mount(Static(nested_calls(calls), classes="tool-nested"))
         await detail.mount(
-            ToolResult(result, label=label, denied=denied, expanded=True)
+            ToolResult(result, label=label, denied=denied, expanded=True),
+            *Picture.of(images, self.app),
         )
         self.query_one(".tool-entry-header", Static).update(self._header())
 

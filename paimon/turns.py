@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Callable
 
 from .events import UserInput
+from .mentions import mentioned_images
 from .compaction import CompactionResult
 from .session import shell_message
 
@@ -283,7 +284,9 @@ class TurnDriver:
                 # The prompt is an event like any other, so every turn
                 # renders through the one sink. A wake-up has no prompt to
                 # show: its first event is a job notice, or nothing at all.
-                await self._emit(UserInput(user_input))
+                images = (mentioned_images(user_input, self.agent.cwd)
+                          if isinstance(user_input, str) else ())
+                await self._emit(UserInput(user_input, images))
             shown = False
             # Closed here even when the turn is cancelled while the sink has
             # an event: left to the garbage collector, the turn would hold the

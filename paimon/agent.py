@@ -56,7 +56,7 @@ from .events import (
 from .jobs import Jobs
 from .llm import (NoModelError, ask_once, build_model, models_for, request_settings,
                   signed_in_plans, split_model_string, takes_thinking)
-from .images import has_images, takes_images, with_images, without_images
+from .images import has_images, images_of, takes_images, with_images, without_images
 from .mentions import expand_mentions
 from .prompt import build_system_prompt
 from .skills import Skill, SkillDiagnostic, discover_skills, expand_skill_command
@@ -1146,9 +1146,9 @@ class Agent:
                 if isinstance(queued, ModelRequest):
                     self._append_message(queued)
                     continue
-                self._append_message(ModelRequest(
-                    parts=[UserPromptPart(content=self.expand_input(queued))]))
-                arrived.append(UserInput(queued))
+                content = self.expand_input(queued)
+                self._append_message(ModelRequest(parts=[UserPromptPart(content=content)]))
+                arrived.append(UserInput(queued, images_of(content)))
             for event in arrived:
                 yield event
 
