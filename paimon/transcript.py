@@ -5,6 +5,7 @@ prompt under one; ``AgentPane`` shows one and nothing else.
 """
 
 from pathlib import Path
+from typing import Sequence
 
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
@@ -28,13 +29,16 @@ from .events import (
     ToolStart,
     UserInput,
 )
+from .mentions import linked_images
 from .skills import parse_skill_block
 from .sparkle import Hero
 from .theme import gauge
+from .tools.result import Image
 from .ui import (
     AssistantHeading,
     AssistantMessage,
     FoldedText,
+    Picture,
     ToolCall,
     ToolEntry,
     ToolGroup,
@@ -92,7 +96,7 @@ class Transcript(VerticalScroll):
         self.mount(widget)
         return widget
 
-    def add_user(self, body: str) -> UserMessage:
+    def add_user(self, body: str, images: Sequence[Image] = ()) -> UserMessage:
         # A replayed /skill:name turn is stored expanded; show it folded
         # behind the skill's name, followed by whatever the user added.
         block = parse_skill_block(body)
@@ -100,15 +104,15 @@ class Transcript(VerticalScroll):
             self.mount(FoldedText(block.body, classes="skill-invocation", label=f"skill {block.name}"))
             body = block.user_message or f"/skill:{block.name}"
         widget = UserMessage(body)
-        self.mount(widget)
+        self.mount(widget, *Picture.of(images, self.app))
         return widget
 
     def add_tool_result(
         self, result: str, *, label: str = "", denied: bool = False,
-        container: Widget | None = None,
+        container: Widget | None = None, images: Sequence[Image] = (),
     ) -> ToolResult:
         widget = ToolResult(result, label=label, denied=denied)
-        (container if container is not None else self).mount(widget)
+        (container if container is not None else self).mount(widget, *Picture.of(images, self.app))
         return widget
 
     def add_shell_call(self, command: str) -> Vertical:
@@ -172,6 +176,8 @@ class EventRenderer:
         # the config is process-wide and can be replaced under a live agent.
         self._agent = agent
         self._stream: MarkdownStream | None = None
+        # The text block being streamed, kept for the images it links to.
+        self._text = ""
         self._reasoning: FoldedText | None = None
         self._reasoning_buf = ""
         self._first_text_block = True
@@ -184,7 +190,7 @@ class EventRenderer:
         if isinstance(ev, UserInput):
             await self.close()
             self._first_text_block = True
-            self._log.add_user(ev.text)
+            self._log.add_user(ev.text, ev.images)
 
         elif isinstance(ev, CompactionNotice):
             await self.close()
@@ -236,6 +242,7 @@ class EventRenderer:
                 # Await the mount so the stream has a document to append to.
                 await self._log.mount(widget)
                 self._stream = AssistantMessage.get_stream(widget)
+            self._text += ev.text
             await self._stream.write(ev.text)
 
         elif isinstance(ev, ToolStart):
@@ -258,11 +265,11 @@ class EventRenderer:
                 # Tolerate an incomplete/old log with a result but no call.
                 if ev.calls:
                     self._log.add(nested_calls(ev.calls), classes="tool-nested")
-                self._log.add_tool_result(ev.result, label=ev.name, denied=ev.denied)
+                self._log.add_tool_result(ev.result, label=ev.name, denied=ev.denied, images=ev.images)
             else:
                 label = f"{ev.name} {entry.summary}"
                 await entry.finish(ev.result, label=label, status=ev.status,
-                                   detail=ev.detail, calls=ev.calls)
+                                   detail=ev.detail, calls=ev.calls, images=ev.images)
                 if self._tool_group is not None:
                     self._tool_group.refresh_header()
 
@@ -319,6 +326,11 @@ class EventRenderer:
         if self._stream is not None:
             await self._stream.stop()
             self._stream = None
+            text, self._text = self._text, ""
+            # Read only where they will be drawn: elsewhere the answer's own
+            # words, which name each file, are all there is to show.
+            if Picture.drawn_by(self._log.app):
+                await self._log.mount(*Picture.of(linked_images(text, self._agent.cwd), self._log.app))
         if self._reasoning is not None and self._agent.config.show_reasoning:
             # Fold the live stream now that the block is over; blocks the user
             # clicked open themselves are left alone.

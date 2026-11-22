@@ -58,6 +58,10 @@ _GUIDELINES: tuple[tuple[tuple[str, ...], str], ...] = (
      "the file when you need its contents. A <mentioned_image> tag is an image "
      "attached to the same message, in the order the tags appear."),
     ((),
+     "To show the user a picture, a chart you drew or a screenshot you took, write "
+     "![description](path/to/file.png) in your answer. It is drawn there when their "
+     "terminal can draw images, and only PNG files are; otherwise they see the path."),
+    ((),
      "Be direct. When the task is done, briefly state what you did. Don't narrate every step."),
 )
 

@@ -113,6 +113,9 @@ Screen.-tabs-bottom #statusbar { margin: 0 2 0 2; }
 .tool-result.denied { color: $text; background: $error 20%; padding: 0 1; }
 /* The expanded body of a /skill:name turn, folded above the user's words. */
 .skill-invocation { color: $text-muted; padding: 0 2; }
+/* An attached image, under the message or the result that carried it. */
+.picture { margin: 0 2; }
+#log > .picture { margin: 0 3 1 3; }
 .user-message {
     width: 100%;
     height: auto;

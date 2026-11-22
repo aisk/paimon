@@ -59,6 +59,14 @@ def content_text(content: object) -> str:
     return "" if content is None else str(content)
 
 
+def images_of(content: object) -> tuple[Image, ...]:
+    """The images in a live message's content, for whoever draws them."""
+    if not isinstance(content, (list, tuple)):
+        return ()
+    return tuple(Image(item.data, item.media_type) for item in content
+                 if isinstance(item, BinaryContent) and item.is_image)
+
+
 def replace_images(content: object, stand_in: object) -> object:
     """Dumped content with ``stand_in`` where each image was."""
     if isinstance(content, list):

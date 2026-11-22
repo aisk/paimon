@@ -19,10 +19,10 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from .images import content_text
+from .images import content_text, images_of
 from .session import JOB, SHELL, SUMMARY, job_text, shell_text, synthetic_kind
 from .tools.registry import normalize_todos
-from .tools.result import Status, ToolResult
+from .tools.result import Image, Status, ToolResult
 
 # ---- Events yielded by Agent.run -------------------------------------------
 
@@ -59,6 +59,8 @@ class ToolEnd:
     # with its tool "name", one-line "detail", "status" (ok, error, denied or
     # cancelled) and "seconds". Empty for every other tool.
     calls: list[dict] = field(default_factory=list)
+    # What the call showed the model besides text, for a UI to show too.
+    images: tuple[Image, ...] = ()
 
     def __post_init__(self) -> None:
         # The same default a ToolResult has, for events built directly.
@@ -72,7 +74,7 @@ class ToolEnd:
     @classmethod
     def of(cls, call_id: str, name: str, result: ToolResult,
            calls: list[dict] | None = None) -> "ToolEnd":
-        return cls(call_id, name, result.text, result.status, result.detail, calls or [])
+        return cls(call_id, name, result.text, result.status, result.detail, calls or [], result.images)
 
 
 @dataclass
@@ -149,6 +151,8 @@ class UserInput:
     from every user message on replay."""
 
     text: str
+    # The images the message attached, for a UI to show beside its words.
+    images: tuple[Image, ...] = ()
 
 
 @dataclass
@@ -216,7 +220,7 @@ def _returned(part: ToolReturnPart) -> ToolResult:
     """A persisted return part as the result it recorded; see agent._settled."""
     detail = part.metadata.get("detail") if isinstance(part.metadata, dict) else None
     return ToolResult(content_text(part.content) or "(no output)", part.outcome,
-                      detail if isinstance(detail, str) else "")
+                      detail if isinstance(detail, str) else "", images_of(part.content))
 
 
 def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
@@ -245,7 +249,7 @@ def replay_events(messages: list[ModelMessage]) -> list[AgentEvent]:
         if isinstance(message, ModelRequest):
             for part in message.parts:
                 if isinstance(part, UserPromptPart) and content_text(part.content):
-                    events.append(UserInput(content_text(part.content)))
+                    events.append(UserInput(content_text(part.content), images_of(part.content)))
                 elif (isinstance(part, ToolReturnPart)
                       and part.tool_call_id not in consumed
                       and part.tool_name != "write_todos"):
