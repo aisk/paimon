@@ -1,7 +1,6 @@
 """Reusable UI components for the Paimon TUI."""
 
 import asyncio
-import difflib
 import json
 import os
 import re
@@ -27,7 +26,10 @@ from . import clipboard, progstatus, termimage
 from .diff import locate_line, render_diff
 from .logtext import summarize_call
 from .session import data_dir
+from .textual_debug import TextualDebugBridge
+from .tools.base import generic_summary, one_line
 from .tools.files import resolve_path
+from .tools.registry import REGISTRY
 from .tools.result import Image
 
 
@@ -335,53 +337,19 @@ _TOOL_LABELS = {
 }
 
 
-def _one_line(value: object, limit: int = 90) -> str:
-    text = " ".join(str(value or "").split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+# Every tool a call in a pane can name, whether or not the agent that made it
+# holds it: the debug tools of a --textual-debug run alongside the registry.
+_KNOWN_TOOLS = {**REGISTRY, **TextualDebugBridge().toolset()}
 
 
 def tool_call_summary(name: str, args: dict) -> str:
-    """A compact human summary, never a raw fallback JSON object."""
-    path = _one_line(args.get("path"))
-    if name == "read_file":
-        parts = [path or "(path missing)"]
-        if args.get("offset") is not None:
-            parts.append(f"from line {args['offset']}")
-        if args.get("limit") is not None:
-            parts.append(f"up to {args['limit']} lines")
-        return " · ".join(parts)
-    if name == "write_file":
-        lines = len(str(args.get("content") or "").splitlines())
-        return f"{path or '(path missing)'} · {lines} lines"
-    if name == "edit_file":
-        old = str(args.get("old_string") or "").splitlines()
-        new = str(args.get("new_string") or "").splitlines()
-        added = removed = 0
-        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new).get_opcodes():
-            if tag in ("replace", "delete"):
-                removed += i2 - i1
-            if tag in ("replace", "insert"):
-                added += j2 - j1
-        return f"{path or '(path missing)'} · +{added} −{removed}"
-    if name in ("shell", "run_background"):
-        return _one_line(args.get("command")) or "(empty command)"
-    if name == "grep":
-        pattern = _one_line(args.get("pattern"))
-        return f"{pattern} in {path}" if path and path != "." else pattern
-    if name == "glob":
-        pattern = _one_line(args.get("pattern"))
-        return f"{pattern} in {path}" if path and path != "." else pattern
-    if name == "web_search":
-        return _one_line(args.get("query"))
-    if name == "textual_inspect":
-        return _one_line(args.get("selector")) or "active screen"
-    for key in ("question", "prompt", "expression", "code", "job_id"):
-        if args.get(key):
-            return _one_line(args[key])
-    if path:
-        return path
-    count = len(args)
-    return f"{count} argument{'s' if count != 1 else ''}"
+    """A compact human summary, never a raw fallback JSON object.
+
+    Each tool describes its own calls (Tool.summary); a name no tool answers
+    to, as replayed from an older session log, gets the generic description.
+    """
+    tool = _KNOWN_TOOLS.get(name)
+    return tool.summarize(args) if tool is not None else generic_summary(args)
 
 
 def _result_summary(name: str, result: str, status: str, detail: str) -> tuple[str, str]:
@@ -412,7 +380,7 @@ def nested_calls(calls: list[dict]) -> Content:
         status = str(call.get("status"))
         style = "$text-muted" if status == "ok" else "$text-warning"
         values[f"name{index}"] = _TOOL_LABELS.get(call.get("name"), str(call.get("name")))
-        values[f"detail{index}"] = _one_line(call.get("detail"))
+        values[f"detail{index}"] = one_line(call.get("detail"))
         values[f"status{index}"] = f"{'✓' if status == 'ok' else status} {_seconds(call):.2f}s"
         lines.append(f"[$text-accent]$name{index}[/]  $detail{index}  [{style}]$status{index}[/]")
     return Content.from_markup("\n".join(lines), **values)
@@ -801,7 +769,7 @@ class ConfirmPanel(BlockingPanel):
         # call from an agent running unseen is asked in its parent's pane, and
         # without this it would read as the parent's own.
         self.origin = origin
-        self.summary = f"{tool_name}: {summarize_call(tool_name, args, limit=200)}"
+        self.summary = f"{tool_name}: {summarize_call(args, limit=200)}"
         # The agent's cwd: previews resolve paths against it, exactly like the
         # execution will, so the file shown is the file touched.
         self._cwd = cwd

@@ -8,6 +8,7 @@ gating. Adding a tool means adding one registry entry.
 
 import asyncio
 import dataclasses
+import difflib
 import inspect
 from functools import cache
 from pathlib import Path
@@ -19,7 +20,7 @@ from pydantic_ai.tools import GenerateToolJsonSchema, ToolDefinition
 from typing_extensions import NotRequired, TypedDict
 
 from .. import history, websearch
-from .base import MAX_OUTPUT, Tool, ToolContext
+from .base import MAX_OUTPUT, Tool, ToolContext, one_line
 from .files import _edit_file, _glob, _read_file, _write_file
 from .grep import _GREP_DEFAULT_RESULTS, _GREP_MAX_RESULTS, _grep_async
 from .result import ToolError, ToolResult
@@ -307,6 +308,42 @@ class RunCodeArgs(TypedDict):
     """The Python script to run."""
 
 
+def _read_summary(args: dict) -> str:
+    parts = [one_line(args.get("path")) or "(path missing)"]
+    if args.get("offset") is not None:
+        parts.append(f"from line {args['offset']}")
+    if args.get("limit") is not None:
+        parts.append(f"up to {args['limit']} lines")
+    return " · ".join(parts)
+
+
+def _write_summary(args: dict) -> str:
+    lines = len(str(args.get("content") or "").splitlines())
+    return f"{one_line(args.get('path')) or '(path missing)'} · {lines} lines"
+
+
+def _edit_summary(args: dict) -> str:
+    old = str(args.get("old_string") or "").splitlines()
+    new = str(args.get("new_string") or "").splitlines()
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new).get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    return f"{one_line(args.get('path')) or '(path missing)'} · +{added} −{removed}"
+
+
+def _search_summary(args: dict) -> str:
+    """grep and glob: the pattern, and where unless that is cwd."""
+    pattern, path = one_line(args.get("pattern")), one_line(args.get("path"))
+    return f"{pattern} in {path}" if path and path != "." else pattern
+
+
+def _command_summary(args: dict) -> str:
+    return one_line(args.get("command")) or "(empty command)"
+
+
 REGISTRY: dict[str, Tool] = {
     # read_file and glob run in a thread: on the event loop, a huge file or a
     # walk through a huge tree freezes every pane and the interrupt key with
@@ -323,18 +360,21 @@ REGISTRY: dict[str, Tool] = {
             "PNG, JPEG, GIF or WebP image is returned as the picture itself."
         ),
         params=ReadFileArgs,
+        summary=_read_summary,
     ),
     "write_file": Tool(
         access="write",
         run=lambda args, cwd, mode, ctx: _write_file(args, cwd),
         description="Create or overwrite a file with the given content.",
         params=WriteFileArgs,
+        summary=_write_summary,
     ),
     "edit_file": Tool(
         access="write",
         run=lambda args, cwd, mode, ctx: _edit_file(args, cwd),
         description="Replace an exact substring in a file. old_string must appear exactly once.",
         params=EditFileArgs,
+        summary=_edit_summary,
     ),
     "glob": Tool(
         access="read",
@@ -342,6 +382,7 @@ REGISTRY: dict[str, Tool] = {
         run=lambda args, cwd, mode, ctx: asyncio.to_thread(_glob, args, cwd, mode != "yolo"),
         description="Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths sorted by most recently modified first.",
         params=GlobArgs,
+        summary=_search_summary,
     ),
     "grep": Tool(
         access="read",
@@ -355,6 +396,7 @@ REGISTRY: dict[str, Tool] = {
             "Prefer this over shell grep: it is never held for approval."
         ),
         params=GrepArgs,
+        summary=_search_summary,
     ),
     # Not gated in any mode: a search changes nothing on this machine. The
     # query does leave it, for whichever public search engines ddgs picks, so
@@ -370,6 +412,7 @@ REGISTRY: dict[str, Tool] = {
             "documentation, error messages. It returns snippets, not whole pages."
         ),
         params=WebSearchArgs,
+        summary=lambda args: one_line(args.get("query")),
     ),
     "shell": Tool(
         access="execute",
@@ -383,6 +426,7 @@ REGISTRY: dict[str, Tool] = {
             "path is included in the result, so you can read the earlier part back."
         ),
         params=ShellArgs,
+        summary=_command_summary,
     ),
     # "read" because these only read the agent's own session log, never a user
     # file: with no path argument the gate resolves to cwd and always allows,
@@ -499,6 +543,7 @@ REGISTRY: dict[str, Tool] = {
             "you are done with it."
         ),
         params=RunBackgroundArgs,
+        summary=_command_summary,
     ),
     "read_job": Tool(
         run=None,

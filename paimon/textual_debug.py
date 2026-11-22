@@ -17,7 +17,7 @@ import textual
 from pydantic import ConfigDict, with_config
 from typing_extensions import NotRequired, TypedDict
 
-from .tools.base import Tool, ToolContext
+from .tools.base import Tool, ToolContext, one_line
 
 
 _spec = with_config(ConfigDict(use_attribute_docstrings=True))
@@ -189,6 +189,7 @@ class TextualDebugBridge:
                 ),
                 params=InspectArgs,
                 run=self.inspect,
+                summary=lambda args: one_line(args.get("selector")) or "active screen",
             ),
             "textual_eval": Tool(
                 description=(

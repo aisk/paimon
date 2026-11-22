@@ -189,7 +189,7 @@ class TextRenderer:
 
         elif isinstance(ev, ToolStart):
             self._end_call()
-            detail = logtext.summarize_call(ev.name, ev.args, limit=DETAIL_WIDTH)
+            detail = logtext.summarize_call(ev.args, limit=DETAIL_WIDTH)
             line = f"· {ev.name}  {detail}".rstrip()
             _write(self._err, f"{_DIM}{line}{_RESET}" if self._color else line)
             self._call_open = True

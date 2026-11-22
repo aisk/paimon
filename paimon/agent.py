@@ -901,7 +901,7 @@ class Agent:
         async def call(name: str, args: dict) -> str:
             # "cancelled" is what stays when the script ends before the call does.
             record = {"name": name, "status": "cancelled", "seconds": 0.0,
-                      "detail": logtext.summarize_call(name, args, limit=logtext.LOG_DETAIL_WIDTH)}
+                      "detail": logtext.summarize_call(args, limit=logtext.LOG_DETAIL_WIDTH)}
             calls.append(record)
             started = time.perf_counter()
             try:

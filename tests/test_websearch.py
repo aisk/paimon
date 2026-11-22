@@ -172,7 +172,7 @@ class ToolTest(unittest.TestCase):
         self.assertEqual(result.text, "1. Title 1\n   https://example.com/1\n   snippet 1")
 
     def test_the_query_is_the_call_summary(self) -> None:
-        self.assertEqual(logtext.summarize_call("web_search", {"query": "textual 8 release notes"}),
+        self.assertEqual(logtext.summarize_call({"query": "textual 8 release notes"}),
                          "textual 8 release notes")
 
     def test_subagents_and_headless_keep_it(self) -> None:

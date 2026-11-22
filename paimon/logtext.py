@@ -13,11 +13,15 @@ from .images import content_text
 from .session import synthetic_kind
 
 
-def summarize_call(name: str, args: dict, limit: int | None = None) -> str:
-    """One-line detail for a tool call, shared by the TUI and headless output.
+def summarize_call(args: dict, limit: int | None = None) -> str:
+    """A tool call's raw detail, the same for every tool: its command, path,
+    question, query or code, else its arguments as JSON.
 
-    With a limit the detail is collapsed onto a single line and truncated,
-    for outputs that cannot reflow (a terminal stream) unlike a TUI widget.
+    What headless output, ``paimon log``, the permission panel and run_code's
+    nested-call records show, and what those records persist. The TUI's tool
+    entries show Tool.summarize() instead. With a limit the detail is
+    collapsed onto a single line and truncated, for outputs that cannot
+    reflow (a terminal stream) unlike a TUI widget.
     """
     detail = str(args.get("command") or args.get("path") or args.get("question") or args.get("query")
                  or args.get("code") or json.dumps(args, ensure_ascii=False))
@@ -77,7 +81,7 @@ def _render_part(seq: int, part: dict, full: bool, author: str = "user") -> str:
             except json.JSONDecodeError:
                 args = {"args": args}
         name = str(part.get("tool_name") or "?")
-        detail = summarize_call(name, args if isinstance(args, dict) else {},
+        detail = summarize_call(args if isinstance(args, dict) else {},
                                 limit=None if full else LOG_DETAIL_WIDTH)
         label = f"tool_call {name}"
     elif kind == "tool-return":

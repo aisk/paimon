@@ -10,6 +10,25 @@ from ..session import Session
 MAX_OUTPUT = 30_000  # truncate tool output sent back to the model
 
 
+def one_line(value: object, limit: int = 90) -> str:
+    """``value`` collapsed onto one line and clipped to ``limit`` characters."""
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def generic_summary(args: dict) -> str:
+    """How a call is described when its tool does not say: the first
+    argument that reads as its subject, never a raw JSON object."""
+    for key in ("question", "prompt", "expression", "code", "job_id"):
+        if args.get(key):
+            return one_line(args[key])
+    path = one_line(args.get("path"))
+    if path:
+        return path
+    count = len(args)
+    return f"{count} argument{'s' if count != 1 else ''}"
+
+
 @dataclass
 class ToolContext:
     """Per-agent state a tool needs beyond its own arguments.
@@ -43,6 +62,9 @@ class Tool:
     ``parallel`` marks a tool that changes nothing and depends on no other
     call in the same response, so the loop may run it alongside its
     neighbours instead of after them.
+
+    ``summary`` describes a call of the tool on one line from its arguments,
+    for the TUI's tool entries; None leaves it to generic_summary().
     """
 
     description: str
@@ -50,3 +72,8 @@ class Tool:
     run: Callable[[dict, Path, str, ToolContext], object] | None
     access: str = "none"
     parallel: bool = False
+    summary: Callable[[dict], str] | None = None
+
+    def summarize(self, args: dict) -> str:
+        """One human line for a call of this tool with ``args``."""
+        return (self.summary or generic_summary)(args)

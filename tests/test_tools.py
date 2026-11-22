@@ -574,3 +574,49 @@ class HistoryToolsTest(unittest.TestCase):
         for mode in MODES:
             self.assertEqual(gate("search_history", {"query": "x"}, mode, self.cwd), "allow")
             self.assertEqual(gate("read_history", {"seq": 1}, mode, self.cwd), "allow")
+
+
+class CallSummaryTest(unittest.TestCase):
+    """How a call of every tool reads on one line: (args, the TUI entry's
+    summary, the raw detail headless output, ``paimon log`` and nested-call
+    records show)."""
+
+    CASES = {
+        "read_file": ({"path": "a.py", "offset": 3, "limit": 20}, "a.py · from line 3 · up to 20 lines", "a.py"),
+        "write_file": ({"path": "x.py", "content": "a\nb\nc"}, "x.py · 3 lines", "x.py"),
+        "edit_file": ({"path": "e.py", "old_string": "a\nb\nc", "new_string": "a\nB\nc\nd"},
+                      "e.py · +2 −1", "e.py"),
+        "glob": ({"pattern": "**/*.py", "path": "."}, "**/*.py", "."),
+        "grep": ({"pattern": "def \\w+", "path": "src"}, "def \\w+ in src", "src"),
+        "web_search": ({"query": "textual 8"}, "textual 8", "textual 8"),
+        "shell": ({"command": "ls  -la\n| wc"}, "ls -la | wc", "ls  -la\n| wc"),
+        "search_history": ({"query": "marker"}, "1 argument", "marker"),
+        "read_history": ({"seq": 4}, "1 argument", '{"seq": 4}'),
+        "write_todos": ({"todos": []}, "1 argument", '{"todos": []}'),
+        "ask_user": ({"question": "which?", "options": ["a"]}, "which?", "which?"),
+        "spawn_agent": ({"prompt": "do x"}, "do x", '{"prompt": "do x"}'),
+        "list_models": ({}, "0 arguments", "{}"),
+        "run_background": ({"command": ""}, "(empty command)", '{"command": ""}'),
+        "read_job": ({"job_id": "j1", "mode": "all"}, "j1", '{"job_id": "j1", "mode": "all"}'),
+        "stop_job": ({"job_id": "j1"}, "j1", '{"job_id": "j1"}'),
+        "run_code": ({"code": "print(1)\nprint(2)"}, "print(1) print(2)", "print(1)\nprint(2)"),
+        "textual_inspect": ({}, "active screen", "{}"),
+        "textual_eval": ({"expression": "app.screen"}, "app.screen", '{"expression": "app.screen"}'),
+        "textual_exec": ({"code": "x = 1"}, "x = 1", "x = 1"),
+        "textual_apply_css": ({"css": "Screen {}"}, "1 argument", '{"css": "Screen {}"}'),
+        "textual_screenshot": ({"path": "s.svg"}, "s.svg", "s.svg"),
+        # Replayed from an old session log: no tool goes by that name any more.
+        "gone_tool": ({"path": "old.py", "x": 1}, "old.py", "old.py"),
+    }
+
+    def test_every_tool_is_covered(self) -> None:
+        from paimon.textual_debug import TextualDebugBridge
+        self.assertLessEqual({*REGISTRY, *TextualDebugBridge().toolset()}, set(self.CASES))
+
+    def test_each_call_reads_as_it_always_has(self) -> None:
+        from paimon.logtext import summarize_call
+        from paimon.ui import tool_call_summary
+        for name, (args, entry, raw) in self.CASES.items():
+            with self.subTest(name):
+                self.assertEqual(tool_call_summary(name, args), entry)
+                self.assertEqual(summarize_call(args), raw)
