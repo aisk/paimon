@@ -15,6 +15,7 @@ dependencies = [
     "typing-extensions>=4.12",
     "ddgs>=9",
     "pydantic-monty>=1.0,<2",
+    "pillow>=11",
 ]
 
 [project.scripts]

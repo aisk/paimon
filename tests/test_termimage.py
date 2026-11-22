@@ -1,13 +1,14 @@
 """Pictures drawn in the terminal: the protocol, and where the log puts them."""
 
 import base64
+import io
 import re
-import struct
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import PIL.Image
 from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart, UserPromptPart
 
 from paimon import termimage
@@ -19,13 +20,23 @@ from paimon.ui import AssistantMessage, Picture
 from tests.support.app import AppTestCase
 
 
-def png(width: int, height: int, padding: int = 0) -> bytes:
-    """Enough of a PNG to be measured: the signature and its header chunk."""
-    return (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
-            + struct.pack(">II", width, height) + b"\x08\x06\x00\x00\x00" + b"\x00" * padding)
+def encoded(kind: str, width: int, height: int, mode: str = "RGB", colour="red") -> bytes:
+    file = io.BytesIO()
+    PIL.Image.new(mode, (width, height), colour).save(file, kind)
+    return file.getvalue()
 
 
-JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+def png(width: int, height: int) -> bytes:
+    return encoded("PNG", width, height)
+
+
+def size(data: bytes) -> tuple[int, int]:
+    with PIL.Image.open(io.BytesIO(data)) as image:
+        assert image.format == "PNG"
+        return image.size
+
+
+BROKEN = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
 
 class SupportTest(unittest.TestCase):
@@ -44,12 +55,6 @@ class SupportTest(unittest.TestCase):
 
 
 class MeasureTest(unittest.TestCase):
-    def test_a_png_says_its_own_size_and_nothing_else_has_one(self) -> None:
-        self.assertEqual(termimage.png_size(png(640, 480)), (640, 480))
-        self.assertIsNone(termimage.png_size(JPEG))
-        self.assertIsNone(termimage.png_size(png(640, 480)[:20]))
-        self.assertIsNone(termimage.png_size(png(0, 480)))
-
     def test_a_small_picture_keeps_its_size(self) -> None:
         self.assertEqual(termimage.fit((80, 32), (8, 16)), (10, 2))
         self.assertEqual(termimage.fit((1, 1), (8, 16)), (1, 1))
@@ -61,9 +66,43 @@ class MeasureTest(unittest.TestCase):
         self.assertEqual(termimage.fit((100_000, 10), (8, 16)), (40, 1))
 
 
+class PrepareTest(unittest.TestCase):
+    def test_a_small_png_is_sent_as_it_is(self) -> None:
+        shot = png(80, 32)
+        self.assertEqual(termimage.prepare(shot, (8, 16)), (shot, 10, 2))
+
+    def test_every_format_becomes_a_png(self) -> None:
+        for kind in ("JPEG", "GIF", "WEBP"):
+            sent, columns, rows = termimage.prepare(encoded(kind, 80, 32), (8, 16))
+            self.assertEqual((size(sent), columns, rows), ((80, 32), 10, 2), kind)
+
+    def test_a_large_one_is_drawn_down_to_the_cells_it_gets(self) -> None:
+        for kind in ("PNG", "JPEG", "WEBP"):
+            sent, columns, rows = termimage.prepare(encoded(kind, 3200, 1600), (8, 16))
+            self.assertEqual((size(sent), columns, rows), ((320, 160), 40, 10), kind)
+
+    def test_transparency_and_a_palette_survive(self) -> None:
+        sent, _, _ = termimage.prepare(encoded("WEBP", 16, 16, "RGBA", (255, 0, 0, 128)), (8, 16))
+        with PIL.Image.open(io.BytesIO(sent)) as image:
+            self.assertEqual(image.mode, "RGBA")
+        self.assertIsNotNone(termimage.prepare(encoded("GIF", 16, 16, "P"), (8, 16)))
+
+    def test_a_photograph_turned_by_the_camera_is_stood_up(self) -> None:
+        file = io.BytesIO()
+        exif = PIL.Image.Exif()
+        exif[0x0112] = 6  # Orientation: the top of the scene is on the right.
+        PIL.Image.new("RGB", (160, 80), "red").save(file, "JPEG", exif=exif)
+        sent, columns, rows = termimage.prepare(file.getvalue(), (8, 16))
+        self.assertEqual((size(sent), columns, rows), ((80, 160), 10, 10))
+
+    def test_what_will_not_open_is_passed_over(self) -> None:
+        for data in (BROKEN, b"", b"plain text", png(80, 32)[:40]):
+            self.assertIsNone(termimage.prepare(data, (8, 16)))
+
+
 class SequenceTest(unittest.TestCase):
     def test_a_picture_is_sent_whole_in_chunks_the_protocol_takes(self) -> None:
-        data = png(4, 4, padding=10_000)
+        data = bytes(range(256)) * 40
         sent = termimage.transmit(7, data, 5, 3)
         parts = re.findall(r"\x1b_G([^;]*);([^\x1b]*)\x1b\\", sent)
         self.assertEqual("".join(f"\x1b_G{keys};{chunk}\x1b\\" for keys, chunk in parts), sent)
@@ -129,9 +168,9 @@ class PictureTest(AppTestCase):
                     patch.object(app._driver, "write", written.append):
                 renderer = EventRenderer(app.pane.transcript, app.pane.agent)
                 await renderer.handle(UserInput("look", (Image(png(80, 32), "image/png"),
-                                                         Image(JPEG, "image/jpeg"))))
+                                                         Image(BROKEN, "image/jpeg"))))
                 await pilot.pause()
-                # Only the PNG: the protocol takes no other format as it is.
+                # Only the one that opens.
                 picture = app.query_one(Picture)
                 self.assertEqual((picture.size.width, picture.size.height), (10, 2))
                 sent = [text for text in written if text.startswith("\x1b_Ga=T")]
@@ -173,7 +212,7 @@ class LinkedImagesTest(unittest.TestCase):
                     "Not these: ![remote](https://example.com/a.png) ![gone](gone.png) "
                     "![text](notes.txt) [a link](chart.png)\n"
                     "```\n![in code](chart.png)\n```\n")
-            self.assertEqual([termimage.png_size(image.data) for image in linked_images(text, cwd)],
+            self.assertEqual([size(image.data) for image in linked_images(text, cwd)],
                              [(8, 8), (9, 9), (8, 8)])
 
 

@@ -7,13 +7,15 @@ character per cell whose foreground colour is that number. Those cells scroll,
 clip and get redrawn like any others, and the terminal paints the picture over
 whichever of them are on screen.
 
-Only PNG is sent: it is the one encoded format the protocol takes, and
-anything else would have to be decoded here first.
+PNG is the one encoded format the protocol takes, so every picture is sent as
+one, drawn down first to the size it will be shown at: a preview has no use
+for the pixels of a photograph, and the terminal keeps what it is sent.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import itertools
 import math
 import os
@@ -77,12 +79,34 @@ def colour(image_id: int) -> tuple[int, int, int]:
     return image_id >> 16 & 0xFF, image_id >> 8 & 0xFF, image_id & 0xFF
 
 
-def png_size(data: bytes) -> tuple[int, int] | None:
-    """A PNG's width and height in pixels, or None for anything else."""
-    if not data.startswith(b"\x89PNG\r\n\x1a\n") or data[12:16] != b"IHDR" or len(data) < 24:
+def prepare(data: bytes, cell: tuple[int, int]) -> tuple[bytes, int, int] | None:
+    """An image as the PNG to send and the columns and rows to show it in, or
+    None for one that cannot be read. An animation gives its first frame."""
+    # Imported when the first picture is: most sessions never draw one.
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(data), formats=("PNG", "JPEG", "GIF", "WEBP")) as source:
+            columns, rows = fit(source.size, cell)
+            box = (columns * cell[0], rows * cell[1])
+            if source.format == "PNG" and source.width <= box[0] and source.height <= box[1]:
+                return data, columns, rows
+            # A JPEG can be decoded small to begin with, which is most of the
+            # work of opening a photograph.
+            source.draft("RGB", box)
+            picture = ImageOps.exif_transpose(source)
+            if picture.size != source.size:
+                # Turned on its side by the camera: the box is the other way up.
+                columns, rows = fit(picture.size, cell)
+                box = (columns * cell[0], rows * cell[1])
+            if picture.mode not in ("RGB", "RGBA", "L", "LA"):
+                picture = picture.convert("RGBA")
+            picture.thumbnail(box)
+            sent = io.BytesIO()
+            picture.save(sent, "PNG", compress_level=1)
+    except Exception:  # noqa: BLE001 — whatever a decoder makes of a bad file
         return None
-    width, height = struct.unpack(">II", data[16:24])
-    return (width, height) if width and height else None
+    return sent.getvalue(), columns, rows
 
 
 def cell_size() -> tuple[int, int]:

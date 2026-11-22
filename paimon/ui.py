@@ -98,15 +98,15 @@ class Picture(Widget):
     @classmethod
     def of(cls, images: Sequence[Image], app: App) -> "list[Picture]":
         """A picture for each of ``images`` this terminal can draw: none on a
-        terminal without the protocol, and none for a format it does not take."""
+        terminal without the protocol, and none for a file that will not open."""
         if not images or not cls.drawn_by(app):
             return []
         cell = termimage.cell_size()
         pictures = []
         for image in images:
-            size = termimage.png_size(image.data)
-            if size is not None:
-                pictures.append(cls(image.data, *termimage.fit(size, cell)))
+            prepared = termimage.prepare(image.data, cell)
+            if prepared is not None:
+                pictures.append(cls(*prepared))
         return pictures
 
     @staticmethod
