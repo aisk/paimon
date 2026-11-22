@@ -4,6 +4,7 @@ import asyncio
 import difflib
 import json
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -17,9 +18,10 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static, TextArea
 
-from . import progstatus
+from . import clipboard, progstatus
 from .diff import locate_line, render_diff
 from .logtext import summarize_call
+from .session import data_dir
 from .tools.files import resolve_path
 
 
@@ -499,6 +501,9 @@ class ToolGroup(Vertical):
         self.query_one(".tool-group-header", Static).update(self._header())
 
 
+_IMAGE_PLACEHOLDER = re.compile(r"\[Image #(\d+)\]")
+
+
 class PromptInput(TextArea):
     """Multi-line prompt editor. Enter submits; Shift+Enter / Ctrl+J insert a newline.
 
@@ -521,6 +526,10 @@ class PromptInput(TextArea):
         self._history: list[str] = []
         self._history_index: int | None = None
         self._draft = ""
+        # Images pasted into this prompt, by the number their placeholder
+        # shows. Never reused or dropped, so a prompt recalled from the
+        # history still names its images.
+        self._images: dict[int, Path] = {}
 
     async def _on_key(self, event: events.Key) -> None:
         if event.character == "/" and not self.text:
@@ -534,7 +543,16 @@ class PromptInput(TextArea):
             text = self.text.strip()
             if text:
                 self._remember(text)
-                self.post_message(self.Submitted(text))
+                self.post_message(self.Submitted(self._with_mentions(text)))
+            return
+        if event.key == "backspace" and self._delete_placeholder():
+            event.prevent_default()
+            event.stop()
+            return
+        if event.key == "ctrl+v":
+            event.prevent_default()
+            event.stop()
+            self.run_worker(self._paste_clipboard(), group="paste", exclusive=True)
             return
         if event.key in ("ctrl+j", "shift+enter"):
             event.prevent_default()
@@ -556,6 +574,57 @@ class PromptInput(TextArea):
             self._history_next()
             return
         await super()._on_key(event)
+
+    async def _paste_clipboard(self) -> None:
+        """Ctrl+V: an image on the clipboard is saved and attached, and
+        anything else is pasted as the text it is."""
+        try:
+            image = await asyncio.to_thread(clipboard.read_image)
+            if image is None:
+                self.action_paste()
+                return
+            path = clipboard.save(image, data_dir() / "pasted")
+        except (clipboard.ClipboardError, OSError) as exc:
+            self.app.notify(str(exc), severity="warning")
+            return
+        self._attach_image(path)
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        # A dropped image file arrives as a pasted path. Anything else is
+        # left to TextArea's own handler, which runs after this one.
+        path = clipboard.pasted_image_path(event.text)
+        if path is not None:
+            event.prevent_default()
+            event.stop()
+            self._attach_image(path)
+
+    def _attach_image(self, path: Path) -> None:
+        """Stand a short placeholder in the text for the image at ``path``."""
+        number = len(self._images) + 1
+        self._images[number] = path
+        self.insert(f"[Image #{number}] ")
+
+    def _with_mentions(self, text: str) -> str:
+        """``text`` as it is sent: each placeholder becomes the mention that
+        attaches its image."""
+        def mention(match: re.Match) -> str:
+            path = self._images.get(int(match[1]))
+            return match[0] if path is None else clipboard.mention(path)
+
+        return _IMAGE_PLACEHOLDER.sub(mention, text)
+
+    def _delete_placeholder(self) -> bool:
+        """Backspace just after a placeholder removes all of it, since half
+        of one attaches nothing."""
+        if self.selected_text:
+            return False
+        row, column = self.cursor_location
+        before = self.document.get_line(row)[:column]
+        match = re.search(_IMAGE_PLACEHOLDER.pattern + r" ?\Z", before)
+        if match is None or int(match[1]) not in self._images:
+            return False
+        self.delete((row, match.start()), (row, column))
+        return True
 
     def _remember(self, text: str) -> None:
         if not self._history or self._history[-1] != text:
