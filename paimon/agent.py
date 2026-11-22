@@ -241,6 +241,83 @@ def _failures_as_text(history: list[ModelMessage]) -> list[ModelMessage]:
     return sent
 
 
+def _shown(event: object) -> ReasoningDelta | TextDelta | None:
+    """The reasoning or text a stream event adds, as the event that shows it;
+    None for anything else."""
+    if isinstance(event, PartStartEvent):
+        part = event.part
+        if isinstance(part, ThinkingPart) and part.content:
+            return ReasoningDelta(part.content)
+        if isinstance(part, TextPart) and part.content:
+            return TextDelta(part.content)
+    elif isinstance(event, PartDeltaEvent):
+        delta = event.delta
+        if isinstance(delta, ThinkingPartDelta) and delta.content_delta:
+            return ReasoningDelta(delta.content_delta)
+        if isinstance(delta, TextPartDelta) and delta.content_delta:
+            return TextDelta(delta.content_delta)
+    return None
+
+
+def _request_stats(response: ModelResponse, first_event_at: float | None) -> RequestStats | None:
+    """How a streamed response went, timed from its first event; None when
+    there is nothing to report."""
+    if first_event_at is None:
+        return None
+    # perf_counter, not monotonic: Windows ticks monotonic
+    # every ~16ms, so a short response measured 0s and
+    # reported no stats at all.
+    elapsed = time.perf_counter() - first_event_at
+    usage = response.usage
+    if usage.output_tokens and elapsed > 0:
+        return RequestStats(usage.output_tokens, elapsed,
+                            usage.input_tokens,
+                            usage.cache_read_tokens,
+                            usage.cache_write_tokens)
+    return None
+
+
+class _Turn:
+    """What one turn keeps from step to step: its tool call budget and the
+    allowances for compaction."""
+
+    def __init__(self, max_tool_calls: int | None) -> None:
+        self.max_tool_calls = max_tool_calls
+        # A compaction that failed for a transient reason is retried on the
+        # next step of this turn — the context only keeps growing, so giving
+        # up on the first rate limit disables the safety net exactly when it
+        # is needed. Anything else, and repeated transient failures, stop it
+        # for the rest of the turn instead of paying for it every step.
+        self.compaction_off = False
+        self.compaction_failures = 0
+        self.calls_made = 0  # every dispatched ToolCallPart counts, whatever its kind
+        self.budget_hit = False
+        # A provider context-overflow error triggers one forced compaction and
+        # one retry per turn; a second overflow means compaction cannot make
+        # the request fit, and retrying again would loop.
+        self.overflow_retried = False
+
+    def spend(self) -> str | None:
+        """Take one call off the turn's budget: None, or the refusal when
+        there is none left. Shared by the calls the model makes and the
+        ones its run_code scripts make, so neither can slip past it."""
+        if self.max_tool_calls is not None and self.calls_made >= self.max_tool_calls:
+            self.budget_hit = True
+            return (f"Not executed: the run reached its tool call "
+                    f"budget (max_tool_calls={self.max_tool_calls}).")
+        self.calls_made += 1
+        return None
+
+
+@dataclasses.dataclass
+class _Reply:
+    """Where a step's request leaves what it got back: an async generator
+    yields its events and has no return value to carry these."""
+
+    response: ModelResponse | None = None
+    stats: RequestStats | None = None
+
+
 # Takes what the user queued while a turn was already running, clearing the
 # queue as it goes. The loop calls it before every model request, so what it
 # returns reaches the model at the next step rather than the next turn. A
@@ -1098,328 +1175,337 @@ class Agent:
         """The model/tool loop of one turn; ``run`` wraps it to guarantee the
         terminal ``turn_end`` record whatever way the turn ends.
 
-        Every yield here and in the handlers is a point where the turn may end
-        for good: the caller is cancelled while it renders the event and
-        closes the generator. So at every yield the history is one a request
-        can be built on (each tool call answered) and is what the log replays
-        to: whatever a step appends goes in before its events go out.
+        Every yield here, in the step helpers below and in the handlers is a
+        point where the turn may end for good: the caller is cancelled while
+        it renders the event and closes the generator. So at every yield the
+        history is one a request can be built on (each tool call answered)
+        and is what the log replays to: whatever a step appends goes in
+        before its events go out.
+
+        The helpers that yield are closed with this generator rather than
+        left to the garbage collector, so an abandoned turn shuts its model
+        stream and records the partial text (_request), and cancels the
+        calls still running (_dispatch), before ``run`` sees it end.
         """
-        # A compaction that failed for a transient reason is retried on the
-        # next step of this turn — the context only keeps growing, so giving
-        # up on the first rate limit disables the safety net exactly when it
-        # is needed. Anything else, and repeated transient failures, stop it
-        # for the rest of the turn instead of paying for it every step.
-        compaction_off = False
-        compaction_failures = 0
-        calls_made = 0  # every dispatched ToolCallPart counts, whatever its kind
-        budget_hit = False
-
-        def spend() -> str | None:
-            """Take one call off the turn's budget: None, or the refusal when
-            there is none left. Shared by the calls the model makes and the
-            ones its run_code scripts make, so neither can slip past it."""
-            nonlocal calls_made, budget_hit
-            if max_tool_calls is not None and calls_made >= max_tool_calls:
-                budget_hit = True
-                return (f"Not executed: the run reached its tool call "
-                        f"budget (max_tool_calls={max_tool_calls}).")
-            calls_made += 1
-            return None
-
-        # A provider context-overflow error triggers one forced compaction and
-        # one retry per turn; a second overflow means compaction cannot make
-        # the request fit, and retrying again would loop.
-        overflow_retried = False
-
+        turn = _Turn(max_tool_calls)
         while True:
-            # Messages the user queued while this turn was already running.
-            # Appended as their own request so the model sees them at the next
-            # step, without touching the stream that just ended or the tool
-            # results already recorded. Before compaction, so they count
-            # towards the context check and survive a history replacement.
-            # Notices from jobs that ended meanwhile come in the same way.
-            # Everything is appended before anything is yielded: what pending()
-            # returns is gone from the caller's queue, and the turn may end for
-            # good at any yield.
-            arrived: list[AgentEvent] = self._take_notices()
-            for queued in (self.pending() if self.pending is not None else []):
-                # A ready-made request is one the caller already showed the
-                # user (a "!" run, whose output was on screen the moment the
-                # command exited), so it is appended without an event of its
-                # own — and without expansion, since @path in a command's
-                # output is output rather than a mention.
-                if isinstance(queued, ModelRequest):
-                    self._append_message(queued)
-                    continue
-                content = self.expand_input(queued)
-                self._append_message(ModelRequest(parts=[UserPromptPart(content=content)]))
-                arrived.append(UserInput(queued, images_of(content)))
-            for event in arrived:
+            for event in self._take_arrivals():
                 yield event
 
-            if not compaction_off:
-                try:
-                    compacted = await self._maybe_compact()
-                except Exception as exc:  # noqa: BLE001 - the normal request may still fit
-                    compaction_failures += 1
-                    compaction_off = (not retry.is_transient(exc)
-                                      or compaction_failures >= _MAX_COMPACTION_FAILURES)
-                    self.session.append_meta("compaction_failed", error=str(exc))
-                    yield ContextCompactionFailed(str(exc))
-                else:
-                    compaction_failures = 0
-                    if compacted:
-                        yield ContextCompacted(compacted.tokens_before, compacted.tokens_after)
+            if (compaction_event := await self._auto_compact(turn)) is not None:
+                yield compaction_event
 
             model = self._model()
-            request_messages = self._context(model)
-            parameters = ModelRequestParameters(
-                function_tools=self._tool_definitions, allow_text_output=True
-            )
+            reply = _Reply()
+            async with contextlib.aclosing(
+                    self._request(model, turn, record_outcome, reply)) as events:
+                async for event in events:
+                    yield event
 
-            content = ""  # accumulated text, kept if the stream is interrupted
-            attempt = 0
-            stats: RequestStats | None = None
-
-            while True:
-                started = False  # this attempt has yielded something to the caller
-                first_event_at: float | None = None
-                try:
-                    async with model_request_stream(
-                        model,
-                        request_messages,
-                        model_settings=request_settings(
-                            model, self.session.id, self.run_options.thinking_level(self.config)),
-                        model_request_parameters=parameters,
-                    ) as stream:
-                        async for event in stream:
-                            if first_event_at is None:
-                                first_event_at = time.perf_counter()
-                            if isinstance(event, PartStartEvent):
-                                part = event.part
-                                if isinstance(part, ThinkingPart) and part.content:
-                                    started = True
-                                    yield ReasoningDelta(part.content)
-                                elif isinstance(part, TextPart) and part.content:
-                                    started = True
-                                    content += part.content
-                                    yield TextDelta(part.content)
-                            elif isinstance(event, PartDeltaEvent):
-                                delta = event.delta
-                                if isinstance(delta, ThinkingPartDelta) and delta.content_delta:
-                                    started = True
-                                    yield ReasoningDelta(delta.content_delta)
-                                elif isinstance(delta, TextPartDelta) and delta.content_delta:
-                                    started = True
-                                    content += delta.content_delta
-                                    yield TextDelta(delta.content_delta)
-                        response = stream.get()
-                        if first_event_at is not None:
-                            # perf_counter, not monotonic: Windows ticks monotonic
-                            # every ~16ms, so a short response measured 0s and
-                            # reported no stats at all.
-                            elapsed = time.perf_counter() - first_event_at
-                            usage = response.usage
-                            if usage.output_tokens and elapsed > 0:
-                                stats = RequestStats(usage.output_tokens, elapsed,
-                                                     usage.input_tokens,
-                                                     usage.cache_read_tokens,
-                                                     usage.cache_write_tokens)
-                    break
-                except (asyncio.CancelledError, GeneratorExit):
-                    # Interrupted mid-stream: the partial text is persisted in
-                    # the turn_end record for the log, but no ModelResponse is
-                    # appended — a truncated answer replayed as a completed
-                    # one misleads both the resumed UI and the model, and a
-                    # history ending on the user request stays resumable.
-                    # GeneratorExit is the usual way: the caller is cancelled
-                    # while it renders a delta, and closes this generator.
-                    record_outcome("interrupted", partial_text=content or None)
-                    raise
-                except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
-                    if (not started and not overflow_retried
-                            and retry.is_context_overflow(exc)):
-                        # The provider says the request exceeded the window:
-                        # compact and retry once, with an audit record of the
-                        # overflow that triggered it.
-                        overflow_retried = True
-                        self.session.append_meta("context_overflow",
-                                                 error=f"{type(exc).__name__}: {exc}")
-                        try:
-                            compacted = await self._maybe_compact(force=True)
-                        except Exception as compact_exc:  # noqa: BLE001 — original error still raises below
-                            self.session.append_meta("compaction_failed",
-                                                     error=str(compact_exc))
-                            compacted = None
-                        if compacted:
-                            yield ContextCompacted(compacted.tokens_before,
-                                                   compacted.tokens_after)
-                            request_messages = self._context(model)
-                            continue
-                    if (not started and retry.is_rejection(exc)
-                            and self._sees_images(model) and has_images(self.history)):
-                        # Profiles call nearly every model able to see, so a
-                        # text-only one is found out here, by its refusal.
-                        # The request goes again in words alone, and so does
-                        # every later one to this model: the images stay in
-                        # the history, which would otherwise never be
-                        # accepted again.
-                        self._image_blind.add((model.system, model.model_name))
-                        self.session.append_meta("images_rejected",
-                                                 error=f"{type(exc).__name__}: {exc}")
-                        yield ImagesRejected(model.model_name)
-                        request_messages = self._context(model)
-                        continue
-                    # Counted only here: the compact-and-retry above is its own
-                    # allowance, not one of the transient retries.
-                    attempt += 1
-                    if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
-                        # Recorded here rather than in run()'s outer boundary
-                        # because only this scope still holds the partial text
-                        # the user already saw streaming.
-                        record_outcome("error", error=f"{type(exc).__name__}: {exc}",
-                                       partial_text=content or None)
-                        raise
-                    delay = retry.backoff(attempt)
-                    self.session.append_meta("model_retry", attempt=attempt,
-                                             error=retry.describe(exc))
-                    yield ModelRetry(attempt, retry.MAX_ATTEMPTS, delay, retry.describe(exc))
-                    await asyncio.sleep(delay)
-
-            if response.model_name and response.provider_name == model.system:
-                self._reported_ids.setdefault(
-                    (model.system, model.model_name), set()).add(response.model_name)
-            self._append_message(response)
-            usage = response.usage
-            if usage.input_tokens:
-                # The provider's own count of this request plus its response —
-                # the authoritative context size at this history length.
-                self._usage_anchor = (len(self.history),
-                                      usage.input_tokens + (usage.output_tokens or 0))
-
-            # Pre-seed a tool result for every call up front, so even if we are
-            # interrupted mid-execution the history never has a dangling tool call
-            # (the API requires each tool_call_id to be answered). Unfinished ones
-            # keep this placeholder. Appended before anything is yielded: the
-            # turn may end for good at any yield, and a response whose calls
-            # have no results is a history every later request is refused on.
-            calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
-            returns = [
-                ToolReturnPart(tool_name=call.tool_name, content="Interrupted by user.",
-                               tool_call_id=call.tool_call_id, outcome="interrupted")
-                for call in calls
-            ]
-            tool_request = ModelRequest(parts=returns)
-            record_id = self._append_message(tool_request) if calls else ""
-
-            if stats is not None:
-                yield stats
+            calls, tool_request, record_id = self._record_response(model, reply.response)
+            if reply.stats is not None:
+                yield reply.stats
             if not calls:
                 record_outcome("success")
                 yield TurnEnd()
                 return
 
-            def admit(call: ToolCallPart) -> tuple[str, dict, ToolResult | None]:
-                """The call's name and arguments, and the failed result that
-                answers it when it is refused before it runs: "failed" rather
-                than "denied", which means a permission refusal."""
-                args = parse_args(call.args)
-                name = call.tool_name
-                if (over := spend()) is not None:
-                    # The budget check comes before any dispatch,
-                    # agent-handled tools included: a refused call never
-                    # executes, and its slot records why instead of a generic
-                    # interrupted placeholder.
-                    return name, args, ToolResult(over, "failed", "over budget")
-                if name not in self.toolset:
-                    # Rejected before the agent-handled table below, so
-                    # excluding write_todos or ask_user from a toolset
-                    # actually disables them.
-                    return name, args, ToolResult(f"Error: unknown tool {name!r}", "failed")
-                if (invalid := validate_args(name, args, self.toolset)) is not None:
-                    # One schema validation for every call — before gating
-                    # and before the agent-handled dispatch below — so a
-                    # malformed argument is a tool error the model can react
-                    # to, never an exception ending the turn (TOOLS-1).
-                    return name, args, ToolResult(
-                        f"Error: invalid arguments for {name}: {invalid}", "failed")
-                return name, args, None
+            async with contextlib.aclosing(
+                    self._dispatch(calls, tool_request, record_id, turn)) as events:
+                async for event in events:
+                    yield event
 
-            def slot(index: int) -> Callable[..., None]:
-                # Writes this one slot, so each result is durable the moment
-                # it is settled without rewriting the others.
-                return functools.partial(self._settle_slot, record_id, index, tool_request)
-
-            async def execute(index: int, name: str, args: dict) -> ToolResult:
-                result = await run_tool(name, args, self._caller())
-                slot(index)(result)
-                return result
-
-            # A run of neighbouring calls that only read is started together,
-            # so ten greps take as long as the slowest one. Their events still
-            # go out one call at a time and in the order the model wrote them:
-            # every consumer, the replay of a resumed session included, shows
-            # a call as its start followed by its end.
-            #
-            # Admitted in the model's order, ahead of their turn in the loop
-            # below, so the budget is spent in the same order as before.
-            admitted: dict[int, tuple[str, dict, ToolResult | None]] = {}
-            running: dict[int, asyncio.Task[ToolResult]] = {}
-            try:
-                for index, call in enumerate(calls):
-                    settle = slot(index)
-                    name, args, refused = admitted.pop(index, None) or admit(call)
-
-                    if refused is not None:
-                        yield ToolStart(call.tool_call_id, name, args)
-                        settle(refused)
-                        yield ToolEnd.of(call.tool_call_id, name, refused)
-                        continue
-
-                    if name == codemode.NAME:
-                        # Not in the table below: it needs the turn's budget, which
-                        # only this scope holds. An interrupt leaves the slot its
-                        # placeholder, like any other tool cut short.
-                        yield ToolStart(call.tool_call_id, name, args)
-                        text, completed, nested = await self._run_code(args["code"], spend)
-                        result = ToolResult(text) if completed else ToolResult(text, "failed")
-                        # Kept beside the result, where it is persisted for replay
-                        # and never sent to the model.
-                        settle(result, {"calls": nested})
-                        yield ToolEnd.of(call.tool_call_id, name, result, nested)
-                        continue
-
-                    handler = self._AGENT_HANDLED.get(name)
-                    if handler is not None:
-                        async for event in handler(self, call, args, settle):
-                            yield event
-                        continue
-
-                    if index not in running and self._runs_alongside(name, args):
-                        running[index] = asyncio.create_task(execute(index, name, args))
-                        for ahead in range(index + 1, min(index + _PARALLEL_TOOLS, len(calls))):
-                            admitted[ahead] = admit(calls[ahead])
-                            if (admitted[ahead][2] is not None
-                                    or not self._runs_alongside(*admitted[ahead][:2])):
-                                break
-                            running[ahead] = asyncio.create_task(
-                                execute(ahead, *admitted[ahead][:2]))
-
-                    yield ToolStart(call.tool_call_id, name, args)
-                    started = running.pop(index, None)
-                    result = await (started if started is not None
-                                    else execute(index, name, args))
-                    yield ToolEnd.of(call.tool_call_id, name, result)
-            finally:
-                # The turn ended with calls still running: interrupted, or
-                # closed while the caller rendered an event. What has not
-                # finished keeps its "interrupted" placeholder.
-                for task in running.values():
-                    task.cancel()
-                await asyncio.gather(*running.values(), return_exceptions=True)
-
-            if budget_hit:
+            if turn.budget_hit:
                 record_outcome("max_tool_calls")
                 yield ToolBudgetExhausted(max_tool_calls)
                 return
             # loop again so the model can react to tool results
+
+    def _take_arrivals(self) -> list[AgentEvent]:
+        """Append what arrived since the last step, and return the events
+        that show it."""
+        # Messages the user queued while this turn was already running.
+        # Appended as their own request so the model sees them at the next
+        # step, without touching the stream that just ended or the tool
+        # results already recorded. Before compaction, so they count
+        # towards the context check and survive a history replacement.
+        # Notices from jobs that ended meanwhile come in the same way.
+        # Everything is appended before anything is yielded: what pending()
+        # returns is gone from the caller's queue, and the turn may end for
+        # good at any yield.
+        arrived: list[AgentEvent] = self._take_notices()
+        for queued in (self.pending() if self.pending is not None else []):
+            # A ready-made request is one the caller already showed the
+            # user (a "!" run, whose output was on screen the moment the
+            # command exited), so it is appended without an event of its
+            # own — and without expansion, since @path in a command's
+            # output is output rather than a mention.
+            if isinstance(queued, ModelRequest):
+                self._append_message(queued)
+                continue
+            content = self.expand_input(queued)
+            self._append_message(ModelRequest(parts=[UserPromptPart(content=content)]))
+            arrived.append(UserInput(queued, images_of(content)))
+        return arrived
+
+    async def _auto_compact(self, turn: _Turn) -> AgentEvent | None:
+        """Compact ahead of a step's request when the context is close to
+        full: the event that reports it, None when nothing happened."""
+        if turn.compaction_off:
+            return None
+        try:
+            compacted = await self._maybe_compact()
+        except Exception as exc:  # noqa: BLE001 - the normal request may still fit
+            turn.compaction_failures += 1
+            turn.compaction_off = (not retry.is_transient(exc)
+                                   or turn.compaction_failures >= _MAX_COMPACTION_FAILURES)
+            self.session.append_meta("compaction_failed", error=str(exc))
+            return ContextCompactionFailed(str(exc))
+        turn.compaction_failures = 0
+        if compacted:
+            return ContextCompacted(compacted.tokens_before, compacted.tokens_after)
+        return None
+
+    async def _request(self, model: Model, turn: _Turn, record_outcome: Callable[..., None],
+                       reply: _Reply) -> AsyncIterator[AgentEvent]:
+        """One model request of the turn, streamed, with its retries: transient
+        failures, one compact-and-retry on a context overflow, and a resend
+        without images to a model that refuses them. The response and its
+        stats are left in ``reply``; a failure that is not retried is
+        recorded and raised."""
+        request_messages = self._context(model)
+        parameters = ModelRequestParameters(
+            function_tools=self._tool_definitions, allow_text_output=True
+        )
+
+        content = ""  # accumulated text, kept if the stream is interrupted
+        attempt = 0
+
+        while True:
+            started = False  # this attempt has yielded something to the caller
+            first_event_at: float | None = None
+            try:
+                async with model_request_stream(
+                    model,
+                    request_messages,
+                    model_settings=request_settings(
+                        model, self.session.id, self.run_options.thinking_level(self.config)),
+                    model_request_parameters=parameters,
+                ) as stream:
+                    async for event in stream:
+                        if first_event_at is None:
+                            first_event_at = time.perf_counter()
+                        shown = _shown(event)
+                        if shown is not None:
+                            started = True
+                            if isinstance(shown, TextDelta):
+                                content += shown.text
+                            yield shown
+                    reply.response = stream.get()
+                    reply.stats = _request_stats(reply.response, first_event_at)
+                break
+            except (asyncio.CancelledError, GeneratorExit):
+                # Interrupted mid-stream: the partial text is persisted in
+                # the turn_end record for the log, but no ModelResponse is
+                # appended — a truncated answer replayed as a completed
+                # one misleads both the resumed UI and the model, and a
+                # history ending on the user request stays resumable.
+                # GeneratorExit is the usual way: the caller is cancelled
+                # while it renders a delta, and closes this generator.
+                record_outcome("interrupted", partial_text=content or None)
+                raise
+            except Exception as exc:  # noqa: BLE001 — classified by retry.is_transient
+                if (not started and not turn.overflow_retried
+                        and retry.is_context_overflow(exc)):
+                    # The provider says the request exceeded the window:
+                    # compact and retry once, with an audit record of the
+                    # overflow that triggered it.
+                    turn.overflow_retried = True
+                    compacted = await self._compact_for_overflow(exc)
+                    if compacted:
+                        yield ContextCompacted(compacted.tokens_before,
+                                               compacted.tokens_after)
+                        request_messages = self._context(model)
+                        continue
+                if (not started and retry.is_rejection(exc)
+                        and self._sees_images(model) and has_images(self.history)):
+                    # Profiles call nearly every model able to see, so a
+                    # text-only one is found out here, by its refusal.
+                    # The request goes again in words alone, and so does
+                    # every later one to this model: the images stay in
+                    # the history, which would otherwise never be
+                    # accepted again.
+                    self._image_blind.add((model.system, model.model_name))
+                    self.session.append_meta("images_rejected",
+                                             error=f"{type(exc).__name__}: {exc}")
+                    yield ImagesRejected(model.model_name)
+                    request_messages = self._context(model)
+                    continue
+                # Counted only here: the compact-and-retry above is its own
+                # allowance, not one of the transient retries.
+                attempt += 1
+                if started or attempt >= retry.MAX_ATTEMPTS or not retry.is_transient(exc):
+                    # Recorded here rather than in run()'s outer boundary
+                    # because only this scope still holds the partial text
+                    # the user already saw streaming.
+                    record_outcome("error", error=f"{type(exc).__name__}: {exc}",
+                                   partial_text=content or None)
+                    raise
+                delay = retry.backoff(attempt)
+                self.session.append_meta("model_retry", attempt=attempt,
+                                         error=retry.describe(exc))
+                yield ModelRetry(attempt, retry.MAX_ATTEMPTS, delay, retry.describe(exc))
+                await asyncio.sleep(delay)
+
+    async def _compact_for_overflow(self, exc: Exception) -> compaction.CompactionResult | None:
+        """The forced compaction a context overflow ``exc`` asks for, after
+        the audit record of the overflow; None when it compacted nothing or
+        failed, and the request is then not retried."""
+        self.session.append_meta("context_overflow",
+                                 error=f"{type(exc).__name__}: {exc}")
+        try:
+            return await self._maybe_compact(force=True)
+        except Exception as compact_exc:  # noqa: BLE001 — original error still raises in _request
+            self.session.append_meta("compaction_failed",
+                                     error=str(compact_exc))
+            return None
+
+    def _record_response(self, model: Model, response: ModelResponse
+                         ) -> tuple[list[ToolCallPart], ModelRequest, str]:
+        """Append ``response``, and a placeholder result for each call it
+        makes: the calls, the request holding their results and its record
+        id ("" when there are no calls)."""
+        if response.model_name and response.provider_name == model.system:
+            self._reported_ids.setdefault(
+                (model.system, model.model_name), set()).add(response.model_name)
+        self._append_message(response)
+        usage = response.usage
+        if usage.input_tokens:
+            # The provider's own count of this request plus its response —
+            # the authoritative context size at this history length.
+            self._usage_anchor = (len(self.history),
+                                  usage.input_tokens + (usage.output_tokens or 0))
+
+        # Pre-seed a tool result for every call up front, so even if we are
+        # interrupted mid-execution the history never has a dangling tool call
+        # (the API requires each tool_call_id to be answered). Unfinished ones
+        # keep this placeholder. Appended before anything is yielded: the
+        # turn may end for good at any yield, and a response whose calls
+        # have no results is a history every later request is refused on.
+        calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
+        returns = [
+            ToolReturnPart(tool_name=call.tool_name, content="Interrupted by user.",
+                           tool_call_id=call.tool_call_id, outcome="interrupted")
+            for call in calls
+        ]
+        tool_request = ModelRequest(parts=returns)
+        record_id = self._append_message(tool_request) if calls else ""
+        return calls, tool_request, record_id
+
+    def _admit(self, call: ToolCallPart,
+               spend: Callable[[], str | None]) -> tuple[str, dict, ToolResult | None]:
+        """The call's name and arguments, and the failed result that
+        answers it when it is refused before it runs: "failed" rather
+        than "denied", which means a permission refusal."""
+        args = parse_args(call.args)
+        name = call.tool_name
+        if (over := spend()) is not None:
+            # The budget check comes before any dispatch,
+            # agent-handled tools included: a refused call never
+            # executes, and its slot records why instead of a generic
+            # interrupted placeholder.
+            return name, args, ToolResult(over, "failed", "over budget")
+        if name not in self.toolset:
+            # Rejected before the agent-handled table below, so
+            # excluding write_todos or ask_user from a toolset
+            # actually disables them.
+            return name, args, ToolResult(f"Error: unknown tool {name!r}", "failed")
+        if (invalid := validate_args(name, args, self.toolset)) is not None:
+            # One schema validation for every call — before gating
+            # and before the agent-handled dispatch below — so a
+            # malformed argument is a tool error the model can react
+            # to, never an exception ending the turn (TOOLS-1).
+            return name, args, ToolResult(
+                f"Error: invalid arguments for {name}: {invalid}", "failed")
+        return name, args, None
+
+    async def _dispatch(self, calls: list[ToolCallPart], tool_request: ModelRequest,
+                        record_id: str, turn: _Turn) -> AsyncIterator[AgentEvent]:
+        """Run one response's tool calls, settling each one's slot in
+        ``tool_request`` and yielding the events that show them."""
+
+        def admit(call: ToolCallPart) -> tuple[str, dict, ToolResult | None]:
+            return self._admit(call, turn.spend)
+
+        def slot(index: int) -> Callable[..., None]:
+            # Writes this one slot, so each result is durable the moment
+            # it is settled without rewriting the others.
+            return functools.partial(self._settle_slot, record_id, index, tool_request)
+
+        async def execute(index: int, name: str, args: dict) -> ToolResult:
+            result = await run_tool(name, args, self._caller())
+            slot(index)(result)
+            return result
+
+        # A run of neighbouring calls that only read is started together,
+        # so ten greps take as long as the slowest one. Their events still
+        # go out one call at a time and in the order the model wrote them:
+        # every consumer, the replay of a resumed session included, shows
+        # a call as its start followed by its end.
+        #
+        # Admitted in the model's order, ahead of their turn in the loop
+        # below, so the budget is spent in the same order as before.
+        admitted: dict[int, tuple[str, dict, ToolResult | None]] = {}
+        running: dict[int, asyncio.Task[ToolResult]] = {}
+        try:
+            for index, call in enumerate(calls):
+                settle = slot(index)
+                name, args, refused = admitted.pop(index, None) or admit(call)
+
+                if refused is not None:
+                    yield ToolStart(call.tool_call_id, name, args)
+                    settle(refused)
+                    yield ToolEnd.of(call.tool_call_id, name, refused)
+                    continue
+
+                if name == codemode.NAME:
+                    # Not in the table below: it needs the turn's budget, which
+                    # only this scope holds. An interrupt leaves the slot its
+                    # placeholder, like any other tool cut short.
+                    yield ToolStart(call.tool_call_id, name, args)
+                    text, completed, nested = await self._run_code(args["code"], turn.spend)
+                    result = ToolResult(text) if completed else ToolResult(text, "failed")
+                    # Kept beside the result, where it is persisted for replay
+                    # and never sent to the model.
+                    settle(result, {"calls": nested})
+                    yield ToolEnd.of(call.tool_call_id, name, result, nested)
+                    continue
+
+                handler = self._AGENT_HANDLED.get(name)
+                if handler is not None:
+                    async for event in handler(self, call, args, settle):
+                        yield event
+                    continue
+
+                if index not in running and self._runs_alongside(name, args):
+                    running[index] = asyncio.create_task(execute(index, name, args))
+                    for ahead in range(index + 1, min(index + _PARALLEL_TOOLS, len(calls))):
+                        admitted[ahead] = admit(calls[ahead])
+                        if (admitted[ahead][2] is not None
+                                or not self._runs_alongside(*admitted[ahead][:2])):
+                            break
+                        running[ahead] = asyncio.create_task(
+                            execute(ahead, *admitted[ahead][:2]))
+
+                yield ToolStart(call.tool_call_id, name, args)
+                started = running.pop(index, None)
+                result = await (started if started is not None
+                                else execute(index, name, args))
+                yield ToolEnd.of(call.tool_call_id, name, result)
+        finally:
+            # The turn ended with calls still running: interrupted, or
+            # closed while the caller rendered an event. What has not
+            # finished keeps its "interrupted" placeholder.
+            for task in running.values():
+                task.cancel()
+            await asyncio.gather(*running.values(), return_exceptions=True)
