@@ -175,6 +175,9 @@ def pasted_image_path(text: str) -> Path | None:
         text = text[1:-1]
     elif text.startswith("file://"):
         text = unquote(urlparse(text).path)
+        if _DRIVE_PATH.match(text[1:]):
+            # file:///C:/Users/me/shot.png has the path /C:/Users/me/shot.png.
+            text = text[1:]
     else:
         text = text.replace("\\ ", " ")
     drive = _DRIVE_PATH.match(text)
