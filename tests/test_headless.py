@@ -265,12 +265,17 @@ class ResultRendererTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["log_end"])
 
 
+# Events that never reach a headless run: the "!" prefix, compaction
+# checkpoints and queued prompts only exist in the TUI and its replay.
+HEADLESS_UNSEEN = {"UserInput", "CompactionNotice", "ShellRun"}
+
+
 class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
     """Every agent event must be renderable by both headless renderers.
 
-    Adding an event to paimon.agent without teaching the renderers about it
-    should fail here rather than crash a run. The TUI renderer is held to the
-    same list in test_app.
+    Adding an event to paimon.events without teaching the renderers about it
+    should fail here rather than crash a run or vanish. The TUI renderer is
+    held to the same list in test_app_rendering.
     """
 
     async def test_every_event_renders(self) -> None:
@@ -288,13 +293,26 @@ class EventCoverageTest(unittest.IsolatedAsyncioTestCase):
         renderer = headless.JsonRenderer(out, _config())
         renderer.begin("sid")
         for event in agent_events():
-            if type(event).__name__ in SILENT_EVENTS | {"UserInput", "CompactionNotice",
-                                                         "ShellRun"}:
-                continue  # replay-only: never reaches a headless run
+            if type(event).__name__ in SILENT_EVENTS | HEADLESS_UNSEEN:
+                continue
             before = out.getvalue()
             await renderer.handle(event)
             self.assertNotEqual(out.getvalue(), before,
                                 f"JsonRenderer emitted nothing for {type(event).__name__}")
+
+    async def test_text_writes_something_for_every_visible_event(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        renderer = headless.TextRenderer(out, err, _config(show_reasoning=True))
+        renderer.begin("sid")
+        # A successful result only ends the progress line its ToolStart wrote.
+        quiet = {"ToolEnd"}
+        for event in agent_events():
+            if type(event).__name__ in SILENT_EVENTS | HEADLESS_UNSEEN | quiet:
+                continue
+            before = out.getvalue() + err.getvalue()
+            await renderer.handle(event)
+            self.assertNotEqual(out.getvalue() + err.getvalue(), before,
+                                f"TextRenderer wrote nothing for {type(event).__name__}")
 
 
 class PromptBuildingTest(unittest.TestCase):
