@@ -134,7 +134,7 @@ read 和 auto 模式会直接执行一小组明确只读的命令（`ls`、`cat`
 flowchart TD
     subgraph entry["入口"]
         CLI["cli.py"]
-        Commands["commands.py<br/>status / login / model / sessions"]
+        Commands["commands.py<br/>status / login / model / sessions / log / install-skill"]
         Headless["headless.py<br/>-p，单次运行"]
         App["app.py<br/>Textual TUI / --web"]
     end

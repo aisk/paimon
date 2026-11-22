@@ -137,7 +137,7 @@ Read and auto modes run a small set of clearly read-only commands (`ls`, `cat`, 
 flowchart TD
     subgraph entry["Entry points"]
         CLI["cli.py"]
-        Commands["commands.py<br/>status / login / model / sessions"]
+        Commands["commands.py<br/>status / login / model / sessions / log / install-skill"]
         Headless["headless.py<br/>-p, one-shot"]
         App["app.py<br/>Textual TUI / --web"]
     end
