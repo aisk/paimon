@@ -72,6 +72,7 @@ class ClipboardImageTest(unittest.TestCase):
                 patch("paimon.clipboard._output", output):
             self.assertEqual(clipboard.read_image(), Image(PNG, "image/png"))
 
+    @unittest.skipUnless(os.name == "posix", "WSL paths are POSIX ones")
     def test_a_path_dragged_from_explorer_is_found_under_mnt(self) -> None:
         with patch("paimon.clipboard.is_wsl", return_value=True), \
                 patch("paimon.clipboard.Path.is_file", return_value=False) as is_file:
@@ -81,7 +82,8 @@ class ClipboardImageTest(unittest.TestCase):
                 patch("paimon.clipboard.Path.is_absolute", lambda path: seen.append(path) or False):
             seen: list[Path] = []
             clipboard.pasted_image_path("C:\\Users\\me\\shot.png")
-        self.assertEqual(seen, [Path("/mnt/c/Users/me/shot.png")])
+            clipboard.pasted_image_path("file:///C:/Users/me/shot.png")
+        self.assertEqual(seen, [Path("/mnt/c/Users/me/shot.png")] * 2)
 
     def test_saved_images_never_overwrite_each_other(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
