@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
 
 from paimon.session import job_message
-from paimon.tools.base import MAX_OUTPUT, ToolContext
+from paimon.tools.base import MAX_OUTPUT, Caller, ToolContext
 from paimon.tools.permissions import MODES, READ_DENIAL, USER_DENIAL, gate, run_tool
 from paimon.tools.registry import (REGISTRY, _read_history, _search_history, execute_tool,
                                    validate_args)
@@ -36,7 +36,7 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         confirm = AsyncMock(return_value=True)
         review = AsyncMock(return_value=None)
         result = await run_tool("write_file", {"path": "a.txt", "content": "hi"},
-                                self.cwd, "read", confirm, review=review)
+                                Caller(cwd=self.cwd, mode="read", confirm=confirm, review=review))
         confirm.assert_not_awaited()
         review.assert_not_awaited()
         self.assertEqual(result.status, "denied")
@@ -46,8 +46,8 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
     async def test_auto_mode_runs_what_the_reviewer_lets_through(self) -> None:
         confirm = AsyncMock(return_value=False)
         review = AsyncMock(return_value=None)
-        result = await run_tool("write_file", self.held, self.cwd, "auto", confirm,
-                                review=review)
+        result = await run_tool("write_file", self.held,
+                                Caller(cwd=self.cwd, mode="auto", confirm=confirm, review=review))
         review.assert_awaited_once_with("write_file", self.held)
         confirm.assert_not_awaited()
         self.assertEqual(result.status, "success")
@@ -55,20 +55,20 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_mode_reports_the_reviewers_refusal(self) -> None:
         review = AsyncMock(return_value="Denied by the reviewer: no.")
-        result = await run_tool("write_file", self.held, self.cwd, "auto", review=review)
+        result = await run_tool("write_file", self.held, Caller(cwd=self.cwd, mode="auto", review=review))
         self.assertEqual(result.status, "denied")
         self.assertEqual(result.text, "Denied by the reviewer: no.")
         self.assertFalse((self.outside / "a.txt").exists())
 
     async def test_without_reviewer_or_confirm_hook_held_calls_are_denied(self) -> None:
-        result = await run_tool("write_file", self.held, self.cwd, "auto")
+        result = await run_tool("write_file", self.held, Caller(cwd=self.cwd, mode="auto"))
         self.assertEqual(result.status, "denied")
         self.assertEqual(result.text, USER_DENIAL)
         self.assertFalse((self.outside / "a.txt").exists())
 
     async def test_without_a_reviewer_the_confirm_hook_decides(self) -> None:
         confirm = AsyncMock(return_value=True)
-        result = await run_tool("write_file", self.held, self.cwd, "auto", confirm)
+        result = await run_tool("write_file", self.held, Caller(cwd=self.cwd, mode="auto", confirm=confirm))
         confirm.assert_awaited_once()
         self.assertEqual(result.status, "success")
         self.assertIn("Wrote", result.text)
@@ -78,8 +78,8 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
         (self.cwd / "a.txt").write_text("hi")
         confirm = AsyncMock(return_value=False)
         review = AsyncMock(return_value="no")
-        result = await run_tool("read_file", {"path": "a.txt"}, self.cwd, "read", confirm,
-                                review=review)
+        result = await run_tool("read_file", {"path": "a.txt"},
+                                Caller(cwd=self.cwd, mode="read", confirm=confirm, review=review))
         confirm.assert_not_awaited()
         review.assert_not_awaited()
         self.assertEqual(result.status, "success")
@@ -87,12 +87,12 @@ class RunToolTest(unittest.IsolatedAsyncioTestCase):
 
     @modelled_shell
     async def test_safe_command_runs_in_read_mode(self) -> None:
-        result = await run_tool("shell", {"command": "ls"}, self.cwd, "read")
+        result = await run_tool("shell", {"command": "ls"}, Caller(cwd=self.cwd, mode="read"))
         self.assertEqual(result.status, "success")
         self.assertNotEqual(result.text, READ_DENIAL)
 
     async def test_strict_denies_safe_command(self) -> None:
-        result = await run_tool("shell", {"command": "ls"}, self.cwd, "read", safe_commands=False)
+        result = await run_tool("shell", {"command": "ls"}, Caller(cwd=self.cwd, mode="read", safe_commands=False))
         self.assertEqual(result.status, "denied")
         self.assertEqual(result.text, READ_DENIAL)
 
@@ -371,8 +371,8 @@ class OffLoopTest(unittest.IsolatedAsyncioTestCase):
 
         with (patch("paimon.tools.registry._read_file", recording(files._read_file)),
               patch("paimon.tools.registry._glob", recording(files._glob))):
-            read = await execute_tool("read_file", {"path": "f.txt"}, self.cwd)
-            found = await execute_tool("glob", {"pattern": "*.txt"}, self.cwd)
+            read = await execute_tool("read_file", {"path": "f.txt"}, Caller(cwd=self.cwd, mode="yolo"))
+            found = await execute_tool("glob", {"pattern": "*.txt"}, Caller(cwd=self.cwd, mode="yolo"))
 
         self.assertEqual(read.text, "1  a\n2  b")
         self.assertEqual(found.text, str(self.cwd / "f.txt"))
@@ -381,7 +381,7 @@ class OffLoopTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_long_read_comes_back_within_the_output_limit(self) -> None:
         (self.cwd / "f.txt").write_text("".join(f"line {n}\n" for n in range(1, 20_001)))
-        result = await execute_tool("read_file", {"path": "f.txt"}, self.cwd)
+        result = await execute_tool("read_file", {"path": "f.txt"}, Caller(cwd=self.cwd, mode="yolo"))
 
         self.assertLessEqual(len(result.text), MAX_OUTPUT)
         self.assertRegex(result.text, r"read on with offset=\d+\)$")
@@ -559,7 +559,7 @@ class HistoryToolsTest(unittest.TestCase):
     def test_both_tools_error_readably_without_a_session(self) -> None:
         ctx = ToolContext()
         for name, args in (("search_history", {"query": "x"}), ("read_history", {"seq": 1})):
-            result = asyncio.run(execute_tool(name, args, self.cwd, ctx=ctx))
+            result = asyncio.run(execute_tool(name, args, Caller(cwd=self.cwd, mode="yolo", ctx=ctx)))
             self.assertEqual((result.text, result.status),
                              ("Error: no session log available", "failed"))
 
@@ -572,8 +572,8 @@ class HistoryToolsTest(unittest.TestCase):
 
     def test_history_tools_are_always_allowed_reads(self) -> None:
         for mode in MODES:
-            self.assertEqual(gate("search_history", {"query": "x"}, mode, self.cwd), "allow")
-            self.assertEqual(gate("read_history", {"seq": 1}, mode, self.cwd), "allow")
+            self.assertEqual(gate("search_history", {"query": "x"}, Caller(cwd=self.cwd, mode=mode)), "allow")
+            self.assertEqual(gate("read_history", {"seq": 1}, Caller(cwd=self.cwd, mode=mode)), "allow")
 
 
 class CallSummaryTest(unittest.TestCase):

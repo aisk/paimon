@@ -6,17 +6,12 @@ import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
-
-from .base import Tool, ToolContext
+from .base import Caller, ConfirmFn
 from .files import _inside, _real, _resolve
 from .registry import REGISTRY, execute_tool
 from .result import ToolResult
 from .shell import git_bash_root, shell_executable
 
-
-# A confirm callback returns True to allow a dangerous tool, False to deny.
-ConfirmFn = Callable[[str, dict], Awaitable[bool]]
 
 # Who a confirmation is being asked for, when it is not the conversation whose
 # hook is called: the titles of the subagents it passed through on the way up,
@@ -43,11 +38,6 @@ async def confirm_for(confirm: ConfirmFn, origin: str, name: str, args: dict) ->
         return await confirm(name, args)
     finally:
         _ORIGIN.reset(token)
-
-# A review callback judges a call auto mode will not let through on its own:
-# None lets it run, a string is the refusal the model is shown.
-ReviewFn = Callable[[str, dict], Awaitable[str | None]]
-
 
 # Permission modes: read (reads inside cwd, everything else refused), auto
 # (writes inside cwd too, and a reviewer model decides the rest), yolo (no
@@ -672,24 +662,22 @@ def safe_command(command: str, cwd: Path) -> bool:
     return True
 
 
-def gate(name: str, args: dict, mode: str, cwd: Path,
-         registry: dict[str, Tool] | None = None,
-         safe_commands: bool = True,
-         ctx: ToolContext | None = None) -> str:
+def gate(name: str, args: dict, caller: Caller) -> str:
     """Decide what stands between a tool call and running it.
 
     "allow" is nothing. A call the mode does not let through on its own is
     held: "deny" in read mode, "review" in auto mode.
 
-    ``safe_commands`` lets shell commands recognized as clearly read-only
-    through (see safe_command); False holds every command.
+    ``caller.safe_commands`` lets shell commands recognized as clearly
+    read-only through (see safe_command); False holds every command.
     """
-    tool = (REGISTRY if registry is None else registry).get(name)
+    mode, cwd, ctx = caller.mode, caller.cwd, caller.ctx
+    tool = (REGISTRY if caller.registry is None else caller.registry).get(name)
     if mode == "yolo" or tool is None or tool.access == "none":
         return "allow"
     held = "review" if mode == "auto" else "deny"
     if tool.access == "execute":
-        if safe_commands and safe_command(str(args.get("command") or ""), cwd):
+        if caller.safe_commands and safe_command(str(args.get("command") or ""), cwd):
             return "allow"
         return held
     if tool.access == "background":
@@ -736,12 +724,7 @@ def _in_git_dir(path: Path, cwd: Path) -> bool:
     return any(part.rstrip(". ").lower() == ".git" for part in parts)
 
 
-async def authorize(name: str, args: dict, mode: str, cwd: Path,
-                    confirm: ConfirmFn | None = None,
-                    review: ReviewFn | None = None,
-                    registry: dict[str, Tool] | None = None,
-                    safe_commands: bool = True,
-                    ctx: ToolContext | None = None) -> str | None:
+async def authorize(name: str, args: dict, caller: Caller) -> str | None:
     """Gate a tool call and put it to whoever decides: None when it may run,
     else the refusal the model is shown.
 
@@ -750,31 +733,20 @@ async def authorize(name: str, args: dict, mode: str, cwd: Path,
     without that either it is refused, so a headless Agent cannot bypass the
     permission mode.
     """
-    decision = gate(name, args, mode, cwd, registry, safe_commands=safe_commands, ctx=ctx)
+    decision = gate(name, args, caller)
     if decision == "allow":
         return None
     if decision == "deny":
         return READ_DENIAL
-    if decision == "review" and review is not None:
-        return await review(name, args)
-    allowed = await confirm(name, args) if confirm else False
+    if decision == "review" and caller.review is not None:
+        return await caller.review(name, args)
+    allowed = await caller.confirm(name, args) if caller.confirm else False
     return None if allowed else USER_DENIAL
 
 
-async def run_tool(name: str, args: dict, cwd: Path, mode: str,
-                   confirm: ConfirmFn | None = None,
-                   registry: dict[str, Tool] | None = None,
-                   safe_commands: bool = True,
-                   ctx: ToolContext | None = None,
-                   review: ReviewFn | None = None) -> ToolResult:
-    """Authorize, then execute a tool call. A refusal is a "denied" result.
-
-    ``registry`` narrows the available tools (an agent's own set); None means
-    the full REGISTRY. ``ctx`` carries the calling agent's own state, so gating
-    decisions that depend on what this agent did earlier stay scoped to it.
-    """
-    refusal = await authorize(name, args, mode, cwd, confirm, review, registry,
-                              safe_commands=safe_commands, ctx=ctx)
+async def run_tool(name: str, args: dict, caller: Caller) -> ToolResult:
+    """Authorize, then execute a tool call. A refusal is a "denied" result."""
+    refusal = await authorize(name, args, caller)
     if refusal is not None:
         return ToolResult(refusal, "denied")
-    return await execute_tool(name, args, cwd, mode=mode, registry=registry, ctx=ctx)
+    return await execute_tool(name, args, caller)

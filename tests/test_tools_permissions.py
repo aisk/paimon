@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paimon.tools.base import ToolContext
+from paimon.tools.base import Caller, ToolContext
 from paimon.tools.files import _glob, _inside
 from paimon.tools.permissions import _GIT_LOCATION_ENV, MODES, gate, safe_command
 from paimon.tools.shell import _shell, shell_output_dir
@@ -26,17 +26,20 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         self.cwd = Path(tmp.name).resolve()
 
+    def caller(self, mode: str, **terms) -> Caller:
+        return Caller(cwd=self.cwd, mode=mode, **terms)
+
     def test_yolo_allows_everything(self) -> None:
         for name in ("read_file", "glob", "write_file", "edit_file", "shell", "write_todos"):
-            self.assertEqual(gate(name, {"path": "/etc/hosts"}, "yolo", self.cwd), "allow")
+            self.assertEqual(gate(name, {"path": "/etc/hosts"}, self.caller("yolo")), "allow")
 
     def test_reads_inside_cwd_are_free_outside_held(self) -> None:
         for mode, held in (("read", "deny"), ("auto", "review")):
-            self.assertEqual(gate("read_file", {"path": "a.py"}, mode, self.cwd), "allow")
-            self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, mode, self.cwd), held)
-            self.assertEqual(gate("read_file", {"path": "../x"}, mode, self.cwd), held)
-            self.assertEqual(gate("glob", {"pattern": "*.py"}, mode, self.cwd), "allow")
-            self.assertEqual(gate("glob", {"pattern": "*", "path": "/tmp"}, mode, self.cwd), held)
+            self.assertEqual(gate("read_file", {"path": "a.py"}, self.caller(mode)), "allow")
+            self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, self.caller(mode)), held)
+            self.assertEqual(gate("read_file", {"path": "../x"}, self.caller(mode)), held)
+            self.assertEqual(gate("glob", {"pattern": "*.py"}, self.caller(mode)), "allow")
+            self.assertEqual(gate("glob", {"pattern": "*", "path": "/tmp"}, self.caller(mode)), held)
 
     def test_only_the_agents_own_overflow_files_are_read_freely(self) -> None:
         """A command's own overflow file is readable back; nothing else moves.
@@ -55,11 +58,11 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
                 theirs.write_text("x")
                 ctx = ToolContext(shell_outputs={mine.resolve()})
 
-                self.assertEqual(gate("read_file", {"path": str(mine)}, "read", self.cwd, ctx=ctx), "allow")
-                self.assertEqual(gate("read_file", {"path": str(theirs)}, "read", self.cwd, ctx=ctx), "deny")
-                self.assertEqual(gate("read_file", {"path": str(mine)}, "read", self.cwd), "deny")
-                self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, "read", self.cwd, ctx=ctx), "deny")
-                self.assertEqual(gate("write_file", {"path": str(mine)}, "auto", self.cwd, ctx=ctx), "review")
+                self.assertEqual(gate("read_file", {"path": str(mine)}, self.caller("read", ctx=ctx)), "allow")
+                self.assertEqual(gate("read_file", {"path": str(theirs)}, self.caller("read", ctx=ctx)), "deny")
+                self.assertEqual(gate("read_file", {"path": str(mine)}, self.caller("read")), "deny")
+                self.assertEqual(gate("read_file", {"path": "/etc/hosts"}, self.caller("read", ctx=ctx)), "deny")
+                self.assertEqual(gate("write_file", {"path": str(mine)}, self.caller("auto", ctx=ctx)), "review")
 
     async def test_a_command_records_the_overflow_file_it_wrote(self) -> None:
         """The gate exemption above is only reachable through this."""
@@ -69,19 +72,19 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
                 result = (await _shell({"command": filler(3000, "line")}, self.cwd, ctx)).text
                 self.assertEqual(ctx.shell_outputs, {overflow_path(result).resolve()})
                 self.assertEqual(gate("read_file", {"path": str(overflow_path(result))},
-                                      "read", self.cwd, ctx=ctx), "allow")
+                                      self.caller("read", ctx=ctx)), "allow")
 
     def test_read_mode_denies_all_dangerous_tools(self) -> None:
-        self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, "read", self.cwd), "deny")
-        self.assertEqual(gate("edit_file", {"path": "a.py"}, "read", self.cwd), "deny")
-        self.assertEqual(gate("shell", {"command": "rm -rf x"}, "read", self.cwd), "deny")
+        self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, self.caller("read")), "deny")
+        self.assertEqual(gate("edit_file", {"path": "a.py"}, self.caller("read")), "deny")
+        self.assertEqual(gate("shell", {"command": "rm -rf x"}, self.caller("read")), "deny")
 
     def test_auto_mode_allows_writes_inside_cwd(self) -> None:
-        self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, "auto", self.cwd), "allow")
-        self.assertEqual(gate("edit_file", {"path": "sub/a.py"}, "auto", self.cwd), "allow")
-        self.assertEqual(gate("write_file", {"path": "/tmp/a.py", "content": "x"}, "auto", self.cwd), "review")
-        self.assertEqual(gate("edit_file", {"path": "../a.py"}, "auto", self.cwd), "review")
-        self.assertEqual(gate("shell", {"command": "rm -rf x"}, "auto", self.cwd), "review")
+        self.assertEqual(gate("write_file", {"path": "a.py", "content": "x"}, self.caller("auto")), "allow")
+        self.assertEqual(gate("edit_file", {"path": "sub/a.py"}, self.caller("auto")), "allow")
+        self.assertEqual(gate("write_file", {"path": "/tmp/a.py", "content": "x"}, self.caller("auto")), "review")
+        self.assertEqual(gate("edit_file", {"path": "../a.py"}, self.caller("auto")), "review")
+        self.assertEqual(gate("shell", {"command": "rm -rf x"}, self.caller("auto")), "review")
 
     def test_auto_mode_holds_writes_into_a_git_directory(self) -> None:
         """A hook or core.fsmonitor written there runs on the next git status,
@@ -89,20 +92,19 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
         (self.cwd / ".git" / "hooks").mkdir(parents=True)
         for path in (".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".GIT/config",
                      ".git", str(self.cwd / ".git" / "config")):
-            self.assertEqual(gate("write_file", {"path": path, "content": "x"}, "auto", self.cwd),
+            self.assertEqual(gate("write_file", {"path": path, "content": "x"}, self.caller("auto")),
                              "review", path)
-            self.assertEqual(gate("edit_file", {"path": path}, "auto", self.cwd), "review", path)
-        self.assertEqual(gate("write_file", {"path": ".github/x.yml", "content": "x"}, "auto",
-                              self.cwd), "allow")
-        self.assertEqual(gate("write_file", {"path": ".gitignore", "content": "x"}, "auto",
-                              self.cwd), "allow")
-        self.assertEqual(gate("read_file", {"path": ".git/config"}, "auto", self.cwd), "allow")
-        self.assertEqual(gate("read_file", {"path": ".git/config"}, "read", self.cwd), "allow")
+            self.assertEqual(gate("edit_file", {"path": path}, self.caller("auto")), "review", path)
+        self.assertEqual(gate("write_file", {"path": ".github/x.yml", "content": "x"},
+                              self.caller("auto")), "allow")
+        self.assertEqual(gate("write_file", {"path": ".gitignore", "content": "x"}, self.caller("auto")), "allow")
+        self.assertEqual(gate("read_file", {"path": ".git/config"}, self.caller("auto")), "allow")
+        self.assertEqual(gate("read_file", {"path": ".git/config"}, self.caller("read")), "allow")
 
     def test_write_todos_and_missing_path_are_allowed(self) -> None:
         for mode in MODES:
-            self.assertEqual(gate("write_todos", {"todos": []}, mode, self.cwd), "allow")
-        self.assertEqual(gate("read_file", {}, "read", self.cwd), "allow")
+            self.assertEqual(gate("write_todos", {"todos": []}, self.caller(mode)), "allow")
+        self.assertEqual(gate("read_file", {}, self.caller("read")), "allow")
 
     @modelled_shell
     def test_safe_shell_commands_auto_allowed(self) -> None:
@@ -110,16 +112,16 @@ class GateTest(unittest.IsolatedAsyncioTestCase):
         _scrub_git_location(self)
         with patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL):
             for mode in ("read", "auto"):
-                self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd), "allow")
-                self.assertEqual(gate("shell", {"command": "git status"}, mode, self.cwd), "allow")
+                self.assertEqual(gate("shell", {"command": "ls"}, self.caller(mode)), "allow")
+                self.assertEqual(gate("shell", {"command": "git status"}, self.caller(mode)), "allow")
             with patch.dict(os.environ, {"CDPATH": ""}):
-                self.assertEqual(gate("shell", {"command": "cd sub && ls"}, "read", self.cwd), "allow")
-            self.assertEqual(gate("shell", {}, "read", self.cwd), "deny")
+                self.assertEqual(gate("shell", {"command": "cd sub && ls"}, self.caller("read")), "allow")
+            self.assertEqual(gate("shell", {}, self.caller("read")), "deny")
 
     def test_strict_disables_safe_commands(self) -> None:
         for mode, held in (("read", "deny"), ("auto", "review")):
-            self.assertEqual(gate("shell", {"command": "ls"}, mode, self.cwd, safe_commands=False), held)
-        self.assertEqual(gate("shell", {"command": "ls"}, "yolo", self.cwd, safe_commands=False), "allow")
+            self.assertEqual(gate("shell", {"command": "ls"}, self.caller(mode, safe_commands=False)), held)
+        self.assertEqual(gate("shell", {"command": "ls"}, self.caller("yolo", safe_commands=False)), "allow")
 
 
 class SafeCommandTest(unittest.TestCase):
@@ -514,7 +516,7 @@ class InsideTest(unittest.TestCase):
             else:
                 self.assertTrue(_inside(loop, cwd))
                 expected = "allow"
-            self.assertEqual(gate("read_file", {"path": "loop"}, "read", cwd), expected)
+            self.assertEqual(gate("read_file", {"path": "loop"}, Caller(cwd=cwd, mode="read")), expected)
 
 
 class GlobSandboxTest(unittest.TestCase):
@@ -545,19 +547,22 @@ class BackgroundGateTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.cwd = Path(tmp.name).resolve()
 
+    def caller(self, mode: str, **terms) -> Caller:
+        return Caller(cwd=self.cwd, mode=mode, **terms)
+
     def test_a_safe_looking_command_is_still_held(self) -> None:
         args = {"command": "ls -la", "description": "listing"}
         if MODELLED_SHELL is not None:
             with patch("paimon.tools.permissions.shell_executable", return_value=MODELLED_SHELL):
-                self.assertEqual(gate("shell", args, "read", self.cwd), "allow")
-        self.assertEqual(gate("run_background", args, "read", self.cwd), "deny",
+                self.assertEqual(gate("shell", args, self.caller("read")), "allow")
+        self.assertEqual(gate("run_background", args, self.caller("read")), "deny",
                          "nothing that keeps running is waved through")
-        self.assertEqual(gate("run_background", args, "auto", self.cwd), "review")
+        self.assertEqual(gate("run_background", args, self.caller("auto")), "review")
 
     def test_yolo_still_means_yolo(self) -> None:
         self.assertEqual(
-            gate("run_background", {"command": "npm run dev"}, "yolo", self.cwd), "allow")
+            gate("run_background", {"command": "npm run dev"}, self.caller("yolo")), "allow")
 
     def test_looking_at_and_stopping_a_job_are_not_gated(self) -> None:
         for name in ("read_job", "stop_job"):
-            self.assertEqual(gate(name, {"job_id": "a1f2"}, "read", self.cwd), "allow")
+            self.assertEqual(gate(name, {"job_id": "a1f2"}, self.caller("read")), "allow")

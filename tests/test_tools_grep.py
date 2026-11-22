@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from paimon.tools.base import Caller
 from paimon.tools.grep import _grep, _grep_async
 from paimon.tools.permissions import run_tool
 from paimon.tools.result import ToolError
@@ -198,13 +199,13 @@ class GrepProcessTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             path = cwd / "a.txt"
             path.write_text("needle\n")
-            result = await run_tool("grep", {"pattern": "needle"}, cwd, mode="read")
+            result = await run_tool("grep", {"pattern": "needle"}, Caller(cwd=cwd, mode="read"))
             self.assertEqual(result.status, "success")
             self.assertEqual(result.text, f"{path}:1:needle")
 
     async def test_a_failed_search_crosses_the_worker_as_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            result = await run_tool("grep", {"pattern": "("}, Path(directory), mode="yolo")
+            result = await run_tool("grep", {"pattern": "("}, Caller(cwd=Path(directory), mode="yolo"))
         self.assertEqual(result.status, "failed")
         self.assertIn("invalid regular expression", result.text)
 

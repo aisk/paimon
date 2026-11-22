@@ -23,6 +23,7 @@ from paimon.events import ImagesRejected, ToolEnd, UserInput, replay_events
 from paimon.images import UNSEEN, content_text
 from paimon.mentions import expand_mentions
 from paimon.session import Session
+from paimon.tools.base import Caller
 from paimon.tools.files import MAX_IMAGE_BYTES, image_type
 from paimon.tools.registry import execute_tool
 from tests.support.agent import make_session
@@ -103,7 +104,7 @@ class ReadImageTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             (cwd / "shot.png").write_bytes(PNG)
 
-            result = await execute_tool("read_file", {"path": "shot.png"}, cwd)
+            result = await execute_tool("read_file", {"path": "shot.png"}, Caller(cwd=cwd, mode="yolo"))
 
             self.assertTrue(result.ok)
             self.assertIn("image/png", result.text)
@@ -115,7 +116,7 @@ class ReadImageTest(unittest.IsolatedAsyncioTestCase):
             cwd = Path(directory)
             (cwd / "huge.png").write_bytes(PNG + b"\x00" * MAX_IMAGE_BYTES)
 
-            result = await execute_tool("read_file", {"path": "huge.png"}, cwd)
+            result = await execute_tool("read_file", {"path": "huge.png"}, Caller(cwd=cwd, mode="yolo"))
 
             self.assertEqual(result.status, "failed")
             self.assertIn("5 MB", result.text)

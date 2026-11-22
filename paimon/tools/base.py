@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from ..session import Session
 
@@ -46,6 +46,14 @@ class ToolContext:
     session: Session | None = None
 
 
+# A confirm callback returns True to allow a dangerous tool, False to deny.
+ConfirmFn = Callable[[str, dict], Awaitable[bool]]
+
+# A review callback judges a call auto mode will not let through on its own:
+# None lets it run, a string is the refusal the model is shown.
+ReviewFn = Callable[[str, dict], Awaitable[str | None]]
+
+
 @dataclass(frozen=True)
 class Tool:
     """One tool: what the model is told about it, its executor, and gating class.
@@ -77,3 +85,28 @@ class Tool:
     def summarize(self, args: dict) -> str:
         """One human line for a call of this tool with ``args``."""
         return (self.summary or generic_summary)(args)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Caller:
+    """Who makes a tool call, and on what terms: what gate(), authorize(),
+    run_tool() and execute_tool() need besides the call itself.
+
+    Built per call by whoever holds the live values (an Agent's mode, confirm
+    hook and tool set all change during its life), so it is never kept.
+
+    ``registry`` narrows the available tools (an agent's own set); None means
+    the full REGISTRY. ``safe_commands`` lets shell commands recognized as
+    clearly read-only through (see safe_command); False holds every command.
+    ``ctx`` carries the calling agent's own state, so gating decisions that
+    depend on what this agent did earlier stay scoped to it. ``confirm`` and
+    ``review`` are who decides a held call (see authorize).
+    """
+
+    cwd: Path
+    mode: str
+    registry: dict[str, Tool] | None = None
+    safe_commands: bool = True
+    ctx: ToolContext | None = None
+    confirm: ConfirmFn | None = None
+    review: ReviewFn | None = None

@@ -66,7 +66,7 @@ from .session import (
     job_message,
     shell_message,
 )
-from .tools.base import Tool, ToolContext
+from .tools.base import Caller, Tool, ToolContext
 from .tools.permissions import USER_DENIAL, ConfirmFn, authorize, confirm_for, gate, run_tool
 from .tools.registry import (
     REGISTRY,
@@ -757,13 +757,21 @@ class Agent:
         settle(result)
         yield ToolEnd.of(call.tool_call_id, call.tool_name, result)
 
+    def _caller(self) -> Caller:
+        """This agent as the maker of a tool call, as it stands right now.
+
+        Built afresh for every call: the mode, the confirm hook, the tool set
+        and the config behind safe_commands may all have changed since the
+        last one (a UI switches the mode, or adopts a subagent's hook).
+        """
+        return Caller(cwd=self.cwd, mode=self.mode, registry=self.toolset,
+                      safe_commands=self.run_options.safe_commands(self.config),
+                      ctx=self.tool_context, confirm=self.confirm, review=self._review)
+
     async def _refusal(self, name: str, args: dict) -> str | None:
         """Authorize a tool the loop runs itself, the way run_tool does the rest:
         None when it may run, else what the model is told."""
-        return await authorize(name, args, self.mode, self.cwd, self.confirm,
-                               self._review, self.toolset,
-                               safe_commands=self.run_options.safe_commands(self.config),
-                               ctx=self.tool_context)
+        return await authorize(name, args, self._caller())
 
     async def _review(self, name: str, args: dict) -> str | None:
         """Put a call auto mode holds to the reviewer model.
@@ -917,8 +925,7 @@ class Agent:
                 if refusal is not None:
                     record["status"] = "denied"
                     raise codemode.ToolCallError(refusal)
-                result = await execute_tool(name, args, self.cwd, mode=self.mode,
-                                            registry=self.toolset, ctx=self.tool_context)
+                result = await execute_tool(name, args, self._caller())
                 # A failed call still returns its text to the script, which
                 # reads the error the way the model would; only the record
                 # says it failed.
@@ -951,9 +958,7 @@ class Agent:
         are never on screen at once."""
         tool = self.toolset.get(name)
         return (tool is not None and tool.parallel and tool.run is not None
-                and gate(name, args, self.mode, self.cwd, self.toolset,
-                         safe_commands=self.run_options.safe_commands(self.config),
-                         ctx=self.tool_context) == "allow")
+                and gate(name, args, self._caller()) == "allow")
 
     def expand_input(self, text: str) -> str | list:
         """What a typed message becomes: a /skill:name command expands to the
@@ -1346,11 +1351,7 @@ class Agent:
                 return functools.partial(self._settle_slot, record_id, index, tool_request)
 
             async def execute(index: int, name: str, args: dict) -> ToolResult:
-                result = await run_tool(name, args, self.cwd, self.mode,
-                                        self.confirm, self.toolset,
-                                        safe_commands=self.run_options.safe_commands(self.config),
-                                        ctx=self.tool_context,
-                                        review=self._review)
+                result = await run_tool(name, args, self._caller())
                 slot(index)(result)
                 return result
 

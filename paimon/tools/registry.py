@@ -11,7 +11,6 @@ import dataclasses
 import difflib
 import inspect
 from functools import cache
-from pathlib import Path
 from typing import Annotated, Awaitable, Callable, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, with_config
@@ -20,7 +19,7 @@ from pydantic_ai.tools import GenerateToolJsonSchema, ToolDefinition
 from typing_extensions import NotRequired, TypedDict
 
 from .. import history, websearch
-from .base import MAX_OUTPUT, Tool, ToolContext, one_line
+from .base import MAX_OUTPUT, Caller, Tool, ToolContext, one_line
 from .files import _edit_file, _glob, _read_file, _write_file
 from .grep import _GREP_DEFAULT_RESULTS, _GREP_MAX_RESULTS, _grep_async
 from .result import ToolError, ToolResult
@@ -131,17 +130,15 @@ def _read_history(args: dict, ctx: ToolContext) -> str:
     return history.read(ctx.session, args, _READ_BUDGET)
 
 
-async def execute_tool(name: str, args: dict, cwd: Path, mode: str = "yolo",
-                       registry: dict[str, Tool] | None = None,
-                       ctx: ToolContext | None = None) -> ToolResult:
+async def execute_tool(name: str, args: dict, caller: Caller) -> ToolResult:
     """Run a registered tool. Never raises for the tool's own failure: that
     comes back as a failed result, with text the model can act on."""
-    tool = (REGISTRY if registry is None else registry).get(name)
+    tool = (REGISTRY if caller.registry is None else caller.registry).get(name)
     if tool is None or tool.run is None:
         return ToolResult(f"Error: unknown tool {name!r}", "failed")
-    ctx = ToolContext() if ctx is None else ctx
+    ctx = ToolContext() if caller.ctx is None else caller.ctx
     try:
-        result = tool.run(args, cwd, mode, ctx)
+        result = tool.run(args, caller.cwd, caller.mode, ctx)
         if inspect.isawaitable(result):
             result = await result
     except asyncio.CancelledError:

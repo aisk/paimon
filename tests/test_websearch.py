@@ -10,6 +10,7 @@ from unittest.mock import patch
 from paimon import logtext, websearch
 from paimon.agent import Agent
 from paimon.config import Config, RunOptions
+from paimon.tools.base import Caller
 from paimon.tools.permissions import MODES, gate
 from paimon.tools.registry import BACKGROUND_TOOLS, INTERACTIVE_TOOLS, SUBAGENT_DENIED, execute_tool
 from paimon.tools.result import ToolError
@@ -164,11 +165,11 @@ class DdgsBackendTest(unittest.TestCase):
 class ToolTest(unittest.TestCase):
     def test_the_tool_is_never_gated(self) -> None:
         for mode in MODES:
-            self.assertEqual(gate("web_search", {"query": "q"}, mode, Path.cwd()), "allow")
+            self.assertEqual(gate("web_search", {"query": "q"}, Caller(cwd=Path.cwd(), mode=mode)), "allow")
 
     def test_the_registry_entry_runs_the_search(self) -> None:
         with patch.object(websearch, "_ddgs", lambda query, n: _results(1)):
-            result = asyncio.run(execute_tool("web_search", {"query": "q"}, Path.cwd()))
+            result = asyncio.run(execute_tool("web_search", {"query": "q"}, Caller(cwd=Path.cwd(), mode="yolo")))
         self.assertEqual(result.text, "1. Title 1\n   https://example.com/1\n   snippet 1")
 
     def test_the_query_is_the_call_summary(self) -> None:
