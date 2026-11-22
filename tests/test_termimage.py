@@ -181,13 +181,12 @@ class AnswerPictureTest(AppTestCase):
     async def test_an_image_the_answer_links_to_is_drawn_under_it(self) -> None:
         app = self.make_app()
         async with app.run_test(size=(100, 40)) as pilot:
-            cwd = app.pane.agent.cwd
-            with tempfile.NamedTemporaryFile(suffix=".png", dir=cwd) as shot, \
+            with tempfile.TemporaryDirectory() as directory, \
                     patch.object(Picture, "drawn_by", return_value=True):
-                shot.write(png(80, 32))
-                shot.flush()
+                shot = Path(directory) / "chart.png"
+                shot.write_bytes(png(80, 32))
                 renderer = EventRenderer(app.pane.transcript, app.pane.agent)
-                await renderer.handle(TextDelta(f"Done: ![the chart]({Path(shot.name).name}"))
+                await renderer.handle(TextDelta(f"Done: ![the chart]({shot}"))
                 await renderer.handle(TextDelta(")"))
                 self.assertEqual(len(app.query(Picture)), 0, "not before the block is whole")
                 await renderer.close()
