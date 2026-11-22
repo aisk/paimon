@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="How Paimon is put together: one event stream, the turn loop, tools and the permission gate, jobs, and the session log.">
+    <meta name="theme-color" content="#f8f7f3">
+    <meta property="og:title" content="Paimon architecture">
+    <meta property="og:description" content="How Paimon is put together.">
+    <meta property="og:type" content="website">
+    <title>Architecture · Paimon</title>
+    <link rel="canonical" href="https://aisk.github.io/paimon/architecture.html">
+    <link rel="icon" type="image/png" href="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <header>
+      <a class="site-name" href="./" title="Your best travel companion">
+        <img class="site-logo" src="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png" alt="" width="24" height="24">
+        <span>paimon</span>
+      </a>
+      <nav aria-label="Site">
+        <a href="./">intro</a>
+        <a href="./guide.html">guide</a>
+        <a href="./architecture.html" aria-current="page">architecture</a>
+        <a href="./reference.html">reference</a>
+        <a href="https://github.com/aisk/paimon">source</a>
+        <a href="https://github.com/aisk/paimon/blob/master/README.zh-CN.md" lang="zh-CN">中文</a>
+      </nav>
+    </header>
+
+    <main>
+      <h1 class="page-title">Architecture</h1>
+
+      <p class="lead">
+        Paimon is a small Python package built on
+        <a href="https://ai.pydantic.dev">pydantic-ai</a> for talking to models and
+        <a href="https://textual.textualize.io">Textual</a> for the terminal UI. This page is
+        for people reading or changing the code.
+      </p>
+
+      <ul class="toc">
+        <li><a href="#events">One stream of events</a></li>
+        <li><a href="#turn">A turn, step by step</a></li>
+        <li><a href="#tools">Tools and the gate</a></li>
+        <li><a href="#jobs">Agents and background commands</a></li>
+        <li><a href="#sessions">The session log</a></li>
+        <li><a href="#models">Models</a></li>
+        <li><a href="#modules">Module map</a></li>
+      </ul>
+
+      <section aria-labelledby="events">
+        <h2 id="events">One stream of events</h2>
+        <p>
+          <code>Agent.run()</code> in <code>agent.py</code> knows nothing about any UI. It is an
+          async generator of typed events, defined in <code>events.py</code>: a chunk of text or
+          reasoning, the start and end of a tool call, a todo list update, a retry, a
+          compaction, the end of the turn.
+        </p>
+        <p>
+          The terminal UI, <code>--web</code> and <code>-p</code> are three consumers of that
+          one stream. <code>transcript.py</code> draws events as widgets,
+          <code>headless.py</code> writes them as text or JSON lines, and a resumed session is
+          drawn by replaying its log into the same events. A program that imports
+          <code>paimon.agent</code> is a fourth consumer on equal terms.
+        </p>
+      </section>
+
+      <section aria-labelledby="turn">
+        <h2 id="turn">A turn, step by step</h2>
+        <p>
+          A turn starts with a user message and ends when the model answers without calling a
+          tool. In between it loops over steps, and each step does the same five things:
+        </p>
+        <ol>
+          <li>
+            Take what arrived since the last step: messages the user queued while the turn was
+            running, and notices from agents and commands that finished.
+          </li>
+          <li>Compact the context if it is close to the model's window.</li>
+          <li>
+            Send one streamed request. Transient failures are retried with backoff, a context
+            overflow gets one forced compaction and one retry, and a model that refuses images
+            is sent the same request in words alone.
+          </li>
+          <li>
+            Append the response, and with it a placeholder result for every tool call it makes.
+          </li>
+          <li>
+            Run the calls and fill in their results. Neighbouring calls that only read are
+            started together, while their events still go out in the order the model wrote
+            them.
+          </li>
+        </ol>
+        <p>
+          Two rules shape this code. Whoever consumes the events may stop at any one of them
+          (the user pressed <code>Esc</code> while a chunk was being drawn), so everything a
+          step adds to the history is written before its events go out. And the history in
+          memory always equals what replaying the log on disk would give, which is why every
+          tool call gets its placeholder up front: a turn cut short leaves a conversation the
+          next request can still be built on.
+        </p>
+        <p>
+          In the TUI, <code>turns.py</code> sits between a pane and its agent. It serializes
+          turns and compactions, and wakes the agent for another turn when a job it started has
+          something to report.
+        </p>
+      </section>
+
+      <section aria-labelledby="tools">
+        <h2 id="tools">Tools and the gate</h2>
+        <p>
+          A tool is one entry in <code>REGISTRY</code> in <code>tools/registry.py</code>: a
+          description, a <code>TypedDict</code> of its arguments (the schema the model sees and
+          the validation both come from it), the function that runs it, and how it is gated.
+          Adding a tool means adding one entry.
+        </p>
+        <p>
+          Before a call runs, <code>gate()</code> in <code>tools/permissions.py</code> looks at
+          the tool's access class, the permission mode and the path or command involved, and
+          answers allow, deny or review. A call held for review goes to the reviewer model in
+          <code>review.py</code>, and to the user when there is no verdict. The decision is
+          made in one place for every caller, so a headless run or a subagent cannot get past
+          the mode it was started in.
+        </p>
+        <p>
+          A few tools change state the agent itself holds, such as the todo list or its running
+          jobs, and are handled inside the loop. <code>run_code</code> is one of them: the model
+          writes a Python script that runs in a sandbox with no filesystem or network, and whose
+          only way out is to call the agent's other tools, each through the same gate.
+        </p>
+      </section>
+
+      <section aria-labelledby="jobs">
+        <h2 id="jobs">Agents and background commands</h2>
+        <p>
+          An agent holds the subagents and background commands it starts, in
+          <code>jobs.py</code>. A subagent is another <code>Agent</code> running as a task in
+          the same process, with a session of its own marked as its parent's child and a
+          narrower set of tools: it cannot start agents or background commands of its own, or
+          ask the user questions.
+          Its permission prompts are answered by whoever answers for its parent.
+        </p>
+        <p>
+          When a job ends, its result is delivered to the parent as a message, and the parent
+          runs another turn to react to it. A UI that wants to show a job sets the
+          <code>open_job</code> hook, which is how the TUI gives each one a tab.
+        </p>
+      </section>
+
+      <section aria-labelledby="sessions">
+        <h2 id="sessions">The session log</h2>
+        <p>
+          A session is one append-only JSONL file, written by <code>session.py</code>. Its
+          records are the messages of the conversation, the result of each tool call, the
+          system prompt each turn ran with, compaction checkpoints, and bookkeeping that is
+          never sent to the model, such as how each turn ended. A lock keeps two agents, in this
+          process or another, from writing the same session.
+        </p>
+        <p>
+          Compaction, in <code>compaction.py</code>, replaces the older part of the context with
+          a summary and keeps the recent messages. Nothing is removed from the file, so
+          <code>paimon log</code> and the agent's own history tools still see everything.
+        </p>
+        <p>
+          The header carries a format version. A log written by a newer Paimon is refused
+          rather than misread.
+        </p>
+      </section>
+
+      <section aria-labelledby="models">
+        <h2 id="models">Models</h2>
+        <p>
+          <code>llm.py</code> turns a <code>provider:name</code> string and the stored
+          credentials into a pydantic-ai model. Most providers are pydantic-ai's own. Two are
+          served by modules here, <code>chatgpt.py</code> and <code>antigravity.py</code>, which
+          sign in through the browser with the helpers in <code>oauth.py</code> and spend a
+          subscription plan in place of an API key.
+        </p>
+        <p>
+          A conversation can change models half way. Reasoning produced by one model is only
+          valid sent back to that same model, so before each request the history is adapted for
+          the model about to read it. The stored history is left as it was.
+        </p>
+      </section>
+
+      <section aria-labelledby="modules">
+        <h2 id="modules">Module map</h2>
+        <p>An arrow reads “uses”. Dotted arrows are jobs an agent starts while it runs.</p>
+        <pre class="mermaid diagram">
+flowchart TD
+    subgraph entry["Entry points"]
+        CLI["cli.py"]
+        Commands["commands.py&lt;br/&gt;status / login / model / sessions / log / install-skill"]
+        Headless["headless.py&lt;br/&gt;-p, one-shot"]
+        App["app.py&lt;br/&gt;Textual TUI / --web"]
+    end
+
+    subgraph tui["TUI widgets"]
+        Pane["pane.py&lt;br/&gt;SessionPane"]
+        AgentPane["agentpane.py&lt;br/&gt;subagent pane"]
+        CommandPane["commandpane.py&lt;br/&gt;background command pane"]
+        Transcript["transcript.py&lt;br/&gt;conversation log, event renderer"]
+        Tabs["tabs.py&lt;br/&gt;pane strip"]
+        Login["login.py&lt;br/&gt;provider / key"]
+        UIWidgets["ui.py&lt;br/&gt;prompt input, confirmations"]
+        Diff["diff.py&lt;br/&gt;side-by-side diff rendering"]
+    end
+
+    subgraph core["Agent loop"]
+        AgentLoop["agent.py&lt;br/&gt;Agent.run()"]
+        LLM["llm.py&lt;br/&gt;build_model()"]
+        PromptMod["prompt.py&lt;br/&gt;system prompt"]
+        ToolsMod["tools/&lt;br/&gt;tool REGISTRY, permission gate"]
+        SessionMod["session.py&lt;br/&gt;JSONL persistence"]
+        Compaction["compaction.py"]
+        Retry["retry.py"]
+        Mentions["mentions.py&lt;br/&gt;@path expansion"]
+        JobMgr["jobs.py&lt;br/&gt;subagents, background commands"]
+        Turns["turns.py&lt;br/&gt;turn driver"]
+    end
+
+    subgraph support["Config &amp; skills"]
+        Config["config.py&lt;br/&gt;settings, credentials"]
+        Skills["skills.py&lt;br/&gt;Agent Skills discovery"]
+    end
+
+    CLI --&gt; Commands
+    CLI --&gt; Headless
+    CLI --&gt; App
+    CLI --&gt; Config
+
+    Headless --&gt; AgentLoop
+    Headless --&gt; Mentions
+
+    App --&gt; Pane
+    App --&gt; AgentPane
+    App --&gt; CommandPane
+    App --&gt; Tabs
+    App --&gt; Login
+    App --&gt; Config
+
+    Pane --&gt; Turns
+    Pane --&gt; AgentLoop
+    Pane --&gt; Diff
+    Pane --&gt; Transcript
+    Pane --&gt; UIWidgets
+    Pane --&gt; LLM
+    AgentPane --&gt; Pane
+    AgentPane --&gt; Transcript
+    CommandPane --&gt; Pane
+    Transcript --&gt; UIWidgets
+    UIWidgets --&gt; Diff
+
+    AgentLoop --&gt; LLM
+    AgentLoop --&gt; PromptMod
+    AgentLoop --&gt; ToolsMod
+    AgentLoop --&gt; SessionMod
+    AgentLoop --&gt; Compaction
+    AgentLoop --&gt; Retry
+    AgentLoop --&gt; Mentions
+    AgentLoop --&gt; JobMgr
+    JobMgr -. "spawn_agent" .-&gt; AgentLoop
+    JobMgr -. "spawn_agent" .-&gt; AgentPane
+    JobMgr -. "run_background" .-&gt; CommandPane
+
+    PromptMod --&gt; Skills
+
+    Turns --&gt; AgentLoop
+
+    Skills --&gt; Config
+    Config --&gt; LLM
+        </pre>
+        <p>
+          The diagram leaves out the smaller modules: images and their drawing in the terminal
+          (<code>images.py</code>, <code>termimage.py</code>, <code>clipboard.py</code>), web
+          search, code mode, the reviewer, the themes, telemetry and the Herdr reporter.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <a href="https://github.com/aisk/paimon">github.com/aisk/paimon</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/aisk/paimon/blob/master/LICENSE">license</a>
+      <span class="paimon-star" title="A tiny bit of Mora." aria-label="A tiny bit of Mora">✦</span>
+    </footer>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+    </script>
+  </body>
+</html>

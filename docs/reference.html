@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Paimon reference: command-line switches, commands, keys, tools, config.json, headless output and exit codes.">
+    <meta name="theme-color" content="#f8f7f3">
+    <meta property="og:title" content="Paimon reference">
+    <meta property="og:description" content="Every switch, command, key, tool and setting.">
+    <meta property="og:type" content="website">
+    <title>Reference · Paimon</title>
+    <link rel="canonical" href="https://aisk.github.io/paimon/reference.html">
+    <link rel="icon" type="image/png" href="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <header>
+      <a class="site-name" href="./" title="Your best travel companion">
+        <img class="site-logo" src="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png" alt="" width="24" height="24">
+        <span>paimon</span>
+      </a>
+      <nav aria-label="Site">
+        <a href="./">intro</a>
+        <a href="./guide.html">guide</a>
+        <a href="./architecture.html">architecture</a>
+        <a href="./reference.html" aria-current="page">reference</a>
+        <a href="https://github.com/aisk/paimon">source</a>
+        <a href="https://github.com/aisk/paimon/blob/master/README.zh-CN.md" lang="zh-CN">中文</a>
+      </nav>
+    </header>
+
+    <main>
+      <h1 class="page-title">Reference</h1>
+
+      <p class="lead">
+        Every switch, command, key, tool and setting. The
+        <a href="./guide.html">guide</a> explains when to reach for them.
+      </p>
+
+      <ul class="toc">
+        <li><a href="#switches">Launch switches</a></li>
+        <li><a href="#commands">Commands</a></li>
+        <li><a href="#keys">Keys</a></li>
+        <li><a href="#palette">Command palette</a></li>
+        <li><a href="#tools">Tools</a></li>
+        <li><a href="#config">config.json</a></li>
+        <li><a href="#output">Headless output</a></li>
+        <li><a href="#exit-codes">Exit codes</a></li>
+        <li><a href="#environment">Environment and files</a></li>
+        <li><a href="#telemetry">Telemetry</a></li>
+        <li><a href="#textual-debug">Debugging the UI</a></li>
+      </ul>
+
+      <section aria-labelledby="switches">
+        <h2 id="switches">Launch switches</h2>
+        <p><code>paimon [switches]</code> starts the UI, or runs one prompt with <code>-p</code>.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>switch</th><th>effect</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>-r</code>, <code>--resume [ID]</code></td><td>Resume a session by id prefix; with no id, pick one from a list.</td></tr>
+              <tr><td><code>-c</code>, <code>--continue</code></td><td>Resume the most recent session in this directory.</td></tr>
+              <tr><td><code>--model PROVIDER:NAME</code></td><td>The model for this run only. The configured one is untouched.</td></tr>
+              <tr><td><code>--thinking LEVEL</code></td><td>Thinking effort for this run only: <code>off</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code> or <code>max</code>.</td></tr>
+              <tr><td><code>--mode MODE</code></td><td>Permission mode: <code>read</code>, <code>auto</code> or <code>yolo</code> (the default).</td></tr>
+              <tr><td><code>--strict</code></td><td>Hold every shell command, the clearly read-only ones included.</td></tr>
+              <tr><td><code>--skill PATH</code></td><td>Load skills from this <code>SKILL.md</code> or directory too. Repeatable.</td></tr>
+              <tr><td><code>--no-skills</code></td><td>Skip the default skill locations. <code>--skill</code> paths still load.</td></tr>
+              <tr><td><code>--no-web-search</code></td><td>Do not give the model the <code>web_search</code> tool.</td></tr>
+              <tr><td><code>--no-code-mode</code></td><td>Do not give the model the <code>run_code</code> tool.</td></tr>
+              <tr><td><code>--web</code></td><td>Serve the UI in a browser instead of the terminal.</td></tr>
+              <tr><td><code>--port N</code></td><td>Port for <code>--web</code>. Default 8000.</td></tr>
+              <tr><td><code>--textual-debug</code></td><td>Give the agent tools to inspect and change its own live UI. See <a href="#textual-debug">below</a>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>With <code>-p</code> only</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>switch</th><th>effect</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>-p</code>, <code>--print [PROMPT]</code></td><td>Run one prompt without the UI and exit. With no value the prompt is read from stdin; with both, the piped text is given to the model along with the prompt.</td></tr>
+              <tr><td><code>--output-format FORMAT</code></td><td><code>text</code> (the default), <code>json</code> for one event per line, or <code>result</code> for the final result alone.</td></tr>
+              <tr><td><code>--timeout SECS</code></td><td>Give up after this many seconds, with exit code 124.</td></tr>
+              <tr><td><code>--max-tool-calls N</code></td><td>Stop a turn before its N+1th tool call, with exit code 4. Each agent it starts gets the same budget.</td></tr>
+              <tr><td><code>--append-system-prompt TEXT</code></td><td>Add text, such as a role, to the end of a new session's system prompt. It is saved with the session, so it cannot be combined with <code>-c</code> or <code>-r</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Without <code>-p</code>, a stdin that is not a terminal is also read as a prompt:
+          <code>echo "fix the build" | paimon</code> runs headless.
+        </p>
+      </section>
+
+      <section aria-labelledby="commands">
+        <h2 id="commands">Commands</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>command</th><th>what it does</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>paimon status</code></td>
+                <td>Show login state and configuration. Exits 0 when the configured model can
+                  be built with credentials that resolve, 1 otherwise, without a network
+                  request. <code>--json</code> prints one JSON object.</td>
+              </tr>
+              <tr>
+                <td><code>paimon login [PROVIDER]</code></td>
+                <td>Log in to a provider without the UI. <code>--api-key-env VAR</code> or
+                  <code>--api-key-stdin</code> supplies the key, <code>--api-base URL</code>
+                  overrides the endpoint, and <code>--model PROVIDER:NAME</code> logs in to that
+                  model's provider and makes it the default. <code>--force</code> sets an
+                  unreadable config aside and starts fresh. <code>--accept-risk</code> skips the
+                  confirmation for <code>antigravity</code>.</td>
+              </tr>
+              <tr>
+                <td><code>paimon model PROVIDER:NAME</code></td>
+                <td>Set the default model. Credentials are not touched.</td>
+              </tr>
+              <tr>
+                <td><code>paimon sessions</code></td>
+                <td>List the resumable sessions in this directory, newest first.
+                  <code>--json</code> prints a JSON array.</td>
+              </tr>
+              <tr>
+                <td><code>paimon log [ID]</code></td>
+                <td>Show a session's event log, one line per event, each prefixed with its seq.
+                  <code>--turns N</code>, <code>--tail N</code> and <code>--after SEQ</code>
+                  narrow it, <code>--full</code> shows whole contents, and <code>--json</code>
+                  prints the raw records.</td>
+              </tr>
+              <tr>
+                <td><code>paimon install-skill</code></td>
+                <td>Install the skill that teaches another coding agent to drive Paimon.
+                  <code>--target claude</code> (the default) or <code>codex</code>, or
+                  <code>--dest DIR</code> for anywhere else.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="keys">
+        <h2 id="keys">Keys</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>key</th><th>action</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Enter</code></td><td>Send the prompt.</td></tr>
+              <tr><td><code>Shift+Enter</code>, <code>Ctrl+J</code></td><td>New line in the prompt.</td></tr>
+              <tr><td><code>Up</code>, <code>Down</code></td><td>On the first or last line of the prompt, walk through earlier prompts.</td></tr>
+              <tr><td><code>Ctrl+V</code></td><td>Paste, including an image from the clipboard.</td></tr>
+              <tr><td><code>/</code></td><td>In an empty prompt, open the command palette.</td></tr>
+              <tr><td><code>!</code>, <code>!!</code></td><td>At the start of a line, run it in a shell. <code>!!</code> does not show the output to the model.</td></tr>
+              <tr><td><code>Esc</code></td><td>Interrupt the current turn.</td></tr>
+              <tr><td><code>Shift+Tab</code></td><td>Cycle the permission mode.</td></tr>
+              <tr><td><code>Ctrl+P</code></td><td>Open the command palette.</td></tr>
+              <tr><td><code>Ctrl+T</code></td><td>Open another session in a new pane. Up to eight panes.</td></tr>
+              <tr><td><code>Ctrl+W</code></td><td>Close the current pane.</td></tr>
+              <tr><td><code>Ctrl+PageUp</code>, <code>Ctrl+PageDown</code></td><td>Previous and next pane.</td></tr>
+              <tr><td><code>Ctrl+G</code></td><td>Go to a pane that is waiting on you.</td></tr>
+              <tr><td><code>Ctrl+L</code></td><td>Return focus to the pane's input or pending question.</td></tr>
+              <tr><td><code>Ctrl+C</code></td><td>Quit.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="palette">
+        <h2 id="palette">Command palette</h2>
+        <p>
+          On top of Textual's own entries, such as Change theme: Log in to a provider, Switch
+          model, Thinking effort, Toggle thinking display, Toggle idle recap, Compact context,
+          New session, Fork session, Resume session, New pane, Close pane, and one entry per
+          skill.
+        </p>
+      </section>
+
+      <section aria-labelledby="tools">
+        <h2 id="tools">Tools</h2>
+        <p>
+          What the model can call. The last column says what holds a call back outside
+          <code>yolo</code> mode, where nothing does.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>tool</th><th>what it does</th><th>held when</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>read_file</code></td><td>Read a text file with line numbers, or look at an image.</td><td>outside the working directory</td></tr>
+              <tr><td><code>glob</code></td><td>Find files by pattern, newest first.</td><td>outside the working directory</td></tr>
+              <tr><td><code>grep</code></td><td>Search file contents for a regular expression.</td><td>outside the working directory</td></tr>
+              <tr><td><code>write_file</code></td><td>Create or overwrite a file.</td><td>always in <code>read</code>; in <code>auto</code> outside the working directory or inside <code>.git</code></td></tr>
+              <tr><td><code>edit_file</code></td><td>Replace one exact substring in a file.</td><td>as <code>write_file</code></td></tr>
+              <tr><td><code>shell</code></td><td>Run a command and return its output.</td><td>unless the command is recognized as read-only</td></tr>
+              <tr><td><code>run_background</code></td><td>Start a long-running command in a tab of its own.</td><td>always</td></tr>
+              <tr><td><code>read_job</code></td><td>Read what a background command has printed.</td><td>never</td></tr>
+              <tr><td><code>stop_job</code></td><td>Stop an agent or a background command.</td><td>never</td></tr>
+              <tr><td><code>spawn_agent</code></td><td>Start another agent working in parallel. Up to four at a time.</td><td>never</td></tr>
+              <tr><td><code>list_models</code></td><td>List the models an agent can be started on.</td><td>never</td></tr>
+              <tr><td><code>web_search</code></td><td>Search the web and return titles, URLs and snippets.</td><td>never</td></tr>
+              <tr><td><code>run_code</code></td><td>Run a sandboxed Python script that calls the other tools.</td><td>each call it makes is held as above</td></tr>
+              <tr><td><code>write_todos</code></td><td>Keep a task list for multi-step work.</td><td>never</td></tr>
+              <tr><td><code>ask_user</code></td><td>Ask the user one question and wait.</td><td>never</td></tr>
+              <tr><td><code>search_history</code></td><td>Search the session's full log, including what compaction summarized away.</td><td>never</td></tr>
+              <tr><td><code>read_history</code></td><td>Read records from that log.</td><td>never</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          A held call is refused in <code>read</code> mode and put to the reviewer in
+          <code>auto</code> mode. Under <code>-p</code> the model has no <code>ask_user</code>
+          and no background commands. A subagent has neither, and cannot start agents of its
+          own.
+        </p>
+        <p>
+          On Windows commands run in Git Bash, found through <code>git</code> on your PATH or
+          the standard install locations. Without Git for Windows they run in cmd.exe, and then
+          none are recognized as read-only.
+        </p>
+      </section>
+
+      <section aria-labelledby="config">
+        <h2 id="config">config.json</h2>
+        <p>
+          Kept in <code>~/.config/paimon/config.json</code>, written by the first launch, by
+          <code>paimon login</code> and by choices made in the app. Settings marked “by hand”
+          are only ever read.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>key</th><th>default</th><th>meaning</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>model</code></td><td>none</td><td>The model to run on, as <code>provider:name</code>.</td></tr>
+              <tr><td><code>providers</code></td><td><code>{}</code></td><td>Credentials by provider, each with <code>api_base</code> and <code>api_key</code>. A provider's key is only ever sent to that provider.</td></tr>
+              <tr><td><code>thinking</code></td><td><code>null</code></td><td>Thinking effort, or <code>null</code> to leave it to the model. A level a provider lacks becomes the nearest one it has.</td></tr>
+              <tr><td><code>show_reasoning</code></td><td><code>false</code></td><td>Show the model's reasoning as it streams, and print it under <code>-p</code>.</td></tr>
+              <tr><td><code>theme</code></td><td><code>paimon</code></td><td>The UI theme.</td></tr>
+              <tr><td><code>safe_commands</code></td><td><code>true</code></td><td>Let clearly read-only commands run in <code>read</code> and <code>auto</code> modes.</td></tr>
+              <tr><td><code>review_model</code></td><td><code>null</code></td><td>The model <code>auto</code> mode reviews with, as <code>provider:name</code>. By default current models review with their provider's fast tier and the rest with themselves. By hand.</td></tr>
+              <tr><td><code>code_mode</code></td><td><code>true</code></td><td>Give the model the <code>run_code</code> tool.</td></tr>
+              <tr><td><code>skills</code></td><td><code>[]</code></td><td>More skill files or directories. By hand.</td></tr>
+              <tr><td><code>recap_enabled</code></td><td><code>true</code></td><td>Offer a recap when you come back to an idle pane.</td></tr>
+              <tr><td><code>recap_idle_seconds</code></td><td><code>300</code></td><td>How long a pane sits idle before the recap. By hand.</td></tr>
+              <tr><td><code>compaction.enabled</code></td><td><code>true</code></td><td>Summarize the conversation in place near the context limit.</td></tr>
+              <tr><td><code>compaction.reserve_tokens</code></td><td><code>16384</code></td><td>Compact once fewer than this many tokens of the window are left.</td></tr>
+              <tr><td><code>compaction.keep_recent_tokens</code></td><td><code>20000</code></td><td>About how much of the recent conversation is kept as it is.</td></tr>
+              <tr><td><code>compaction.context_window</code></td><td><code>null</code></td><td>The window to assume for a model Paimon does not know.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          A setting of the wrong type stops Paimon with a message naming it. The file is never
+          rewritten around a mistake.
+        </p>
+      </section>
+
+      <section aria-labelledby="output">
+        <h2 id="output">Headless output</h2>
+        <p>
+          With <code>--output-format text</code> the answer goes to stdout, and tool calls,
+          refusals and notices go to stderr.
+        </p>
+        <p>
+          <code>--output-format result</code> prints exactly one JSON object when the run ends:
+        </p>
+        <pre><code>{"type": "result", "subtype": "success", "is_error": false,
+ "session_id": "7fd2c1e8…", "text": "the final answer",
+ "denied": 0, "error": null, "log_end": 42}</code></pre>
+        <ul>
+          <li><code>subtype</code> is <code>success</code>, <code>error</code>, <code>interrupted</code>, <code>timeout</code> or <code>max_tool_calls</code>.</li>
+          <li><code>denied</code> counts the tool calls the mode or the reviewer refused. Above zero usually means the run needs a more permissive mode.</li>
+          <li><code>log_end</code> is a cursor into the session log: <code>paimon log ID --after LOG_END</code> later shows only what a follow-up run added.</li>
+        </ul>
+        <p>
+          <code>--output-format json</code> prints one object per line as the run goes. The
+          first is always <code>init</code> and the last is always the same
+          <code>result</code>, even when the run fails before the model is reached.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>type</th><th>fields</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>init</code></td><td><code>session_id</code>, <code>model</code>, <code>mode</code>, <code>cwd</code></td></tr>
+              <tr><td><code>text_delta</code>, <code>reasoning_delta</code></td><td><code>text</code></td></tr>
+              <tr><td><code>tool_use</code></td><td><code>id</code>, <code>name</code>, <code>args</code></td></tr>
+              <tr><td><code>tool_result</code></td><td><code>id</code>, <code>name</code>, <code>result</code>, <code>denied</code>, <code>status</code> (<code>success</code>, <code>failed</code>, <code>denied</code> or <code>interrupted</code>), <code>detail</code> (such as <code>exit 2</code>); a <code>run_code</code> result adds <code>calls</code></td></tr>
+              <tr><td><code>todos</code></td><td><code>todos</code></td></tr>
+              <tr><td><code>job</code></td><td><code>text</code></td></tr>
+              <tr><td><code>compacted</code></td><td><code>tokens_before</code>, <code>tokens_after</code></td></tr>
+              <tr><td><code>compaction_failed</code></td><td><code>error</code></td></tr>
+              <tr><td><code>retry</code></td><td><code>attempt</code>, <code>max_attempts</code>, <code>delay</code>, <code>error</code></td></tr>
+              <tr><td><code>images_rejected</code></td><td><code>model</code></td></tr>
+              <tr><td><code>result</code></td><td>as above</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Consumers should ignore types and fields they do not know. Existing fields are only
+          added to, never removed or redefined.
+        </p>
+      </section>
+
+      <section aria-labelledby="exit-codes">
+        <h2 id="exit-codes">Exit codes</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>code</th><th>meaning</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>0</code></td><td>Success.</td></tr>
+              <tr><td><code>1</code></td><td>Error.</td></tr>
+              <tr><td><code>2</code></td><td>Bad usage.</td></tr>
+              <tr><td><code>4</code></td><td>Hit <code>--max-tool-calls</code>.</td></tr>
+              <tr><td><code>124</code></td><td>Hit <code>--timeout</code>.</td></tr>
+              <tr><td><code>130</code></td><td>Interrupted.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The session is saved in every case, and can be resumed to let it finish.</p>
+      </section>
+
+      <section aria-labelledby="environment">
+        <h2 id="environment">Environment and files</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>variable</th><th>effect</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>PAIMON_CONFIG_HOME</code></td><td>Where <code>config.json</code> and the global skills live. Default <code>~/.config/paimon</code>.</td></tr>
+              <tr><td><code>PAIMON_DATA_HOME</code></td><td>Where sessions live. Default <code>$XDG_DATA_HOME/paimon</code>, or <code>~/.local/share/paimon</code>.</td></tr>
+              <tr><td><code>PAIMON_NO_TELEMETRY</code>, <code>DO_NOT_TRACK</code></td><td>Set either to turn telemetry off.</td></tr>
+              <tr><td><code>NO_COLOR</code></td><td>No colour in <code>-p</code> text output.</td></tr>
+              <tr><td><code>TEXTUAL_ANIMATIONS=none</code></td><td>Hold the stars and the spinner still.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          A provider with no stored key falls back to its own environment variable, such as
+          <code>ANTHROPIC_API_KEY</code> or <code>KILO_API_KEY</code>. Sessions are JSONL files
+          under <code>sessions/</code> in the data directory.
+        </p>
+      </section>
+
+      <section aria-labelledby="telemetry">
+        <h2 id="telemetry">Telemetry</h2>
+        <p>
+          Each launch sends one anonymous event to Google Analytics: a random install id, the
+          launch mode, the version, the OS name, the language from <code>LC_ALL</code> or
+          <code>LANG</code>, whether this is the first launch, and the configured provider and
+          model name. Nothing from your sessions, prompts, files or credentials is included.
+        </p>
+      </section>
+
+      <section aria-labelledby="textual-debug">
+        <h2 id="textual-debug">Debugging the UI</h2>
+        <p>
+          <code>paimon --textual-debug</code>, which also works with <code>--web</code>, is for
+          when Paimon needs to diagnose its own layout or styling. The model then gets five
+          more tools, scoped to the live UI process:
+        </p>
+        <ul>
+          <li><code>textual_inspect</code> queries the DOM by CSS selector and reports geometry, pseudo-classes, focus and computed CSS.</li>
+          <li><code>textual_eval</code> and <code>textual_exec</code> run Python in the UI process, including private APIs, persistent variables and top-level <code>await</code>.</li>
+          <li><code>textual_apply_css</code> layers on CSS and relayouts immediately.</li>
+          <li><code>textual_screenshot</code> exports the current render to SVG.</li>
+        </ul>
+        <p class="note">
+          <code>textual_exec</code> is unrestricted Python inside the process and can change any
+          Textual or Paimon state. Use this option only with prompts you trust. Live changes
+          last until exit; once a fix is confirmed, ask Paimon to edit the source.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <a href="https://github.com/aisk/paimon">github.com/aisk/paimon</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/aisk/paimon/blob/master/LICENSE">license</a>
+      <span class="paimon-star" title="A tiny bit of Mora." aria-label="A tiny bit of Mora">✦</span>
+    </footer>
+  </body>
+</html>

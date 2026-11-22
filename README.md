@@ -12,212 +12,46 @@ Paimon is a coding agent that lives in your terminal. It reads and edits files i
 uv tool install paimon   # or: pip install paimon
 ```
 
-## Getting started
-
-```bash
-paimon
-```
-
 Or run it without installing anything:
 
 ```bash
 uvx paimon
 ```
 
-The first launch asks for a provider, its API base and key, then a model. The first provider on offer, Kilo, needs no account: its free models run without a key, but the providers behind them may keep and train on your prompts and code, and use is limited to 200 requests an hour per IP address. Then just type what you want done. Write `@path/to/file` in a prompt to hand a file to the agent. An image mentioned that way (PNG, JPEG, GIF or WebP, up to 5 MB) is attached for the model to look at, and the agent can open images itself with its file tool. Ctrl+V pastes an image from the clipboard and dragging an image file onto the terminal attaches it, each shown in the prompt as `[Image #1]`. In Kitty and Ghostty, outside tmux, an attached image is also drawn in the conversation, under the message or the tool result that carried it. The clipboard can only be read where Paimon runs on the same machine as your desktop: on Linux that needs `wl-paste` or `xclip`, and inside WSL the Windows clipboard is read through PowerShell.
-
-While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** only reads, **auto** edits inside the working directory and has a second model call approve everything else, **yolo** checks nothing and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+C` quits. A line starting with `!` runs in a shell instead of being sent, and Paimon sees what it printed. `!!` keeps it to yourself.
-
-Paimon comes in two themes of its own, `paimon` (a night sky, the default) and `paimon-light`. "Change theme" in the command palette switches between them and Textual's, and the choice is remembered. `TEXTUAL_ANIMATIONS=none` holds the stars and the spinner still.
-
-`Ctrl+T` opens another session in a pane of its own, `Ctrl+W` closes one, `Ctrl+PageUp` and `Ctrl+PageDown` move between them, and `Ctrl+G` jumps to a pane waiting for permission. `Ctrl+L` returns keyboard focus to the current pane's input or pending answer. The status bar identifies input, reading, and answer focus; pane switches preserve reading focus, and background completion does not steal the keyboard. Paimon can work in parallel: ask for two independent things and it starts a second agent in a tab of its own, where you can watch it work and answer what it asks, and whose answer comes back into the conversation when it is done. Closing the tab stops it. It can also leave a command running in a tab, a dev server or a watcher, instead of holding up a turn.
-
-## Web search
-
-Paimon can search the web without an API key. It asks in no permission mode, because a search changes nothing on your machine. Searches go through [ddgs](https://github.com/deedy5/ddgs), a metasearch library, so a query may be sent to any of several public search engines. `--no-web-search` takes the tool away for a run.
-
-## Skills
-
-Paimon loads [Agent Skills](https://agentskills.io) from `~/.config/paimon/skills`, `~/.agents/skills` and every `.agents/skills` from the working directory up to the repository root. Only each skill's name and description go into the system prompt; the model reads the `SKILL.md` when a task matches, and `/skill:name args` sends it explicitly (the `/` command palette lists them). More locations go in `config.json` as `"skills": ["~/.claude/skills"]` or on the command line with `--skill PATH`; `--no-skills` skips the default locations. When two skills share a name, explicit paths beat the project's, which beat the global ones.
-
-## Using Paimon as a subagent
-
-Frontier models are good at planning and reviewing; the steps in between are often mechanical. Point Paimon at a cheaper model and let Claude Code or Codex write the plan and check the result. Log in to that model's provider once, then name the model on each run:
+## Getting started
 
 ```bash
-paimon login zai --api-key-env ZAI_API_KEY
-paimon --model zai:glm-4.7 -p "apply the plan in PLAN.md" --mode auto --output-format result
+paimon
 ```
 
-The bundled skill teaches the calling agent this workflow:
+The first launch asks for a provider, its API base and key, then a model. The first provider on offer, Kilo, needs no account: its free models run without a key, but the providers behind them may keep and train on your prompts and code, and use is limited to 200 requests an hour per IP address.
+
+Then just type what you want done. Write `@path/to/file` in a prompt to hand a file or an image to the agent. A line starting with `!` runs in a shell instead of being sent.
+
+While it runs: `Shift+Tab` switches how much the agent may do on its own (**read** only reads, **auto** edits inside the working directory and has a second model call approve everything else, **yolo** checks nothing and is the default), `Esc` interrupts the current turn, `Ctrl+P` opens the command palette, `Ctrl+T` opens another session in a pane of its own, `Ctrl+C` quits.
+
+## Common commands
 
 ```bash
-paimon install-skill                  # into Claude Code (~/.claude/skills/paimon)
-paimon install-skill --target codex   # into Codex; --dest DIR for anywhere else
-npx skills add aisk/paimon            # the same skill, via skills.sh
-```
-
-## Using Paimon as a library
-
-The agent loop is importable, so a Python program can drive it without going through the CLI. `Agent.open()` starts or resumes a session and `agent.run_until_idle()` yields typed events, one per text chunk, tool call and turn end, which the caller renders or filters however it likes. It returns once the agent is done, including any agents it started along the way: their answers come back later, and it runs the model again on each of them until nothing is left running:
-
-```python
-import asyncio
-
-from paimon.agent import Agent
-from paimon.events import TextDelta
-
-async def main():
-    agent = Agent.open(mode="auto")
-    async for event in agent.run_until_idle("summarize the tests in this directory"):
-        if isinstance(event, TextDelta):
-            print(event.text, end="", flush=True)
-
-asyncio.run(main())
-```
-
-`agent.run()` runs exactly one turn and returns with those agents possibly still at work; it is the call for a program that wants to decide itself when to run the model again, with `agent.run(None)`. An agent runs one turn or compaction at a time, and starting a second while one is under way raises `AgentBusyError`.
-
-`Agent.open()` also takes a working directory, an async `confirm` callback for the permission prompts that are left, and a `toolset` to hand the model fewer tools or tools of your own. An agent holds its session until it goes away; to give it back at a definite moment, call `close()` or use the agent as a context manager. It writes the same session files as the CLI, so a run started in code can be resumed later with `paimon -r`.
-
-## Sessions
-
-Every conversation is saved, and long ones are summarized in place near the context limit. Paimon prints the command that brings a session back when you leave:
-
-```bash
-paimon -r            # choose a session started in this directory
-paimon -r a1b2c3     # resume one by id
-paimon -c            # resume the most recent one
-paimon sessions      # list them (--json for machines)
-paimon log a1b2c3    # what a session did, one line per event
-```
-
-## Other ways to run it
-
-```bash
-paimon --mode read                  # start in a more cautious permission mode (yolo is the default)
-paimon --strict                     # hold every command, even read-only ones
-paimon --no-web-search              # take the web search tool away for this run
-paimon --no-code-mode               # take the run_code tool away (or "code_mode": false in config.json)
-paimon --web                        # the same UI in a browser (--port, default 8000)
+paimon -c                           # resume the most recent session here
+paimon -r                           # choose a session to resume
+paimon --mode read                  # start in a more cautious permission mode
+paimon --model zai:glm-4.7          # this model for this run only
+paimon --web                        # the same UI in a browser
 paimon -p "what does cli.py do?"    # one answer on stdout, no UI
 cat log.txt | paimon -p "summarize this"
-paimon --model zai:glm-4.7          # this model for this run only
-paimon --thinking high              # this thinking effort for this run only
+paimon login zai --api-key-env ZAI_API_KEY
+paimon install-skill                # teach Claude Code or Codex to use Paimon as a worker
 ```
 
-`-p` never stops to ask, so with the default `yolo` mode it can already write files and run commands. Add `--output-format result` for a single JSON object with the outcome, which is what a calling program should read. `paimon --help` lists the rest.
+`-p` never stops to ask, so with the default `yolo` mode it can already write files and run commands. The permission modes are a guardrail against agent mistakes, not a security boundary: for real isolation, run Paimon inside a container or VM.
 
-Inside a [Herdr](https://herdr.dev) pane the UI reports its state and resume command to Herdr on its own, with nothing to install. It also reports its state to the terminal itself with [OSC 7501](https://mitchellh.com/writing/program-status-osc7501), for terminals that show it.
+## Documentation
 
-### Debugging the Textual UI
-
-Start with `paimon --textual-debug` (also works with `--web`) when Paimon needs to diagnose its own layout or styling. It is off by default. When enabled, the model receives five tools scoped to the live UI process:
-
-- `textual_inspect` queries the DOM by CSS selector and reports geometry, pseudo-classes, focus and computed CSS;
-- `textual_eval` / `textual_exec` run Python in the UI process, including private APIs, persistent variables and top-level `await`;
-- `textual_apply_css` layers on CSS and relayouts immediately;
-- `textual_screenshot` exports the current render to SVG.
-
-You can ask it, for example, to “find why `#prompt` is narrower than expected, try a live fix, and take a screenshot.” `textual_exec` deliberately provides unrestricted in-process Python and can change any Textual or Paimon state. Use this development option only with trusted prompts. Live changes last only until exit; after confirming a fix, ask Paimon to edit the source.
-
-## Configuration
-
-Model settings are kept in `~/.config/paimon/config.json`, written by the first launch or by `paimon login`. Each provider keeps its own credentials, and `paimon model provider:name` or Switch model in the command palette picks the model to run on. A ChatGPT plan works in place of an API key: `paimon login chatgpt` signs in through the browser. `paimon login antigravity` does the same for an Antigravity plan, which Google does not support outside Antigravity: Paimon signs in as the Antigravity client and calls an internal endpoint, so the account may be limited or closed, and the risk is yours. The sign-in asks you to accept that before it starts; without a terminal to ask on, pass `--accept-risk`. `paimon model kilo:cohere/north-mini-code:free` picks a free Kilo model without logging in; a Kilo key (`paimon login kilo --api-key-env KILO_API_KEY`) opens its paid models too. Sessions live in `~/.local/share/paimon/sessions/`.
-
-Thinking effort in the command palette sets how hard the model thinks before it answers: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or left to the model (the default). The choice is kept as `"thinking"` in the config and holds for every pane; `--thinking` covers one run. A level a provider lacks becomes the nearest one it has. A model that offers no such setting ignores it, and so do Antigravity's, whose level is part of the model name; the status bar shows the level only when the current model takes it. Compaction summaries, auto mode's reviews and recaps are sent without it.
-
-Read and auto modes run a small set of clearly read-only commands (`ls`, `cat`, `git status`, …) on their own; `--strict` turns that off. On Windows commands run in Git Bash, found through `git` on your PATH or the standard install locations; without Git for Windows they run in cmd.exe, and then none are recognized. Read mode refuses everything else. Auto mode asks a reviewer model, which sees your messages and the agent's tool calls but not its reasoning or any tool output, and answers allow or block. It asks you instead when the reviewer cannot be reached or has blocked three calls in a row, and under `-p` those are refusals. Current models review with their provider's fast tier by default (GPT with Luna, Claude with Haiku, GLM with Flash) and the rest review with themselves; set `"review_model": "provider:name"` in the config to choose. **All of this is a guardrail against agent mistakes, not a security boundary.** For real isolation, run Paimon inside a container or VM.
-
-## Architecture
-
-`Agent.run` is a UI-agnostic stream of events; the TUI, `--web` and headless mode are three renderers over that one stream. An agent holds the subagents and background commands it starts. A subagent is another `Agent` running as a task in the same process, and its answer is delivered to its parent as a message. A UI that wants to show a job hooks `Agent.open_job`, which is how the TUI gives each one a pane.
-
-```mermaid
-flowchart TD
-    subgraph entry["Entry points"]
-        CLI["cli.py"]
-        Commands["commands.py<br/>status / login / model / sessions / log / install-skill"]
-        Headless["headless.py<br/>-p, one-shot"]
-        App["app.py<br/>Textual TUI / --web"]
-    end
-
-    subgraph tui["TUI widgets"]
-        Pane["pane.py<br/>SessionPane"]
-        AgentPane["agentpane.py<br/>subagent pane"]
-        CommandPane["commandpane.py<br/>background command pane"]
-        Transcript["transcript.py<br/>conversation log, event renderer"]
-        Tabs["tabs.py<br/>pane strip"]
-        Login["login.py<br/>provider / key"]
-        UIWidgets["ui.py<br/>prompt input, confirmations"]
-        Diff["diff.py<br/>side-by-side diff rendering"]
-    end
-
-    subgraph core["Agent loop"]
-        AgentLoop["agent.py<br/>Agent.run()"]
-        LLM["llm.py<br/>build_model()"]
-        PromptMod["prompt.py<br/>system prompt"]
-        ToolsMod["tools/<br/>tool REGISTRY"]
-        SessionMod["session.py<br/>JSONL persistence"]
-        Compaction["compaction.py"]
-        Retry["retry.py"]
-        Mentions["mentions.py<br/>@path expansion"]
-        JobMgr["jobs.py<br/>subagents, background commands"]
-        Jobs["turns.py<br/>turn driver"]
-    end
-
-    subgraph support["Config & skills"]
-        Config["config.py<br/>settings, credentials"]
-        Skills["skills.py<br/>Agent Skills discovery"]
-    end
-
-    CLI --> Commands
-    CLI --> Headless
-    CLI --> App
-    CLI --> Config
-
-    Headless --> AgentLoop
-    Headless --> Mentions
-
-    App --> Pane
-    App --> AgentPane
-    App --> CommandPane
-    App --> Tabs
-    App --> Login
-    App --> Config
-
-    Pane --> Jobs
-    Pane --> AgentLoop
-    Pane --> Diff
-    Pane --> Transcript
-    Pane --> UIWidgets
-    Pane --> LLM
-    AgentPane --> Pane
-    AgentPane --> Transcript
-    CommandPane --> Pane
-    Transcript --> UIWidgets
-    UIWidgets --> Diff
-
-    AgentLoop --> LLM
-    AgentLoop --> PromptMod
-    AgentLoop --> ToolsMod
-    AgentLoop --> SessionMod
-    AgentLoop --> Compaction
-    AgentLoop --> Retry
-    AgentLoop --> Mentions
-    AgentLoop --> JobMgr
-    JobMgr -. "spawn_agent" .-> AgentLoop
-    JobMgr -. "spawn_agent" .-> AgentPane
-    JobMgr -. "run_background" .-> CommandPane
-
-    PromptMod --> Skills
-
-    Jobs --> AgentLoop
-
-    Skills --> Config
-    Config --> LLM
-```
+- [Guide](https://aisk.github.io/paimon/guide.html): prompts and images, permission modes, panes and parallel agents, sessions, skills, and running Paimon from another agent or from Python.
+- [Reference](https://aisk.github.io/paimon/reference.html): every switch, command, key, tool and `config.json` setting, and the headless output format.
+- [Architecture](https://aisk.github.io/paimon/architecture.html): how the code is put together.
 
 ## Telemetry
 
-Each launch sends one anonymous event to Google Analytics: a random install id, the launch mode, the version, the OS name, the language from `LC_ALL`/`LANG`, whether this is the first launch, and the configured provider and model name. Nothing from your sessions, prompts, files or credentials is included. Set `PAIMON_NO_TELEMETRY=1` or `DO_NOT_TRACK=1` to turn it off.
+Each launch sends one anonymous event to Google Analytics, with nothing from your sessions, prompts, files or credentials in it; the [reference](https://aisk.github.io/paimon/reference.html#telemetry) lists what it holds. Set `PAIMON_NO_TELEMETRY=1` or `DO_NOT_TRACK=1` to turn it off.

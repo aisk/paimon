@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="How to use Paimon: first launch, prompts, permission modes, panes, sessions, skills, and running it from another agent or from Python.">
+    <meta name="theme-color" content="#f8f7f3">
+    <meta property="og:title" content="Paimon guide">
+    <meta property="og:description" content="How to use Paimon day to day.">
+    <meta property="og:type" content="website">
+    <title>Guide · Paimon</title>
+    <link rel="canonical" href="https://aisk.github.io/paimon/guide.html">
+    <link rel="icon" type="image/png" href="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <header>
+      <a class="site-name" href="./" title="Your best travel companion">
+        <img class="site-logo" src="https://www.sakura.fm/cdn-cgi/image/width=128,height=128,format=webp,onerror=redirect,fit=cover/https://media.sakura.fm/image-E6VryMz.png" alt="" width="24" height="24">
+        <span>paimon</span>
+      </a>
+      <nav aria-label="Site">
+        <a href="./">intro</a>
+        <a href="./guide.html" aria-current="page">guide</a>
+        <a href="./architecture.html">architecture</a>
+        <a href="./reference.html">reference</a>
+        <a href="https://github.com/aisk/paimon">source</a>
+        <a href="https://github.com/aisk/paimon/blob/master/README.zh-CN.md" lang="zh-CN">中文</a>
+      </nav>
+    </header>
+
+    <main>
+      <h1 class="page-title">Guide</h1>
+
+      <p class="lead">
+        How to work with Paimon day to day. Every switch, key and setting mentioned here is
+        listed in full in the <a href="./reference.html">reference</a>.
+      </p>
+
+      <ul class="toc">
+        <li><a href="#first-launch">First launch</a></li>
+        <li><a href="#prompts">Asking for things</a></li>
+        <li><a href="#modes">Permission modes</a></li>
+        <li><a href="#panes">Panes and parallel work</a></li>
+        <li><a href="#sessions">Sessions</a></li>
+        <li><a href="#skills">Skills</a></li>
+        <li><a href="#web-search">Web search</a></li>
+        <li><a href="#look">Thinking effort and themes</a></li>
+        <li><a href="#headless">Without the UI</a></li>
+        <li><a href="#subagent">As a subagent</a></li>
+        <li><a href="#library">From Python</a></li>
+        <li><a href="#elsewhere">In a browser, and in Herdr</a></li>
+      </ul>
+
+      <section aria-labelledby="first-launch">
+        <h2 id="first-launch">First launch</h2>
+        <pre><code>uvx paimon</code></pre>
+        <p>
+          The first launch asks for a provider, its API base and key, then a model. The first
+          provider on offer, Kilo, needs no account: its free models run without a key, but the
+          providers behind them may keep and train on your prompts and code, and use is limited
+          to 200 requests an hour per IP address.
+        </p>
+        <p>
+          The same can be done without the UI. Each provider keeps its own credentials, and the
+          model to run on is chosen separately:
+        </p>
+        <pre><code>paimon login zai --api-key-env ZAI_API_KEY
+paimon model zai:glm-4.7
+paimon status</code></pre>
+        <p>
+          A ChatGPT plan works in place of an API key: <code>paimon login chatgpt</code> signs in
+          through the browser. <code>paimon login antigravity</code> does the same for an
+          Antigravity plan, which Google does not support outside Antigravity: Paimon signs in as
+          the Antigravity client and calls an internal endpoint, so the account may be limited or
+          closed, and the risk is yours. The sign-in asks you to accept that before it starts.
+        </p>
+        <p>
+          <code>paimon model kilo:cohere/north-mini-code:free</code> picks a free Kilo model
+          without logging in at all. A Kilo key opens its paid models too.
+        </p>
+        <p>
+          Inside the app, Switch model in the command palette (<code>Ctrl+P</code>) changes the
+          model, and Log in to a provider adds another one.
+        </p>
+      </section>
+
+      <section aria-labelledby="prompts">
+        <h2 id="prompts">Asking for things</h2>
+        <p>
+          Type what you want done. Paimon reads and edits files in the directory it was started
+          in and runs commands there.
+        </p>
+        <ul>
+          <li>
+            <code>@path/to/file</code> in a prompt hands that file to the agent. An image
+            mentioned that way (PNG, JPEG, GIF or WebP, up to 5 MB) is attached for the model
+            to look at.
+          </li>
+          <li>
+            <code>Ctrl+V</code> pastes an image from the clipboard, and dragging an image file
+            onto the terminal attaches it. Each shows in the prompt as <code>[Image #1]</code>.
+            In Kitty and Ghostty, outside tmux, an attached image is also drawn in the
+            conversation.
+          </li>
+          <li>
+            A line starting with <code>!</code> runs in a shell instead of being sent, and
+            Paimon sees what it printed. <code>!!</code> keeps the output to yourself.
+          </li>
+          <li>
+            What you send while a turn is running is queued, and reaches the model at its next
+            step rather than after the whole turn.
+          </li>
+          <li><code>Esc</code> interrupts the current turn. <code>Ctrl+C</code> quits.</li>
+        </ul>
+        <p>
+          Pasting from the clipboard only works where Paimon runs on the same machine as your
+          desktop: on Linux that needs <code>wl-paste</code> or <code>xclip</code>, and inside
+          WSL the Windows clipboard is read through PowerShell.
+        </p>
+      </section>
+
+      <section aria-labelledby="modes">
+        <h2 id="modes">Permission modes</h2>
+        <p>
+          <code>Shift+Tab</code> switches how much the agent may do on its own, and
+          <code>--mode</code> sets it at launch.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>mode</th><th>what runs without asking</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>read</code></td>
+                <td>Reads inside the working directory and a small set of clearly read-only
+                  commands (<code>ls</code>, <code>cat</code>, <code>git status</code>, …).
+                  Everything else is refused.</td>
+              </tr>
+              <tr>
+                <td><code>auto</code></td>
+                <td>The same, plus edits inside the working directory. Everything else goes to
+                  a reviewer model, which answers allow or block.</td>
+              </tr>
+              <tr>
+                <td><code>yolo</code></td>
+                <td>Everything. This is the default.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          The reviewer sees your messages and the agent's tool calls, but not its reasoning or
+          any tool output. Paimon asks you instead when the reviewer cannot be reached or has
+          blocked three calls in a row; under <code>-p</code>, where there is nobody to ask,
+          those are refusals. <code>--strict</code> holds every command, the read-only ones
+          included.
+        </p>
+        <p class="note">
+          All of this is a guardrail against agent mistakes, not a security boundary. For real
+          isolation, run Paimon inside a container or VM.
+        </p>
+      </section>
+
+      <section aria-labelledby="panes">
+        <h2 id="panes">Panes and parallel work</h2>
+        <p>
+          <code>Ctrl+T</code> opens another session in a pane of its own, <code>Ctrl+W</code>
+          closes one, and <code>Ctrl+PageUp</code> and <code>Ctrl+PageDown</code> move between
+          them. <code>Ctrl+G</code> jumps to a pane that is waiting for your permission.
+        </p>
+        <p>
+          Paimon can also split the work itself. Ask for two independent things and it starts a
+          second agent in a tab of its own, where you can watch it work and answer what it asks.
+          Its answer comes back into the conversation when it is done, and closing the tab stops
+          it. A dev server or a watcher can be left running in a tab the same way, instead of
+          holding up a turn.
+        </p>
+      </section>
+
+      <section aria-labelledby="sessions">
+        <h2 id="sessions">Sessions</h2>
+        <p>
+          Every conversation is saved, and Paimon prints the command that brings it back when
+          you leave.
+        </p>
+        <pre><code>paimon -r            # choose a session started in this directory
+paimon -r a1b2c3     # resume one by id
+paimon -c            # resume the most recent one
+paimon sessions      # list them
+paimon log a1b2c3    # what a session did, one line per event</code></pre>
+        <p>
+          A long conversation is summarized in place when it nears the model's context limit,
+          and Compact context in the command palette does it on demand. The full history stays
+          on disk, where the agent can still search it. Fork session copies the conversation
+          into a new one to try something else from the same point.
+        </p>
+        <p>
+          Come back to a pane after a few idle minutes and Paimon offers a short recap of where
+          things stand.
+        </p>
+      </section>
+
+      <section aria-labelledby="skills">
+        <h2 id="skills">Skills</h2>
+        <p>
+          Paimon loads <a href="https://agentskills.io">Agent Skills</a> from
+          <code>~/.config/paimon/skills</code>, <code>~/.agents/skills</code> and every
+          <code>.agents/skills</code> from the working directory up to the repository root. Only
+          each skill's name and description go into the system prompt; the model reads the
+          <code>SKILL.md</code> when a task matches.
+        </p>
+        <p>
+          <code>/skill:name args</code> sends a skill explicitly, and typing <code>/</code>
+          lists them. More locations go in the config as
+          <code>"skills": ["~/.claude/skills"]</code> or on the command line with
+          <code>--skill PATH</code>. When two skills share a name, explicit paths beat the
+          project's, which beat the global ones.
+        </p>
+      </section>
+
+      <section aria-labelledby="web-search">
+        <h2 id="web-search">Web search</h2>
+        <p>
+          Paimon can search the web without an API key, and does so in every permission mode,
+          because a search changes nothing on your machine. Searches go through
+          <a href="https://github.com/deedy5/ddgs">ddgs</a>, a metasearch library, so a query
+          may be sent to any of several public search engines. <code>--no-web-search</code>
+          takes the tool away for a run.
+        </p>
+      </section>
+
+      <section aria-labelledby="look">
+        <h2 id="look">Thinking effort and themes</h2>
+        <p>
+          Thinking effort in the command palette sets how hard the model thinks before it
+          answers, from <code>off</code> to <code>max</code>, or leaves it to the model. The
+          choice is kept in the config and holds for every pane; <code>--thinking</code> covers
+          one run. A model with no such setting ignores it, and so do Antigravity's, whose
+          level is part of the model name. Compaction summaries, auto mode's reviews and recaps
+          are sent without it.
+        </p>
+        <p>
+          Paimon comes in two themes of its own, <code>paimon</code> (a night sky, the default)
+          and <code>paimon-light</code>. Change theme in the command palette switches between
+          them and Textual's, and the choice is remembered.
+        </p>
+      </section>
+
+      <section aria-labelledby="headless">
+        <h2 id="headless">Without the UI</h2>
+        <pre><code>paimon -p "what does cli.py do?"
+cat log.txt | paimon -p "summarize this"</code></pre>
+        <p>
+          <code>-p</code> runs one prompt and exits. The answer goes to stdout and everything
+          else to stderr, so <code>$(paimon -p ...)</code> captures just the answer. It never
+          stops to ask, so with the default <code>yolo</code> mode it can already write files
+          and run commands; pass <code>--mode read</code> or <code>--mode auto</code> to hold
+          it back.
+        </p>
+        <p>
+          A calling program should add <code>--output-format result</code>, which prints a
+          single JSON object with the outcome and the session id. <code>--timeout</code> and
+          <code>--max-tool-calls</code> bound a run. The session is saved either way, so a
+          follow-up is <code>paimon -r ID -p "..."</code>.
+        </p>
+      </section>
+
+      <section aria-labelledby="subagent">
+        <h2 id="subagent">As a subagent</h2>
+        <p>
+          Frontier models are good at planning and reviewing; the steps in between are often
+          mechanical. Point Paimon at a cheaper model and let Claude Code or Codex write the
+          plan and check the result.
+        </p>
+        <pre><code>paimon login zai --api-key-env ZAI_API_KEY
+paimon --model zai:glm-4.7 -p "apply the plan in PLAN.md" --mode auto --output-format result</code></pre>
+        <p>The bundled skill teaches the calling agent this workflow:</p>
+        <pre><code>paimon install-skill                  # into Claude Code (~/.claude/skills/paimon)
+paimon install-skill --target codex   # into Codex; --dest DIR for anywhere else
+npx skills add aisk/paimon            # the same skill, via skills.sh</code></pre>
+      </section>
+
+      <section aria-labelledby="library">
+        <h2 id="library">From Python</h2>
+        <p>
+          The agent loop is importable, so a program can drive it without going through the
+          CLI. <code>Agent.open()</code> starts or resumes a session and
+          <code>agent.run_until_idle()</code> yields typed events, one per text chunk, tool call
+          and turn end.
+        </p>
+        <pre><code>import asyncio
+
+from paimon.agent import Agent
+from paimon.events import TextDelta
+
+async def main():
+    with Agent.open(mode="auto") as agent:
+        async for event in agent.run_until_idle("summarize the tests in this directory"):
+            if isinstance(event, TextDelta):
+                print(event.text, end="", flush=True)
+
+asyncio.run(main())</code></pre>
+        <p>
+          <code>run_until_idle()</code> returns once the agent is done, including any agents it
+          started along the way. <code>agent.run()</code> runs exactly one turn and returns with
+          those agents possibly still at work; it is the call for a program that wants to
+          decide itself when to run the model again, with <code>agent.run(None)</code>. An agent
+          runs one turn or compaction at a time, and starting a second raises
+          <code>AgentBusyError</code>.
+        </p>
+        <p>
+          <code>Agent.open()</code> also takes a working directory, an async
+          <code>confirm</code> callback for the permission prompts that are left, and a
+          <code>toolset</code> to hand the model fewer tools or tools of your own. It writes
+          the same session files as the CLI, so a run started in code can be resumed later with
+          <code>paimon -r</code>. How the pieces fit is on the
+          <a href="./architecture.html">architecture</a> page.
+        </p>
+      </section>
+
+      <section aria-labelledby="elsewhere">
+        <h2 id="elsewhere">In a browser, and in Herdr</h2>
+        <p>
+          <code>paimon --web</code> serves the same UI in a browser, on port 8000 unless
+          <code>--port</code> says otherwise.
+        </p>
+        <p>
+          Inside a <a href="https://herdr.dev">Herdr</a> pane the UI reports its state and
+          resume command to Herdr on its own, with nothing to install. It also reports its state
+          to the terminal itself with
+          <a href="https://mitchellh.com/writing/program-status-osc7501">OSC 7501</a>, for
+          terminals that show it.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <a href="https://github.com/aisk/paimon">github.com/aisk/paimon</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/aisk/paimon/blob/master/LICENSE">license</a>
+      <span class="paimon-star" title="A tiny bit of Mora." aria-label="A tiny bit of Mora">✦</span>
+    </footer>
+  </body>
+</html>
