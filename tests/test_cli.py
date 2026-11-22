@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
@@ -575,3 +576,15 @@ class RunOptionsFlagsTest(unittest.TestCase):
         self.assertEqual(options.skill_paths(config), ["from-config", "a", "b/SKILL.md"])
         self.assertFalse(options.safe_commands(config))
         self.assertFalse(options.code_mode(config))
+
+    def test_every_run_option_survives_a_relaunch_with_its_flags(self) -> None:
+        # A field RunOptions.flags() leaves out would be dropped by --web and
+        # by a resumed session. A field of a new type needs a sample here.
+        samples = {bool: True, "bool": True, tuple[str, ...]: ("x",), "tuple[str, ...]": ("x",),
+                   str | None: "high", "str | None": "high"}
+        for field in dataclasses.fields(RunOptions):
+            with self.subTest(field=field.name):
+                self.assertIn(field.type, samples, f"no sample value for {field.name}")
+                options = RunOptions(**{field.name: samples[field.type]})
+                self.assertNotEqual(options, RunOptions())
+                self.assertEqual(self._launched(*options.flags())[1], options)

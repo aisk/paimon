@@ -471,6 +471,27 @@ class RunOptions:
     # --thinking: how hard the model is asked to think, over the config's.
     thinking: str | None = None
 
+    def flags(self) -> tuple[str, ...]:
+        """The command-line switches that launch a process with these options.
+
+        A process relaunched with them, by --web or to resume a session,
+        runs under the same ones. A new field needs its switch here too.
+        """
+        flags: list[str] = []
+        if self.strict:
+            flags.append("--strict")
+        if self.no_web_search:
+            flags.append("--no-web-search")
+        if self.no_code_mode:
+            flags.append("--no-code-mode")
+        if self.no_skills:
+            flags.append("--no-skills")
+        for skill in self.skills:
+            flags += ["--skill", skill]
+        if self.thinking:
+            flags += ["--thinking", self.thinking]
+        return tuple(flags)
+
     # The settings the config and the run both have a say in, combined here
     # and nowhere else.
 

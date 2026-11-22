@@ -1,4 +1,4 @@
-import argparse
+import dataclasses
 import stat
 import sys
 import tempfile
@@ -8,10 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from paimon import cli, herdr
+from paimon import herdr
 from paimon.agent import Agent
 from paimon.app import PaimonApp
-from paimon.config import Config
+from paimon.config import Config, RunOptions
 from paimon.herdr import Report, Reporter
 
 from .support.app import AppTestCase
@@ -175,20 +175,17 @@ class _Recorder:
 
 
 class ResumeFlagsTest(unittest.TestCase):
-    @staticmethod
-    def _flags(**given) -> tuple[str, ...]:
-        args = {"strict": False, "no_web_search": False, "no_code_mode": False, "no_skills": False, "skills": [],
-                "model": "zai:glm-4.7", "mode": "auto"}
-        return cli._resume_flags(argparse.Namespace(**{**args, **given}))
-
     def test_nothing_by_default(self) -> None:
         # Model and mode are the app's to add: they change under it.
-        self.assertEqual(self._flags(), ())
+        self.assertEqual(RunOptions().flags(), ())
 
     def test_options_fixed_at_launch(self) -> None:
+        options = RunOptions(strict=True, no_web_search=True, no_skills=True, skills=("a", "b"),
+                             thinking="high")
         self.assertEqual(
-            self._flags(strict=True, no_web_search=True, no_skills=True, skills=["a", "b"]),
-            ("--strict", "--no-web-search", "--no-skills", "--skill", "a", "--skill", "b"))
+            options.flags(),
+            ("--strict", "--no-web-search", "--no-skills", "--skill", "a", "--skill", "b",
+             "--thinking", "high"))
 
 
 class AppReportingTest(AppTestCase):
@@ -226,6 +223,21 @@ class AppReportingTest(AppTestCase):
             app._model_picked("other-model")
             resume = recorder.reports[-1].resume
             self.assertEqual(resume[resume.index("--model") + 1], "other-model")
+
+    async def test_resume_command_carries_the_run_options_in_effect(self) -> None:
+        recorder = _Recorder()
+        session = self._old_session()
+        agent = Agent.open(session=session, mode="read", config=Config(model="test-model"),
+                           run_options=RunOptions(strict=True, thinking="high"))
+        app = PaimonApp(agent, resumed=True, reporter=recorder, resume_flags=("--textual-debug",))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(recorder.reports[-1].resume[-4:],
+                             ("--strict", "--thinking", "high", "--textual-debug"))
+            # A level picked in the app replaces the one the run was launched with.
+            app._run_options = dataclasses.replace(app._run_options, thinking=None)
+            app._report_herdr()
+            self.assertEqual(recorder.reports[-1].resume[-2:], ("--strict", "--textual-debug"))
 
     async def test_new_session_has_no_resume_command_until_it_has_a_turn(self) -> None:
         recorder = _Recorder()

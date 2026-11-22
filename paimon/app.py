@@ -164,7 +164,8 @@ class PaimonApp(App):
         self._toolset = agent.toolset
         self._model_override = agent.model_override
         # Set only when running in a Herdr pane. ``resume_flags`` are the
-        # launch options a resumed session needs to behave like this one.
+        # launch options a resumed session needs to behave like this one,
+        # beyond the run options, which are read when the report is made.
         self._herdr = reporter
         self._resume_flags = resume_flags
         self._resume_pane: SessionPane | None = None
@@ -331,7 +332,9 @@ class PaimonApp(App):
         # Read now rather than at launch: it follows a model picked in the app.
         if pane.agent.model_name:
             resume += ["--model", pane.agent.model_name]
-        self._herdr.report(herdr.Report(state, session_id, (*resume, *self._resume_flags)))
+        # Likewise: --thinking goes once a level is picked in the app.
+        resume += [*self._run_options.flags(), *self._resume_flags]
+        self._herdr.report(herdr.Report(state, session_id, tuple(resume)))
 
     def focus_pane_widget(self, pane: Pane, widget: Widget) -> None:
         """Transfer keyboard ownership only on the visible, base screen.

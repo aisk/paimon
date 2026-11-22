@@ -20,26 +20,29 @@ from .tools.permissions import MODES
 from .tools.registry import REGISTRY
 
 
-def _resume_flags(args: argparse.Namespace) -> tuple[str, ...]:
-    """The launch options a resumed session needs to behave like this run.
-
-    Only the ones fixed for the life of the process. The mode and the model
-    change while the app runs, so the app adds the ones in effect.
-    """
-    flags: list[str] = []
-    if args.strict:
-        flags.append("--strict")
-    if args.no_web_search:
-        flags.append("--no-web-search")
-    if args.no_code_mode:
-        flags.append("--no-code-mode")
-    if args.no_skills:
-        flags.append("--no-skills")
-    if getattr(args, "textual_debug", False):
-        flags.append("--textual-debug")
-    for skill in args.skills:
-        flags += ["--skill", skill]
-    return tuple(flags)
+def _check_flag_combinations(parser: argparse.ArgumentParser, args: argparse.Namespace,
+                             headless: bool) -> None:
+    """Reject the flags that only apply to the other launch mode, or to each other."""
+    if args.textual_debug and headless:
+        parser.error("--textual-debug only applies to the Textual UI")
+    if args.output_format != "text" and not headless:
+        parser.error("--output-format only applies to --print")
+    for flag, value in (("--timeout", args.timeout), ("--max-tool-calls", args.max_tool_calls)):
+        if value is not None:
+            if not headless:
+                parser.error(f"{flag} only applies to --print")
+            if value < 0 or (flag == "--timeout" and value == 0):
+                parser.error(f"{flag} must be positive")
+    if args.append_system_prompt is not None:
+        if not headless:
+            parser.error("--append-system-prompt only applies to --print")
+        if args.continue_latest or args.resume is not None:
+            parser.error("--append-system-prompt cannot be combined with --continue/--resume: "
+                         "the system prompt is persisted when the session is created")
+        if not args.append_system_prompt.strip():
+            parser.error("--append-system-prompt needs a non-empty value")
+    if headless and args.resume == "":
+        parser.error("--resume needs a session id with --print (the picker needs a terminal)")
 
 
 def main() -> None:
@@ -136,15 +139,18 @@ def main() -> None:
         except ValueError as exc:
             parser.error(str(exc))
 
+    # The one launch switch a relaunch needs that is not a run option.
+    debug_flags = ("--textual-debug",) if args.textual_debug else ()
+
     # Decided before touching stdin so serving the UI never consumes a pipe.
     if args.web:
         if args.prompt is not None:
             parser.error("--web and --print cannot be combined")
         from textual_serve.server import Server
 
-        # The same switches a resumed session is relaunched with, so none of
-        # them can be forgotten here: --skill and --no-skills once were.
-        flags = ["--tui", *_resume_flags(args)]
+        # The same switches a resumed session is relaunched with, all from
+        # RunOptions, so none of them can be forgotten here.
+        flags = ["--tui", *run_options.flags(), *debug_flags]
         if args.mode != "yolo":
             flags += ["--mode", args.mode]
         if args.model:
@@ -160,26 +166,7 @@ def main() -> None:
 
     piped_stdin = not args.tui and not sys.stdin.isatty()
     headless = args.prompt is not None or piped_stdin
-    if args.textual_debug and headless:
-        parser.error("--textual-debug only applies to the Textual UI")
-    if args.output_format != "text" and not headless:
-        parser.error("--output-format only applies to --print")
-    for flag, value in (("--timeout", args.timeout), ("--max-tool-calls", args.max_tool_calls)):
-        if value is not None:
-            if not headless:
-                parser.error(f"{flag} only applies to --print")
-            if value < 0 or (flag == "--timeout" and value == 0):
-                parser.error(f"{flag} must be positive")
-    if args.append_system_prompt is not None:
-        if not headless:
-            parser.error("--append-system-prompt only applies to --print")
-        if args.continue_latest or args.resume is not None:
-            parser.error("--append-system-prompt cannot be combined with --continue/--resume: "
-                         "the system prompt is persisted when the session is created")
-        if not args.append_system_prompt.strip():
-            parser.error("--append-system-prompt needs a non-empty value")
-    if headless and args.resume == "":
-        parser.error("--resume needs a session id with --print (the picker needs a terminal)")
+    _check_flag_combinations(parser, args, headless)
 
     try:
         if args.continue_latest:
@@ -220,7 +207,7 @@ def main() -> None:
     # Not under --tui: there the Herdr pane holds the web server, not the agent.
     reporter = None if args.tui else herdr.Reporter.from_env()
     app = PaimonApp(agent, resumed=resume_session is not None, pick_session=args.resume == "",
-                    reporter=reporter, resume_flags=_resume_flags(args),
+                    reporter=reporter, resume_flags=debug_flags,
                     program_status=not args.tui)
     if debug_bridge is not None:
         debug_bridge.attach(app)
