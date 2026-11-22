@@ -24,7 +24,7 @@ paimon
 uvx paimon
 ```
 
-首次启动会询问 provider 及其 API base 和 key，然后选择模型。列在第一位的 Kilo 无需账号：它的免费模型不用 key 就能用，但背后的模型提供方可能保留提示词和代码并用于训练，且每个 IP 每小时限 200 次请求。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。这样提到的图片（PNG、JPEG、GIF 或 WebP，不超过 5 MB）会作为附件让模型直接看到，agent 也能用读文件工具自己打开图片。
+首次启动会询问 provider 及其 API base 和 key，然后选择模型。列在第一位的 Kilo 无需账号：它的免费模型不用 key 就能用，但背后的模型提供方可能保留提示词和代码并用于训练，且每个 IP 每小时限 200 次请求。之后输入要完成的任务即可。在提示中写 `@path/to/file` 可以把文件提供给 agent。这样提到的图片（PNG、JPEG、GIF 或 WebP，不超过 5 MB）会作为附件让模型直接看到，agent 也能用读文件工具自己打开图片。Ctrl+V 可以粘贴剪贴板里的图片，把图片文件拖进终端也会附上，两者在输入框里都显示为 `[Image #1]`。读剪贴板要求 Paimon 和桌面在同一台机器上：Linux 上需要装有 `wl-paste` 或 `xclip`，WSL 里则通过 PowerShell 读取 Windows 剪贴板。
 
 运行时：`Shift+Tab` 切换 agent 的自主程度（**read** 只读，**auto** 放行工作目录内的编辑，其余操作交给另一次模型调用审批，**yolo** 不做任何检查，也是默认值），`Esc` 打断当前回合，`Ctrl+P` 打开命令面板，`Ctrl+C` 退出。以 `!` 开头的一行不发给模型，而是直接在 shell 里执行，输出 Paimon 也能看到。`!!` 则不告诉它。
 
